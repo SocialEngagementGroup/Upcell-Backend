@@ -21,7 +21,7 @@ function connectToDb() {
 async function disconnectDb() {
   let state = mongoose.connection.readyState;
 
-  if (state || state != 3) {
+  if (state !== 0 && state !== 3) {
     await mongoose.disconnect();
   }
 }

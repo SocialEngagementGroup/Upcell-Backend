@@ -1,10 +1,10 @@
 const route = require("express").Router();
-const { paypalCheckout, capturePaymnet } = require("../controllers/checkout");
+const { paypalCheckout, capturePayment } = require("../controllers/checkout");
 const { validateRequest } = require("../../middleware/validate");
 const { orderSchema } = require("../../middleware/schemas");
 
 route.post("/", validateRequest(orderSchema), paypalCheckout);
 
-route.post("/capture", capturePaymnet);
+route.post("/capture", capturePayment);
 
 module.exports = route;

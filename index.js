@@ -67,15 +67,13 @@ app.get("/available-catagories", async (req, res) => {
 });
 
 // making available catagories
-app.get("/mka", async (req, res) => {
+app.get("/mka", verifyToken, async (req, res, next) => {
   try {
-    // const  ctg = new AvailableCatagories({categories: ["iphone 8 plus", "iphone X","iphone XR","iphone XS","iphone 8"]})
     const ctg = new AvailableCatagories({ categories: [] });
     await ctg.save();
-
     res.status(200).json(ctg);
   } catch (error) {
-    res.status(200).json(error);
+    next(error);
   }
 });
 
@@ -140,11 +138,9 @@ app.get("/allSameParentProducts/:parentId", async (req, res, next) => {
 });
 
 //get products with search terms
-app.get("/searchproducts", async (req, res) => {
-  // simplify search parsing
+app.get("/searchproducts", async (req, res, next) => {
   const query = req.query.search;
 
-  // for multiple values take splited with " " space
   const searchTerms = query.split(" ");
 
   try {
@@ -152,36 +148,13 @@ app.get("/searchproducts", async (req, res) => {
       .filter((word) => !/^iphone$/i.test(word))
       .join(" ");
 
-    // console.log(filterredWord);
-
-    const regex = new RegExp(filterredWord, "i");
+    // Escape special regex characters to prevent ReDoS
+    const escaped = filterredWord.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(escaped, "i");
 
     const result = await SingleVariation.find({
       $or: [{ productName: { $regex: regex } }],
     });
-
-    // const result = [];
-
-    // for (const term of searchTerms) {
-    //   // Check if the term is 'iphone' (case-insensitive) and skip it if true
-    //   if (/^iphone$/i.test(term)) {
-    //     continue;
-    //   }
-
-    //   console.log(term);
-
-    //   const regex = new RegExp(term, "i");
-
-    //   const products = await SingleVariation.find({
-    //     $or: [
-    //       { productName: { $regex: regex } },
-    //       // { storage: { $regex: regex } },
-    //       // { condition: { $regex: regex } },
-    //     ],
-    //   });
-
-    //   result.push(...products);
-    // }
 
     res.status(200).json(result);
   } catch (error) {
@@ -190,7 +163,7 @@ app.get("/searchproducts", async (req, res) => {
 });
 
 //get first n products, ex: 12 with skip: 0
-app.post("/products/:n/:skip", async (req, res) => {
+app.post("/products/:n/:skip", async (req, res, next) => {
   try {
     const n = req.params.n;
     const skip = req.params.skip;
@@ -231,17 +204,12 @@ app.post("/product", verifyToken, validateRequest(productSchema), async (req, re
     const newProduct = new SingleVariation(product);
     await newProduct.save();
 
-    // add the product modelname to available catagories
+    // atomically add modelname to available categories (avoids read-modify-write race)
     const act = await AvailableCatagories.find();
-    const category = act[0]?.categories;
     const idCtg = act[0]._id;
-
-    if (!category.includes(newProduct.productName)) {
-      category.push(newProduct.productName);
-      await AvailableCatagories.findByIdAndUpdate(idCtg, {
-        categories: category,
-      });
-    }
+    await AvailableCatagories.findByIdAndUpdate(idCtg, {
+      $addToSet: { categories: newProduct.productName },
+    });
 
     res.status(200).json(newProduct);
   } catch (error) {
@@ -305,47 +273,33 @@ app.get("/admin-orders/:status", verifyToken, async (req, res, next) => {
 
 //get all orders based on data: today, this week and this month
 
-app.get("/admin-orders-by-data", verifyToken, async (req, res) => {
+app.get("/admin-orders-by-data", verifyToken, async (req, res, next) => {
   try {
-    const orders = {
-      today: [],
-      thisWeek: [],
-      thisMonth: [],
-    };
+    const now = new Date();
 
-    // Get orders created today
-    const thisDay = new Date();
+    const thisDay = new Date(now);
     thisDay.setHours(0, 0, 0, 0);
 
-    const tDay = await Order.find({ createdAt: { $gte: thisDay } });
-
-    // Get orders created this week
-    const thisWeekStart = new Date();
-    thisWeekStart.setDate(thisWeekStart.getDate() - thisWeekStart.getDay()); // Set to start of the week (Sunday)
+    const thisWeekStart = new Date(now);
+    thisWeekStart.setDate(thisWeekStart.getDate() - thisWeekStart.getDay());
     thisWeekStart.setHours(0, 0, 0, 0);
 
-    const tWeek = await Order.find({ createdAt: { $gte: thisWeekStart } });
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
 
-    // Get orders created this month
-    const today = new Date();
-    const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
-    const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+    const [tDay, tWeek, tMonth] = await Promise.all([
+      Order.find({ createdAt: { $gte: thisDay } }),
+      Order.find({ createdAt: { $gte: thisWeekStart } }),
+      Order.find({ createdAt: { $gte: monthStart, $lt: monthEnd } }),
+    ]);
 
-    const tMonth = await Order.find({
-      createdAt: { $gte: monthStart, $lt: monthEnd },
-    });
-
-    orders.today = tDay;
-    orders.thisWeek = tWeek;
-    orders.thisMonth = tMonth;
-
-    res.status(200).json(orders);
+    res.status(200).json({ today: tDay, thisWeek: tWeek, thisMonth: tMonth });
   } catch (error) {
     next(error);
   }
 });
 
-app.post("/update-order-status", verifyToken, async (req, res) => {
+app.post("/update-order-status", verifyToken, async (req, res, next) => {
   const { orderId, status } = req.body;
 
   try {
@@ -371,7 +325,7 @@ app.post("/update-order-status", verifyToken, async (req, res) => {
 });
 
 // get all order of a single client
-app.get("/client-orders/:email", async (req, res, next) => {
+app.get("/client-orders/:email", verifyToken, async (req, res, next) => {
   const email = req.params.email;
 
   try {
@@ -384,32 +338,26 @@ app.get("/client-orders/:email", async (req, res, next) => {
   }
 });
 
-// addrun getting all product once
+// get one representative product per category
 app.get("/all-products-single-variation", async (req, res, next) => {
   try {
     const availCatagoriesData = await AvailableCatagories.find();
     if (!availCatagoriesData.length) return res.status(200).json([]);
     const { categories } = availCatagoriesData[0];
 
-    const products = [];
+    // one query with $in instead of N sequential queries
+    const allMatches = await SingleVariation.find({ productName: { $in: categories } }).lean();
 
-    for (const productName of categories) {
-      const product = await SingleVariation.findOne({ productName }).lean();
-      if (product) {
-        products.push(product);
-      }
-    }
+    // keep one representative per category, preserving category order
+    const products = categories
+      .map((name) => allMatches.find((p) => p.productName === name))
+      .filter(Boolean);
 
     res.status(200).json(products);
   } catch (error) {
     next(error);
   }
 });
-
-// warining sing to unwanted route
-// app.use((req, res) => {
-//     res.status(404).json({ error: "are you hacking ?" })
-// })
 
 // Global Error Handler
 app.use((err, req, res, next) => {

@@ -1,5 +1,4 @@
 const { default: axios } = require("axios");
-const { connectToDb } = require("../../database");
 const Order = require("../../schema/order");
 const SingleVariation = require("../../schema/singleVariation");
 const { Resend } = require("resend");
@@ -103,7 +102,7 @@ exports.generatePaypalAccessToken = async () => {
   return response?.data?.access_token;
 };
 
-exports.capturePaymnet = async (req, res, next) => {
+exports.capturePayment = async (req, res, next) => {
   try {
     const orderId = req.body?.orderID;
 
@@ -130,7 +129,7 @@ exports.capturePaymnet = async (req, res, next) => {
 
     // update order status to paid
     if (responseData?.status === "COMPLETED") {
-      exports.updateOrderPaid(responseData.id);
+      await exports.updateOrderPaid(responseData.id);
     }
 
     return res.json(responseData);
@@ -249,7 +248,7 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
 
   const totalPrice = line_items.reduce(
     (total, currentObj) =>
-      total + currentObj?.price_data?.product_data?.metadata?.totalPaid || 0,
+      total + (currentObj?.price_data?.product_data?.metadata?.totalPaid || 0),
     0
   );
 
