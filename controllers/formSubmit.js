@@ -5,11 +5,10 @@ const { Resend } = require("resend");
 
 const resend = new Resend(process.env.RESEND_KEY);
 
-const wholesaleFormSubmit = async (req, res) => {
+const wholesaleFormSubmit = async (req, res, next) => {
   const addForm = req.body;
 
   try {
-    connectToDb();
     const newAddForm = new AddForm(addForm);
 
     await newAddForm.save();
@@ -34,7 +33,7 @@ const wholesaleFormSubmit = async (req, res) => {
 
     res.status(200).json(newAddForm);
   } catch (error) {
-    res.status(500).json(error);
+    next(error);
   }
 };
 

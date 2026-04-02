@@ -21,7 +21,7 @@ const clientSecret =
     ? process.env.PAYPAL_SECRET
     : process.env.TEST_PAYPAL_SECRET;
 
-exports.paypalCheckout = async (req, res) => {
+exports.paypalCheckout = async (req, res, next) => {
   try {
     const { order, totalPrice } = await exports.makeOrderObjAndTotal({
       req,
@@ -42,8 +42,7 @@ exports.paypalCheckout = async (req, res) => {
       return res.status(400).send("paypal error getting order id");
     }
   } catch (error) {
-    console.log("error in /checkout-customer ***", error);
-    return res.status(500).json(error);
+    next(error);
   }
 };
 
@@ -81,8 +80,8 @@ exports.createPaypalOrder = async (totalprice) => {
             landing_page: "LOGIN",
             shipping_preference: "GET_FROM_FILE",
             user_action: "PAY_NOW",
-            return_url: "https://example.com/returnUrl",
-            cancel_url: "https://example.com/cancelUrl",
+            return_url: process.env.PAYPAL_RETURN_URL || "https://example.com/returnUrl",
+            cancel_url: process.env.PAYPAL_CANCEL_URL || "https://example.com/cancelUrl",
           },
         },
       },
@@ -104,7 +103,7 @@ exports.generatePaypalAccessToken = async () => {
   return response?.data?.access_token;
 };
 
-exports.capturePaymnet = async (req, res) => {
+exports.capturePaymnet = async (req, res, next) => {
   try {
     const orderId = req.body?.orderID;
 
@@ -136,7 +135,7 @@ exports.capturePaymnet = async (req, res) => {
 
     return res.json(responseData);
   } catch (error) {
-    res.status(400).send(error);
+    next(error);
   }
 };
 
@@ -145,7 +144,6 @@ exports.capturePaymnet = async (req, res) => {
 
 // that's why designing order data like this way with line items
 exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
-  connectToDb();
 
   const {
     name,
@@ -259,7 +257,6 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
 };
 
 exports.updateOrderPaid = async (paypalId) => {
-  connectToDb();
 
   const order = await Order.findOne({ paypalId: paypalId });
 

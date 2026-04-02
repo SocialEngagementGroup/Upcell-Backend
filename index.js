@@ -2,9 +2,28 @@ const express = require("express");
 const { Resend } = require("resend");
 const cors = require("cors");
 const indexRouter = require("./routes/index");
+const { verifyToken } = require("./middleware/authMiddleware");
+const { validateRequest } = require("./middleware/validate");
+const { categorySchema, productSchema, orderSchema } = require("./middleware/schemas");
+const { stripeCheckout, stripeWebhook } = require("./controllers/stripe");
 
 const app = express();
-app.use(cors());
+
+const authorizedOrigins = [
+  "http://localhost:5173", // Local dev
+  process.env.FRONTEND_URL, // Production
+];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || authorizedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error("Not allowed by CORS"));
+    }
+  },
+  credentials: true,
+}));
 
 // for firebase-function upload only
 const functions = require("firebase-functions");
@@ -40,7 +59,6 @@ connectToDb();
 
 // when asked for all catagories
 app.get("/catagory", async (req, res) => {
-  connectToDb();
 
   const product = await ParentProduct.find();
   res.json(product);
@@ -48,7 +66,6 @@ app.get("/catagory", async (req, res) => {
 
 //getting availableCatagories
 app.get("/available-catagories", async (req, res) => {
-  connectToDb();
 
   const availableCatagories = await AvailableCatagories.find();
   res.status(200).json(availableCatagories);
@@ -57,7 +74,6 @@ app.get("/available-catagories", async (req, res) => {
 // making available catagories
 app.get("/mka", async (req, res) => {
   try {
-    connectToDb();
     // const  ctg = new AvailableCatagories({categories: ["iphone 8 plus", "iphone X","iphone XR","iphone XS","iphone 8"]})
     const ctg = new AvailableCatagories({ categories: [] });
     await ctg.save();
@@ -69,9 +85,7 @@ app.get("/mka", async (req, res) => {
 });
 
 // when creating parent model
-app.post("/catagory", async (req, res) => {
-  connectToDb();
-
+app.post("/catagory", verifyToken, validateRequest(categorySchema), async (req, res, next) => {
   const { modelName, description, images } = req.body;
 
   try {
@@ -79,28 +93,26 @@ app.post("/catagory", async (req, res) => {
     await newProduct.save();
     res.status(201).json(newProduct);
   } catch (error) {
-    res.status(500).json({ error: "can't find the product" });
+    next(error);
   }
 });
 
 // edit catagory
-app.patch("/catagory/:id", (req, res) => {
-  connectToDb();
+app.patch("/catagory/:id", verifyToken, validateRequest(categorySchema.partial()), (req, res, next) => {
   const id = req.params.id;
   const update = req.body;
 
   ParentProduct.findByIdAndUpdate(id, update)
     .then((result) => res.status(200).json(result))
-    .catch((error) => console.log(error));
+    .catch((error) => next(error));
 });
 
 //delete a catagory
-app.delete("/catagory/:id", (req, res) => {
-  connectToDb();
+app.delete("/catagory/:id", verifyToken, (req, res, next) => {
   const id = req.params.id;
   ParentProduct.findByIdAndDelete(id)
     .then((result) => res.status(200).json(result))
-    .catch((error) => console.log(error));
+    .catch((error) => next(error));
 });
 
 // this part is for product
@@ -112,35 +124,31 @@ app.get("/product", async (req, res) => {
 });
 
 //get single product
-app.get("/product/:id", async (req, res) => {
+app.get("/product/:id", async (req, res, next) => {
   try {
-    connectToDb();
     const id = req.params.id;
-
     const product = await SingleVariation.findById(id);
     res.status(200).json(product);
-  } catch {
-    console.log("error in produt/:id get *** : ", error);
+  } catch (error) {
+    next(error);
   }
 });
 
 // get all products of same parent catagory
-app.get("/allSameParentProducts/:parentId", async (req, res) => {
+app.get("/allSameParentProducts/:parentId", async (req, res, next) => {
   try {
-    connectToDb();
     const id = req.params.parentId;
-
     const product = await SingleVariation.find({ parentCatagory: id });
     res.status(200).json(product);
-  } catch {
-    console.log("error in produt/:id get *** : ", error);
+  } catch (error) {
+    next(error);
   }
 });
 
 //get products with search terms
 app.get("/searchproducts", async (req, res) => {
-  // we get ?search = value , so splid and get only value
-  const query = req.query.search.split("=")[1];
+  // simplify search parsing
+  const query = req.query.search;
 
   // for multiple values take splited with " " space
   const searchTerms = query.split(" ");
@@ -185,15 +193,13 @@ app.get("/searchproducts", async (req, res) => {
 
     res.status(200).json(result);
   } catch (error) {
-    console.log("error in searchProducts", error);
-    res.status(500).json("error in search products");
+    next(error);
   }
 });
 
 //get first n products, ex: 12 with skip: 0
 app.post("/products/:n/:skip", async (req, res) => {
   try {
-    connectToDb();
     const n = req.params.n;
     const skip = req.params.skip;
 
@@ -221,31 +227,25 @@ app.post("/products/:n/:skip", async (req, res) => {
       // console.log("products present : ", products)
     }
     res.json(products);
-  } catch {
-    (error) => console.log("error in get filtered product : ", error);
+  } catch (error) {
+    next(error);
   }
 });
 
 //make a product
-app.post("/product", async (req, res) => {
+app.post("/product", verifyToken, validateRequest(productSchema), async (req, res, next) => {
   try {
-    connectToDb();
-
     let product = req.body;
-
     const newProduct = new SingleVariation(product);
-
     await newProduct.save();
 
     // add the product modelname to available catagories
     const act = await AvailableCatagories.find();
-
     const category = act[0]?.categories;
     const idCtg = act[0]._id;
 
     if (!category.includes(newProduct.productName)) {
       category.push(newProduct.productName);
-
       await AvailableCatagories.findByIdAndUpdate(idCtg, {
         categories: category,
       });
@@ -253,50 +253,44 @@ app.post("/product", async (req, res) => {
 
     res.status(200).json(newProduct);
   } catch (error) {
-    console.log("error in creating new product and category : ", error);
-    res.send(500).json(error);
+    next(error);
   }
 });
 
 // edit product
-app.patch("/product/:id", (req, res) => {
-  connectToDb();
+app.patch("/product/:id", verifyToken, validateRequest(productSchema.partial()), (req, res, next) => {
   const id = req.params.id;
   const update = req.body;
 
   SingleVariation.findByIdAndUpdate(id, update)
     .then((result) => res.status(200).json(result))
-    .catch((error) => console.log(error));
+    .catch((error) => next(error));
 });
 
-app.delete("/product/:id", (req, res) => {
-  connectToDb();
+app.delete("/product/:id", verifyToken, (req, res, next) => {
   const id = req.params.id;
 
   SingleVariation.findByIdAndDelete(id)
     .then((result) => res.status(200).json(result))
-    .catch((error) => console.log("product delete error: ***: ", error));
+    .catch((error) => next(error));
 });
 
 // get cart products form front end
-app.post("/cart", async (req, res) => {
+app.post("/cart", async (req, res, next) => {
   try {
-    connectToDb();
     const { ids } = req.body;
     const products = await SingleVariation.find({ _id: ids });
     res.status(200).json(products);
   } catch (error) {
-    console.log(error);
-    res.status(500).json("error form /cart *** ", error);
+    next(error);
   }
 });
 
 //get all orders based on different catagory
-app.get("/admin-orders/:status", async (req, res) => {
+app.get("/admin-orders/:status", verifyToken, async (req, res, next) => {
   const status = req.params.status;
 
   try {
-    connectToDb();
     let orders = [];
 
     if (status.startsWith("byEmail") || status.startsWith("byOrderId")) {
@@ -313,15 +307,14 @@ app.get("/admin-orders/:status", async (req, res) => {
 
     res.json(orders);
   } catch (error) {
-    console.log("error in /admin-order ***", error);
+    next(error);
   }
 });
 
 //get all orders based on data: today, this week and this month
 
-app.get("/admin-orders-by-data", async (req, res) => {
+app.get("/admin-orders-by-data", verifyToken, async (req, res) => {
   try {
-    connectToDb();
     const orders = {
       today: [],
       thisWeek: [],
@@ -356,14 +349,12 @@ app.get("/admin-orders-by-data", async (req, res) => {
 
     res.status(200).json(orders);
   } catch (error) {
-    console.log("error in /admin-orders-by-data : ", error);
-    res.status(500).json("error from /admin-order-details-by-data *** ", error);
+    next(error);
   }
 });
 
-app.post("/update-order-status", async (req, res) => {
+app.post("/update-order-status", verifyToken, async (req, res) => {
   const { orderId, status } = req.body;
-  connectToDb();
 
   try {
     const order = await Order.findById(orderId);
@@ -383,32 +374,29 @@ app.post("/update-order-status", async (req, res) => {
 
     res.send("success");
   } catch (error) {
-    console.log("error in /update-order-status *** ", error);
+    next(error);
   }
 });
 
 // get all order of a single client
-app.get("/client-orders/:email", async (req, res) => {
+app.get("/client-orders/:email", async (req, res, next) => {
   const email = req.params.email;
 
   try {
-    connectToDb();
-
     const orders = await Order.find({ email, paid: true }).sort({
       updatedAt: -1,
     });
     res.json(orders);
   } catch (error) {
-    console.log("error in client-orders page", error);
-    res.json("Error: counldn't get orders");
+    next(error);
   }
 });
 
 // addrun getting all product once
-app.get("/all-products-single-variation", async (req, res) => {
+app.get("/all-products-single-variation", async (req, res, next) => {
   try {
-    connectToDb();
     const availCatagoriesData = await AvailableCatagories.find();
+    if (!availCatagoriesData.length) return res.status(200).json([]);
     const { categories } = availCatagoriesData[0];
 
     const products = [];
@@ -422,7 +410,7 @@ app.get("/all-products-single-variation", async (req, res) => {
 
     res.status(200).json(products);
   } catch (error) {
-    res.status(500).json(error);
+    next(error);
   }
 });
 
@@ -431,10 +419,26 @@ app.get("/all-products-single-variation", async (req, res) => {
 //     res.status(404).json({ error: "are you hacking ?" })
 // })
 
-const port = process.env.PORT || 5001;
+// Global Error Handler
+app.use((err, req, res, next) => {
+  console.error("Global Error Handler:", err);
+  const status = err.status || 500;
+  res.status(status).json({
+    error: err.message || "Internal Server Error",
+    details: err.details || null,
+  });
+});
+
+const port = process.env.PORT || 5000;
 app.listen(port, () => {
   console.log("server is running on port, ", port);
 });
+
+// stripe checkout
+app.post("/checkout-stripe", validateRequest(orderSchema), stripeCheckout);
+
+// stripe webhook - needs raw body
+app.post("/stripe-webhook", stripeWebhook);
 
 // this part is for firebase
 exports.app = functions.https.onRequest(app);

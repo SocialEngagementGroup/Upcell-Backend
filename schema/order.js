@@ -26,11 +26,13 @@ const OrderSchema = new Schema(
     status: { type: String, enum: statusEnum },
     paidWith: { type: String, enum: paidWithEnum },
     paypalId: String,
+    stripeSessionId: String,
   },
   { timestamps: true }
 );
 
 OrderSchema.index({ paypalId: 1 });
+OrderSchema.index({ stripeSessionId: 1 });
 
 const Order = models?.Order || model("Order", OrderSchema);
 
