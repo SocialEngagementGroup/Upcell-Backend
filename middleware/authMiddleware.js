@@ -20,7 +20,7 @@ const verifyToken = async (req, res, next) => {
     req.user = decodedToken;
 
     // Check if user is an admin
-    const admins = (process.env.VITE_ADMINS || "").split(",");
+    const admins = (process.env.ADMIN_EMAILS || "").split(",");
     if (!admins.includes(decodedToken.email)) {
       return res.status(403).json({ error: "Forbidden: Not an admin" });
     }

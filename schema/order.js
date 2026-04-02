@@ -9,7 +9,7 @@ const statusEnum = [
   "payment failed",
 ];
 const paidWithEnum = ["Stripe", "Paypal"];
-const shippingEnum = ["first-class", "priority", "express"];
+const shippingEnum = ["standard", "priority", "express"];
 
 const OrderSchema = new Schema(
   {

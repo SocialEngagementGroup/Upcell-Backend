@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const express = require("express");
 const { Resend } = require("resend");
 const cors = require("cors");
@@ -32,17 +34,10 @@ const { connectToDb, disconnectDb } = require("./database");
 const ParentProduct = require("./schema/parentProduct");
 const SingleVariation = require("./schema/singleVariation");
 const Order = require("./schema/order");
-const { connect, model } = require("mongoose");
 const AvailableCatagories = require("./schema/availableCatagories");
-const { error } = require("firebase-functions/logger");
 const AddForm = require("./schema/addForm");
 
-const stripe = require("stripe")(process.env.TEST_SECRET);
-const endpointSecret = process.env.TEST_ENDPOINTSECRET;
-
 const resend = new Resend(process.env.RESEND_KEY);
-
-require("dotenv").config();
 
 // using middle ware to access raw body
 app.use(
@@ -118,7 +113,6 @@ app.delete("/catagory/:id", verifyToken, (req, res, next) => {
 // this part is for product
 // get all products
 app.get("/product", async (req, res) => {
-  connectToDb();
   const allProduct = await SingleVariation.find();
   res.json(allProduct);
 });
@@ -154,8 +148,6 @@ app.get("/searchproducts", async (req, res) => {
   const searchTerms = query.split(" ");
 
   try {
-    connectToDb();
-
     const filterredWord = searchTerms
       .filter((word) => !/^iphone$/i.test(word))
       .join(" ");
