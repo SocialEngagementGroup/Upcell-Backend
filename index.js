@@ -27,9 +27,6 @@ app.use(cors({
   credentials: true,
 }));
 
-// for firebase-function upload only
-const functions = require("firebase-functions");
-
 const { connectToDb, disconnectDb } = require("./database");
 const ParentProduct = require("./schema/parentProduct");
 const SingleVariation = require("./schema/singleVariation");
@@ -369,6 +366,7 @@ app.use((err, req, res, next) => {
   });
 });
 
+
 const port = process.env.PORT || 5000;
 app.listen(port, () => {
   console.log("server is running on port, ", port);
@@ -379,6 +377,3 @@ app.post("/checkout-stripe", validateRequest(orderSchema), stripeCheckout);
 
 // stripe webhook - needs raw body
 app.post("/stripe-webhook", stripeWebhook);
-
-// this part is for firebase
-exports.app = functions.https.onRequest(app);
