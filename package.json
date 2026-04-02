@@ -11,7 +11,8 @@
     "shell": "firebase functions:shell",
     "deploy": "firebase deploy --only functions",
     "logs": "firebase functions:log",
-    "dev": "firebase emulators:start"
+    "dev": "firebase emulators:start",
+    "check-db": "node check-db.js"
   },
   "engines": {
     "node": "18"
