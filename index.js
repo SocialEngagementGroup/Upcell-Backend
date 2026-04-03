@@ -6,7 +6,7 @@ const cors = require("cors");
 const indexRouter = require("./routes/index");
 const { verifyToken } = require("./middleware/authMiddleware");
 const { validateRequest } = require("./middleware/validate");
-const { categorySchema, productCreateSchema, productSchema, orderSchema } = require("./middleware/schemas");
+const { categorySchema, productCreateSchema, productSchema, orderSchema, tradeInRequestSchema, newsletterSubscriberSchema, contactSubmissionSchema } = require("./middleware/schemas");
 const { stripeCheckout, stripeWebhook } = require("./controllers/stripe");
 const { makeOrderObjAndTotal } = require("./checkout-customer/controllers/checkout");
 
@@ -36,6 +36,9 @@ const AvailableCatagories = require("./schema/availableCatagories");
 const AddForm = require("./schema/addForm");
 const ShopCategory = require("./schema/shopCategory");
 const { SHOP_CATEGORY_DEFAULTS } = require("./constants/shopCategoryDefaults");
+const { TradeInRequest, tradeInStatusEnum } = require("./schema/tradeInRequest");
+const NewsletterSubscriber = require("./schema/newsletterSubscriber");
+const ContactSubmission = require("./schema/contactSubmission");
 
 const resend = new Resend(process.env.RESEND_KEY);
 
@@ -505,6 +508,180 @@ app.post("/orders", validateRequest(orderSchema), async (req, res, next) => {
 
     const newOrder = await Order.create(order);
     res.status(201).json(newOrder);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/trade-in-requests", validateRequest(tradeInRequestSchema), async (req, res, next) => {
+  try {
+    const request = await TradeInRequest.create(req.body);
+    res.status(201).json(request);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/admin-trade-in-requests/:status", verifyToken, async (req, res, next) => {
+  const status = req.params.status;
+
+  try {
+    let requests = [];
+
+    if (status.startsWith("byEmail:")) {
+      const email = status.replace("byEmail:", "");
+      requests = await TradeInRequest.find({ email }).sort({ updatedAt: -1 });
+    } else if (status.startsWith("byRequestId:")) {
+      const id = status.replace("byRequestId:", "");
+      const request = await TradeInRequest.findById(id);
+      requests = request ? [request] : [];
+    } else if (tradeInStatusEnum.includes(status)) {
+      requests = await TradeInRequest.find({ status }).sort({ updatedAt: -1 });
+    } else {
+      requests = await TradeInRequest.find().sort({ updatedAt: -1 });
+    }
+
+    res.status(200).json(requests);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/trade-in-requests/:id/status", verifyToken, async (req, res, next) => {
+  const { status } = req.body;
+
+  try {
+    if (!tradeInStatusEnum.includes(status)) {
+      return res.status(400).json({ error: "Invalid trade-in status" });
+    }
+
+    const updated = await TradeInRequest.findByIdAndUpdate(
+      req.params.id,
+      { status },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ error: "Trade-in request not found" });
+    }
+
+    res.status(200).json(updated);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/newsletter-subscribers", validateRequest(newsletterSubscriberSchema), async (req, res, next) => {
+  try {
+    const email = req.body.email.trim().toLowerCase();
+    const source = req.body.source || "footer";
+
+    const subscriber = await NewsletterSubscriber.findOneAndUpdate(
+      { email },
+      { email, source, status: "Active" },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    res.status(201).json(subscriber);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/admin-newsletter-subscribers/:filter", verifyToken, async (req, res, next) => {
+  const filter = req.params.filter;
+
+  try {
+    let subscribers = [];
+
+    if (filter.startsWith("byEmail:")) {
+      const email = filter.replace("byEmail:", "");
+      subscribers = await NewsletterSubscriber.find({ email: { $regex: new RegExp(email, "i") } }).sort({ createdAt: -1 });
+    } else if (filter === "all") {
+      subscribers = await NewsletterSubscriber.find().sort({ createdAt: -1 });
+    } else {
+      subscribers = await NewsletterSubscriber.find({ status: filter }).sort({ createdAt: -1 });
+    }
+
+    res.status(200).json(subscribers);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/newsletter-subscribers/:id/status", verifyToken, async (req, res, next) => {
+  const { status } = req.body;
+
+  try {
+    if (!["Active", "Unsubscribed"].includes(status)) {
+      return res.status(400).json({ error: "Invalid newsletter status" });
+    }
+
+    const subscriber = await NewsletterSubscriber.findByIdAndUpdate(
+      req.params.id,
+      { status },
+      { new: true }
+    );
+
+    if (!subscriber) {
+      return res.status(404).json({ error: "Subscriber not found" });
+    }
+
+    res.status(200).json(subscriber);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/contact-submissions", validateRequest(contactSubmissionSchema), async (req, res, next) => {
+  try {
+    const submission = await ContactSubmission.create(req.body);
+    res.status(201).json(submission);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/admin-contact-submissions/:filter", verifyToken, async (req, res, next) => {
+  const filter = req.params.filter;
+
+  try {
+    let submissions = [];
+
+    if (filter.startsWith("byEmail:")) {
+      const email = filter.replace("byEmail:", "");
+      submissions = await ContactSubmission.find({ email: { $regex: new RegExp(email, "i") } }).sort({ createdAt: -1 });
+    } else if (filter === "all") {
+      submissions = await ContactSubmission.find().sort({ createdAt: -1 });
+    } else {
+      submissions = await ContactSubmission.find({ status: filter }).sort({ createdAt: -1 });
+    }
+
+    res.status(200).json(submissions);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/contact-submissions/:id/status", verifyToken, async (req, res, next) => {
+  const { status } = req.body;
+
+  try {
+    if (!["New", "Resolved"].includes(status)) {
+      return res.status(400).json({ error: "Invalid contact submission status" });
+    }
+
+    const updated = await ContactSubmission.findByIdAndUpdate(
+      req.params.id,
+      { status },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ error: "Contact submission not found" });
+    }
+
+    res.status(200).json(updated);
   } catch (error) {
     next(error);
   }

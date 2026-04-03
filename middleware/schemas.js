@@ -76,9 +76,38 @@ const orderSchema = z.object({
   paidWith: z.enum(["Stripe", "Paypal", "Card", "Manual"]).optional(),
 });
 
+const tradeInRequestSchema = z.object({
+  device: z.string().min(1, "Device is required"),
+  model: z.string().min(1, "Model is required"),
+  modelTitle: z.string().min(1, "Model title is required"),
+  carrier: z.string().optional(),
+  carrierTitle: z.string().optional(),
+  storage: z.string().min(1, "Storage is required"),
+  estimate: numericField.refine((value) => value >= 0, "Estimate must be zero or more"),
+  answers: z.record(z.any()).optional().default({}),
+  name: z.string().min(1, "Name is required"),
+  email: z.string().email("Invalid email address"),
+  phone: z.string().min(1, "Phone is required"),
+});
+
+const newsletterSubscriberSchema = z.object({
+  email: z.string().email("Invalid email address"),
+  source: z.string().optional(),
+});
+
+const contactSubmissionSchema = z.object({
+  name: z.string().min(1, "Name is required"),
+  email: z.string().email("Invalid email address"),
+  subject: z.string().min(1, "Subject is required"),
+  message: z.string().min(1, "Message is required"),
+});
+
 module.exports = {
   categorySchema,
   productCreateSchema,
   productSchema,
   orderSchema,
+  tradeInRequestSchema,
+  newsletterSubscriberSchema,
+  contactSubmissionSchema,
 };
