@@ -84,7 +84,7 @@ const tradeInRequestSchema = z.object({
   carrierTitle: z.string().optional(),
   storage: z.string().min(1, "Storage is required"),
   estimate: numericField.refine((value) => value >= 0, "Estimate must be zero or more"),
-  answers: z.record(z.any()).optional().default({}),
+  answers: z.record(z.string(), z.any()).optional().default({}),
   name: z.string().min(1, "Name is required"),
   email: z.string().email("Invalid email address"),
   phone: z.string().min(1, "Phone is required"),
