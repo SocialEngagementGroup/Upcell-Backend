@@ -192,9 +192,9 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
       quantity: 1,
       price_data: {
         currency: "USD",
-        unit_amount: 10 * 100,
+        unit_amount: 10.5 * 100,
         product_data: {
-          name: "priority shipping",
+          name: "Priority Shipping",
           metadata: {
             totalPaid: 10.5,
           },
@@ -206,11 +206,11 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
       quantity: 1,
       price_data: {
         currency: "USD",
-        unit_amount: 30 * 100,
+        unit_amount: 25.0 * 100,
         product_data: {
-          name: "express shipping",
+          name: "Express Shipping",
           metadata: {
-            totalPaid: 30,
+            totalPaid: 25.0,
           },
         },
       },
@@ -222,7 +222,7 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
         currency: "USD",
         unit_amount: 0 * 100,
         product_data: {
-          name: "First Class shipping",
+          name: "Standard Shipping",
           metadata: {
             totalPaid: 0,
           },
@@ -248,7 +248,7 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
 
   const totalPrice = line_items.reduce(
     (total, currentObj) =>
-      total + (currentObj?.price_data?.product_data?.metadata?.totalPaid || 0),
+      total + (currentObj?.price_data?.product_data?.metadata?.totalPaid ?? 0),
     0
   );
 
