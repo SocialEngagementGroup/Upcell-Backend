@@ -1,12 +1,13 @@
 require("dotenv").config();
 
 const express = require("express");
+const mongoose = require("mongoose");
 const { Resend } = require("resend");
 const cors = require("cors");
 const indexRouter = require("./routes/index");
 const { verifyToken } = require("./middleware/authMiddleware");
 const { validateRequest } = require("./middleware/validate");
-const { categorySchema, productCreateSchema, productSchema, orderSchema, tradeInRequestSchema, newsletterSubscriberSchema, contactSubmissionSchema } = require("./middleware/schemas");
+const { categorySchema, productCreateSchema, productSchema, orderSchema, tradeInRequestSchema, newsletterSubscriberSchema, contactSubmissionSchema, analyticsEventSchema } = require("./middleware/schemas");
 const { stripeCheckout, stripeWebhook } = require("./controllers/stripe");
 const { makeOrderObjAndTotal } = require("./checkout-customer/controllers/checkout");
 
@@ -39,8 +40,11 @@ const { SHOP_CATEGORY_DEFAULTS } = require("./constants/shopCategoryDefaults");
 const { TradeInRequest, tradeInStatusEnum } = require("./schema/tradeInRequest");
 const NewsletterSubscriber = require("./schema/newsletterSubscriber");
 const ContactSubmission = require("./schema/contactSubmission");
+const AnalyticsEvent = require("./schema/analyticsEvent");
 
 const resend = new Resend(process.env.RESEND_KEY);
+const ADMIN_LIST_DEFAULT_LIMIT = 10;
+const ADMIN_LIST_MAX_LIMIT = 50;
 
 // using middle ware to access raw body
 app.use(
@@ -54,6 +58,50 @@ app.use(
 app.use(indexRouter);
 
 connectToDb();
+
+function getAdminListPagination(req) {
+  const rawPage = Number.parseInt(req.query.page, 10);
+  const rawLimit = Number.parseInt(req.query.limit, 10);
+  const page = Number.isFinite(rawPage) && rawPage > 0 ? rawPage : 1;
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0
+    ? Math.min(rawLimit, ADMIN_LIST_MAX_LIMIT)
+    : ADMIN_LIST_DEFAULT_LIMIT;
+
+  return {
+    page,
+    limit,
+    skip: (page - 1) * limit,
+  };
+}
+
+function emptyPaginatedResponse({ res, page, limit }) {
+  return res.status(200).json({
+    items: [],
+    pagination: {
+      page,
+      limit,
+      totalItems: 0,
+      totalPages: 1,
+    },
+  });
+}
+
+async function sendPaginatedResults({ res, model, query, sort, page, limit, skip }) {
+  const [items, totalItems] = await Promise.all([
+    model.find(query).sort(sort).skip(skip).limit(limit),
+    model.countDocuments(query),
+  ]);
+
+  res.status(200).json({
+    items,
+    pagination: {
+      page,
+      limit,
+      totalItems,
+      totalPages: Math.max(1, Math.ceil(totalItems / limit)),
+    },
+  });
+}
 
 async function ensureShopCategories() {
   const existing = await ShopCategory.find().lean();
@@ -410,23 +458,47 @@ app.post("/cart", async (req, res, next) => {
 //get all orders based on different catagory
 app.get("/admin-orders/:status", verifyToken, async (req, res, next) => {
   const status = req.params.status;
+  const { page, limit, skip } = getAdminListPagination(req);
 
   try {
-    let orders = [];
-
     if (status.startsWith("byEmail") || status.startsWith("byOrderId")) {
       const [method, value] = status.split(":");
       if (method === "byEmail") {
-        orders = await Order.find({ email: value }).sort({ updatedAt: -1 });
+        return sendPaginatedResults({
+          res,
+          model: Order,
+          query: { email: value },
+          sort: { updatedAt: -1 },
+          page,
+          limit,
+          skip,
+        });
       } else {
-        orders = [await Order.findById(value)];
+        if (!value || !mongoose.Types.ObjectId.isValid(value)) {
+          return emptyPaginatedResponse({ res, page, limit });
+        }
+
+        return sendPaginatedResults({
+          res,
+          model: Order,
+          query: { _id: value },
+          sort: { updatedAt: -1 },
+          page,
+          limit,
+          skip,
+        });
       }
-    } else {
-      // get order from latest to old
-      orders = await Order.find({ status }).sort({ updatedAt: -1 });
     }
 
-    res.json(orders);
+    return sendPaginatedResults({
+      res,
+      model: Order,
+      query: { status },
+      sort: { updatedAt: -1 },
+      page,
+      limit,
+      skip,
+    });
   } catch (error) {
     next(error);
   }
@@ -524,24 +596,56 @@ app.post("/trade-in-requests", validateRequest(tradeInRequestSchema), async (req
 
 app.get("/admin-trade-in-requests/:status", verifyToken, async (req, res, next) => {
   const status = req.params.status;
+  const { page, limit, skip } = getAdminListPagination(req);
 
   try {
-    let requests = [];
-
     if (status.startsWith("byEmail:")) {
       const email = status.replace("byEmail:", "");
-      requests = await TradeInRequest.find({ email }).sort({ updatedAt: -1 });
+      return sendPaginatedResults({
+        res,
+        model: TradeInRequest,
+        query: { email },
+        sort: { updatedAt: -1 },
+        page,
+        limit,
+        skip,
+      });
     } else if (status.startsWith("byRequestId:")) {
       const id = status.replace("byRequestId:", "");
-      const request = await TradeInRequest.findById(id);
-      requests = request ? [request] : [];
+      if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+        return emptyPaginatedResponse({ res, page, limit });
+      }
+
+      return sendPaginatedResults({
+        res,
+        model: TradeInRequest,
+        query: { _id: id },
+        sort: { updatedAt: -1 },
+        page,
+        limit,
+        skip,
+      });
     } else if (tradeInStatusEnum.includes(status)) {
-      requests = await TradeInRequest.find({ status }).sort({ updatedAt: -1 });
-    } else {
-      requests = await TradeInRequest.find().sort({ updatedAt: -1 });
+      return sendPaginatedResults({
+        res,
+        model: TradeInRequest,
+        query: { status },
+        sort: { updatedAt: -1 },
+        page,
+        limit,
+        skip,
+      });
     }
 
-    res.status(200).json(requests);
+    return sendPaginatedResults({
+      res,
+      model: TradeInRequest,
+      query: {},
+      sort: { updatedAt: -1 },
+      page,
+      limit,
+      skip,
+    });
   } catch (error) {
     next(error);
   }
@@ -571,6 +675,20 @@ app.patch("/trade-in-requests/:id/status", verifyToken, async (req, res, next) =
   }
 });
 
+app.delete("/trade-in-requests/:id", verifyToken, async (req, res, next) => {
+  try {
+    const deleted = await TradeInRequest.findByIdAndDelete(req.params.id);
+
+    if (!deleted) {
+      return res.status(404).json({ error: "Trade-in request not found" });
+    }
+
+    res.status(200).json(deleted);
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/newsletter-subscribers", validateRequest(newsletterSubscriberSchema), async (req, res, next) => {
   try {
     const email = req.body.email.trim().toLowerCase();
@@ -590,20 +708,41 @@ app.post("/newsletter-subscribers", validateRequest(newsletterSubscriberSchema),
 
 app.get("/admin-newsletter-subscribers/:filter", verifyToken, async (req, res, next) => {
   const filter = req.params.filter;
+  const { page, limit, skip } = getAdminListPagination(req);
 
   try {
-    let subscribers = [];
-
     if (filter.startsWith("byEmail:")) {
       const email = filter.replace("byEmail:", "");
-      subscribers = await NewsletterSubscriber.find({ email: { $regex: new RegExp(email, "i") } }).sort({ createdAt: -1 });
+      return sendPaginatedResults({
+        res,
+        model: NewsletterSubscriber,
+        query: { email: { $regex: new RegExp(email, "i") } },
+        sort: { createdAt: -1 },
+        page,
+        limit,
+        skip,
+      });
     } else if (filter === "all") {
-      subscribers = await NewsletterSubscriber.find().sort({ createdAt: -1 });
-    } else {
-      subscribers = await NewsletterSubscriber.find({ status: filter }).sort({ createdAt: -1 });
+      return sendPaginatedResults({
+        res,
+        model: NewsletterSubscriber,
+        query: {},
+        sort: { createdAt: -1 },
+        page,
+        limit,
+        skip,
+      });
     }
 
-    res.status(200).json(subscribers);
+    return sendPaginatedResults({
+      res,
+      model: NewsletterSubscriber,
+      query: { status: filter },
+      sort: { createdAt: -1 },
+      page,
+      limit,
+      skip,
+    });
   } catch (error) {
     next(error);
   }
@@ -633,6 +772,20 @@ app.patch("/newsletter-subscribers/:id/status", verifyToken, async (req, res, ne
   }
 });
 
+app.delete("/newsletter-subscribers/:id", verifyToken, async (req, res, next) => {
+  try {
+    const deleted = await NewsletterSubscriber.findByIdAndDelete(req.params.id);
+
+    if (!deleted) {
+      return res.status(404).json({ error: "Subscriber not found" });
+    }
+
+    res.status(200).json(deleted);
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/contact-submissions", validateRequest(contactSubmissionSchema), async (req, res, next) => {
   try {
     const submission = await ContactSubmission.create(req.body);
@@ -642,22 +795,128 @@ app.post("/contact-submissions", validateRequest(contactSubmissionSchema), async
   }
 });
 
-app.get("/admin-contact-submissions/:filter", verifyToken, async (req, res, next) => {
-  const filter = req.params.filter;
+app.post("/analytics-events", validateRequest(analyticsEventSchema), async (req, res, next) => {
+  try {
+    const event = await AnalyticsEvent.create(req.body);
+    res.status(201).json({ _id: event._id });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/admin-analytics-summary", verifyToken, async (req, res, next) => {
+  const rawDays = Number.parseInt(req.query.days, 10);
+  const days = Number.isFinite(rawDays) && rawDays > 0 ? Math.min(rawDays, 90) : 30;
+  const since = new Date(Date.now() - (days * 24 * 60 * 60 * 1000));
+  const timeQuery = { createdAt: { $gte: since } };
 
   try {
-    let submissions = [];
+    const [
+      successfulSubmits,
+      failedSubmits,
+      formDropoffs,
+      adminApiErrors,
+      topFailedForms,
+      topDropoffForms,
+      recentEvents,
+    ] = await Promise.all([
+      AnalyticsEvent.countDocuments({ ...timeQuery, category: "form_submit", status: "success" }),
+      AnalyticsEvent.countDocuments({ ...timeQuery, category: "form_submit", status: "failed" }),
+      AnalyticsEvent.countDocuments({ ...timeQuery, category: "form_dropoff" }),
+      AnalyticsEvent.countDocuments({ ...timeQuery, category: "admin_api_error" }),
+      AnalyticsEvent.aggregate([
+        { $match: { ...timeQuery, category: "form_submit", status: "failed" } },
+        { $group: { _id: "$formName", count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+        { $limit: 5 },
+      ]),
+      AnalyticsEvent.aggregate([
+        { $match: { ...timeQuery, category: "form_dropoff" } },
+        { $group: { _id: "$formName", count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+        { $limit: 5 },
+      ]),
+      AnalyticsEvent.find(timeQuery).sort({ createdAt: -1 }).limit(8),
+    ]);
 
+    res.status(200).json({
+      windowDays: days,
+      cards: {
+        successfulSubmits,
+        failedSubmits,
+        formDropoffs,
+        adminApiErrors,
+      },
+      topFailedForms,
+      topDropoffForms,
+      recentEvents,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/admin-analytics-events", verifyToken, async (req, res, next) => {
+  const { page, limit, skip } = getAdminListPagination(req);
+  const { category, status, formName } = req.query;
+  const query = {};
+
+  if (category && category !== "all") query.category = category;
+  if (status && status !== "all") query.status = status;
+  if (formName) query.formName = formName;
+
+  try {
+    return sendPaginatedResults({
+      res,
+      model: AnalyticsEvent,
+      query,
+      sort: { createdAt: -1 },
+      page,
+      limit,
+      skip,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/admin-contact-submissions/:filter", verifyToken, async (req, res, next) => {
+  const filter = req.params.filter;
+  const { page, limit, skip } = getAdminListPagination(req);
+
+  try {
     if (filter.startsWith("byEmail:")) {
       const email = filter.replace("byEmail:", "");
-      submissions = await ContactSubmission.find({ email: { $regex: new RegExp(email, "i") } }).sort({ createdAt: -1 });
+      return sendPaginatedResults({
+        res,
+        model: ContactSubmission,
+        query: { email: { $regex: new RegExp(email, "i") } },
+        sort: { createdAt: -1 },
+        page,
+        limit,
+        skip,
+      });
     } else if (filter === "all") {
-      submissions = await ContactSubmission.find().sort({ createdAt: -1 });
-    } else {
-      submissions = await ContactSubmission.find({ status: filter }).sort({ createdAt: -1 });
+      return sendPaginatedResults({
+        res,
+        model: ContactSubmission,
+        query: {},
+        sort: { createdAt: -1 },
+        page,
+        limit,
+        skip,
+      });
     }
 
-    res.status(200).json(submissions);
+    return sendPaginatedResults({
+      res,
+      model: ContactSubmission,
+      query: { status: filter },
+      sort: { createdAt: -1 },
+      page,
+      limit,
+      skip,
+    });
   } catch (error) {
     next(error);
   }
@@ -682,6 +941,20 @@ app.patch("/contact-submissions/:id/status", verifyToken, async (req, res, next)
     }
 
     res.status(200).json(updated);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/contact-submissions/:id", verifyToken, async (req, res, next) => {
+  try {
+    const deleted = await ContactSubmission.findByIdAndDelete(req.params.id);
+
+    if (!deleted) {
+      return res.status(404).json({ error: "Contact submission not found" });
+    }
+
+    res.status(200).json(deleted);
   } catch (error) {
     next(error);
   }
