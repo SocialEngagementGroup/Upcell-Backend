@@ -6,7 +6,7 @@ const cors = require("cors");
 const indexRouter = require("./routes/index");
 const { verifyToken } = require("./middleware/authMiddleware");
 const { validateRequest } = require("./middleware/validate");
-const { categorySchema, productSchema, orderSchema } = require("./middleware/schemas");
+const { categorySchema, productCreateSchema, productSchema, orderSchema } = require("./middleware/schemas");
 const { stripeCheckout, stripeWebhook } = require("./controllers/stripe");
 const { makeOrderObjAndTotal } = require("./checkout-customer/controllers/checkout");
 
@@ -267,18 +267,96 @@ app.post("/products/:n/:skip", async (req, res, next) => {
 });
 
 //make a product
-app.post("/product", verifyToken, validateRequest(productSchema), async (req, res, next) => {
+app.post("/product", verifyToken, validateRequest(productCreateSchema), async (req, res, next) => {
   try {
-    let product = req.body;
+    if (Array.isArray(req.body.variants)) {
+      const {
+        existingParentId,
+        productName,
+        categoryName,
+        categoryId,
+        image,
+        images,
+        reviewScore,
+        peopleReviewed,
+        condition,
+        variants,
+      } = req.body;
+
+      const parentImages = Array.isArray(images) && images.length
+        ? images
+        : (image ? [{ url: image }] : []);
+      const primaryImage = parentImages[0]?.url || image;
+      let parent = null;
+      let wasExistingParent = false;
+
+      if (existingParentId) {
+        parent = await ParentProduct.findById(existingParentId);
+      }
+      if (!parent) {
+        parent = await ParentProduct.findOne({ modelName: productName });
+      }
+
+      if (parent) {
+        wasExistingParent = true;
+        parent.modelName = productName;
+        parent.categoryName = categoryName;
+        parent.categoryId = categoryId || undefined;
+        parent.images = parentImages;
+        await parent.save();
+        await SingleVariation.deleteMany({ parentCatagory: parent._id });
+      } else {
+        parent = await ParentProduct.create({
+          modelName: productName,
+          categoryName,
+          categoryId: categoryId || undefined,
+          images: parentImages,
+        });
+      }
+
+      const createdVariants = await SingleVariation.insertMany(
+        variants.map((variant) => ({
+          parentCatagory: parent._id,
+          productName,
+          categoryName,
+          categoryId: categoryId || undefined,
+          storage: variant.storage,
+          color: variant.color,
+          price: variant.price,
+          discountPrice: variant.discountPrice,
+          originalPrice: variant.originalPrice,
+          reviewScore,
+          peopleReviewed,
+          condition,
+          image: primaryImage,
+          outOfStock: Boolean(variant.outOfStock),
+        }))
+      );
+
+      const act = await AvailableCatagories.find();
+      if (act[0]?._id) {
+        await AvailableCatagories.findByIdAndUpdate(act[0]._id, {
+          $addToSet: { categories: productName },
+        });
+      }
+
+      return res.status(wasExistingParent ? 200 : 201).json({
+        parent,
+        variants: createdVariants,
+      });
+    }
+
+    const product = req.body;
     const newProduct = new SingleVariation(product);
     await newProduct.save();
 
-    // atomically add modelname to available categories (avoids read-modify-write race)
     const act = await AvailableCatagories.find();
-    const idCtg = act[0]._id;
-    await AvailableCatagories.findByIdAndUpdate(idCtg, {
-      $addToSet: { categories: newProduct.productName },
-    });
+    const idCtg = act[0]?._id;
+    if (idCtg) {
+      await AvailableCatagories.findByIdAndUpdate(idCtg, {
+        $addToSet: { categories: newProduct.productName },
+      });
+    }
 
     res.status(200).json(newProduct);
   } catch (error) {
@@ -302,6 +380,17 @@ app.delete("/product/:id", verifyToken, (req, res, next) => {
   SingleVariation.findByIdAndDelete(id)
     .then((result) => res.status(200).json(result))
     .catch((error) => next(error));
+});
+
+app.delete("/product-family/:parentId", verifyToken, async (req, res, next) => {
+  try {
+    const parentId = req.params.parentId;
+    await SingleVariation.deleteMany({ parentCatagory: parentId });
+    const deletedParent = await ParentProduct.findByIdAndDelete(parentId);
+    res.status(200).json(deletedParent);
+  } catch (error) {
+    next(error);
+  }
 });
 
 // get cart products form front end
