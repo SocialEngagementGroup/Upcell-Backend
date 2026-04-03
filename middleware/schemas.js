@@ -6,7 +6,7 @@ const numericField = z.preprocess((value) => {
 }, z.number().nonnegative());
 
 const categorySchema = z.object({
-  modelName: z.string().min(1, "Model name is required"),
+  modelName: z.string().min(1, "Category name is required"),
   description: z.string().optional(),
   images: z.array(z.any()).optional().default([]),
 });

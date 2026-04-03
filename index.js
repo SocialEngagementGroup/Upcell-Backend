@@ -34,6 +34,8 @@ const SingleVariation = require("./schema/singleVariation");
 const Order = require("./schema/order");
 const AvailableCatagories = require("./schema/availableCatagories");
 const AddForm = require("./schema/addForm");
+const ShopCategory = require("./schema/shopCategory");
+const { SHOP_CATEGORY_DEFAULTS } = require("./constants/shopCategoryDefaults");
 
 const resend = new Resend(process.env.RESEND_KEY);
 
@@ -50,18 +52,44 @@ app.use(indexRouter);
 
 connectToDb();
 
-// when asked for all catagories
-app.get("/catagory", async (req, res) => {
+async function ensureShopCategories() {
+  const existing = await ShopCategory.find().lean();
+  const existingNames = new Set(existing.map((item) => item.modelName));
+  const missing = SHOP_CATEGORY_DEFAULTS.filter((item) => !existingNames.has(item.modelName));
 
-  const product = await ParentProduct.find();
-  res.json(product);
+  if (missing.length) {
+    await ShopCategory.insertMany(missing);
+  }
+}
+
+// when asked for all catagories
+app.get("/catagory", async (req, res, next) => {
+  try {
+    const product = await ParentProduct.find();
+    res.json(product);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/shop-categories", async (req, res, next) => {
+  try {
+    await ensureShopCategories();
+    const categories = await ShopCategory.find().sort({ modelName: 1 });
+    res.json(categories);
+  } catch (error) {
+    next(error);
+  }
 });
 
 //getting availableCatagories
-app.get("/available-catagories", async (req, res) => {
-
-  const availableCatagories = await AvailableCatagories.find();
-  res.status(200).json(availableCatagories);
+app.get("/available-catagories", async (req, res, next) => {
+  try {
+    const availableCatagories = await AvailableCatagories.find();
+    res.status(200).json(availableCatagories);
+  } catch (error) {
+    next(error);
+  }
 });
 
 // making available catagories
@@ -88,6 +116,21 @@ app.post("/catagory", verifyToken, validateRequest(categorySchema), async (req, 
   }
 });
 
+app.post("/shop-categories", verifyToken, validateRequest(categorySchema), async (req, res, next) => {
+  const { modelName, description, images } = req.body;
+
+  try {
+    const created = await ShopCategory.findOneAndUpdate(
+      { modelName },
+      { modelName, description, images },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    res.status(201).json(created);
+  } catch (error) {
+    next(error);
+  }
+});
+
 // edit catagory
 app.patch("/catagory/:id", verifyToken, validateRequest(categorySchema.partial()), (req, res, next) => {
   const id = req.params.id;
@@ -98,10 +141,26 @@ app.patch("/catagory/:id", verifyToken, validateRequest(categorySchema.partial()
     .catch((error) => next(error));
 });
 
+app.patch("/shop-categories/:id", verifyToken, validateRequest(categorySchema.partial()), (req, res, next) => {
+  const id = req.params.id;
+  const update = req.body;
+
+  ShopCategory.findByIdAndUpdate(id, update, { new: true })
+    .then((result) => res.status(200).json(result))
+    .catch((error) => next(error));
+});
+
 //delete a catagory
 app.delete("/catagory/:id", verifyToken, (req, res, next) => {
   const id = req.params.id;
   ParentProduct.findByIdAndDelete(id)
+    .then((result) => res.status(200).json(result))
+    .catch((error) => next(error));
+});
+
+app.delete("/shop-categories/:id", verifyToken, (req, res, next) => {
+  const id = req.params.id;
+  ShopCategory.findByIdAndDelete(id)
     .then((result) => res.status(200).json(result))
     .catch((error) => next(error));
 });
@@ -148,6 +207,8 @@ app.get("/allSameParentProducts/:parentId", async (req, res, next) => {
 //get products with search terms
 app.get("/searchproducts", async (req, res, next) => {
   const query = req.query.search;
+
+  if (!query) return res.status(200).json([]);
 
   const searchTerms = query.split(" ");
 
@@ -381,6 +442,12 @@ app.get("/all-products-single-variation", async (req, res, next) => {
   }
 });
 
+// stripe checkout
+app.post("/checkout-stripe", validateRequest(orderSchema), stripeCheckout);
+
+// stripe webhook - needs raw body
+app.post("/stripe-webhook", stripeWebhook);
+
 // Global Error Handler
 app.use((err, req, res, next) => {
   console.error("Global Error Handler:", err);
@@ -396,9 +463,3 @@ const port = process.env.PORT || 5000;
 app.listen(port, () => {
   console.log("server is running on port, ", port);
 });
-
-// stripe checkout
-app.post("/checkout-stripe", validateRequest(orderSchema), stripeCheckout);
-
-// stripe webhook - needs raw body
-app.post("/stripe-webhook", stripeWebhook);
