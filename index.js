@@ -8,6 +8,7 @@ const { verifyToken } = require("./middleware/authMiddleware");
 const { validateRequest } = require("./middleware/validate");
 const { categorySchema, productSchema, orderSchema } = require("./middleware/schemas");
 const { stripeCheckout, stripeWebhook } = require("./controllers/stripe");
+const { makeOrderObjAndTotal } = require("./checkout-customer/controllers/checkout");
 
 const app = express();
 
@@ -118,6 +119,16 @@ app.get("/product/:id", async (req, res, next) => {
     const id = req.params.id;
     const product = await SingleVariation.findById(id);
     res.status(200).json(product);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/order/:id", async (req, res, next) => {
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    res.status(200).json(order);
   } catch (error) {
     next(error);
   }
@@ -330,6 +341,20 @@ app.get("/client-orders/:email", verifyToken, async (req, res, next) => {
       updatedAt: -1,
     });
     res.json(orders);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/orders", validateRequest(orderSchema), async (req, res, next) => {
+  try {
+    const paidWith = req.body.paidWith || "Card";
+    const { order } = await makeOrderObjAndTotal({ req, paidWith });
+    order.paid = true;
+    order.status = "Processing";
+
+    const newOrder = await Order.create(order);
+    res.status(201).json(newOrder);
   } catch (error) {
     next(error);
   }

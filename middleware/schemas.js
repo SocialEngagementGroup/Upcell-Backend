@@ -1,5 +1,10 @@
 const { z } = require("zod");
 
+const numericField = z.preprocess((value) => {
+  if (value === "" || value === null || typeof value === "undefined") return undefined;
+  return Number(value);
+}, z.number().nonnegative());
+
 const categorySchema = z.object({
   modelName: z.string().min(1, "Model name is required"),
   description: z.string().optional(),
@@ -13,11 +18,16 @@ const productSchema = z.object({
   storage: z.string().min(1, "Storage is required"),
   color: z.object({
     name: z.string(),
+    value: z.string().optional(),
     hex: z.string().optional(),
   }),
-  price: z.number().positive("Price must be positive"),
-  condition: z.enum(["Mint", "Excellent", "Good"]),
-  image: z.string().url("Image must be a valid URL"),
+  price: numericField.refine((value) => value > 0, "Price must be positive"),
+  discountPrice: numericField.optional(),
+  originalPrice: numericField.optional(),
+  reviewScore: numericField.optional(),
+  peopleReviewed: numericField.optional(),
+  condition: z.enum(["Mint", "Excellent", "Good", "Fair", "Refubrished", "New"]),
+  image: z.string().min(1, "Image is required"),
 });
 
 const orderSchema = z.object({
@@ -29,7 +39,8 @@ const orderSchema = z.object({
   street: z.string().min(1, "Street is required"),
   country: z.string().min(1, "Country is required"),
   orders: z.array(z.string().regex(/^[0-9a-fA-F]{24}$/)).min(1, "At least one product is required"),
-  shipping: z.enum(["standard", "priority", "express"]),
+  shipping: z.enum(["standard", "priority", "express"]).default("standard"),
+  paidWith: z.enum(["Stripe", "Paypal", "Card", "Manual"]).optional(),
 });
 
 module.exports = {

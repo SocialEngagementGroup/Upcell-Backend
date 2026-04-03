@@ -8,7 +8,7 @@ const statusEnum = [
   "Refunded",
   "payment failed",
 ];
-const paidWithEnum = ["Stripe", "Paypal"];
+const paidWithEnum = ["Stripe", "Paypal", "Card", "Manual"];
 const shippingEnum = ["standard", "priority", "express"];
 
 const OrderSchema = new Schema(
