@@ -247,7 +247,7 @@ app.delete("/product/:id", verifyToken, (req, res, next) => {
 app.post("/cart", async (req, res, next) => {
   try {
     const { ids } = req.body;
-    const products = await SingleVariation.find({ _id: ids });
+    const products = await SingleVariation.find({ _id: { $in: ids || [] } });
     res.status(200).json(products);
   } catch (error) {
     next(error);

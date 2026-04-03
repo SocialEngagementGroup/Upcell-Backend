@@ -8,7 +8,8 @@
     "start": "node index.js",
     "nodemon": "nodemon index.js",
     "dev": "nodemon index.js",
-    "check-db": "node check-db.js"
+    "check-db": "node check-db.js",
+    "seed-demo": "node seed-demo-data.js"
   },
   "engines": {
     "node": "18"
