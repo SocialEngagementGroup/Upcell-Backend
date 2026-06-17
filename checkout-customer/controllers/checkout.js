@@ -4,6 +4,8 @@ const SingleVariation = require("../../schema/singleVariation");
 const { Resend } = require("resend");
 
 const resend = new Resend(process.env.RESEND_KEY);
+const adminNotificationEmail = process.env.ADMIN_NOTIFICATION_EMAIL;
+const orderEmailFrom = process.env.ORDER_EMAIL_FROM;
 
 const endpoint_url =
   process.env.ENVIRONMENT === "PRODUCTION"
@@ -267,8 +269,8 @@ exports.updateOrderPaid = async (paypalId) => {
 
     // sending emails to globaltradersww2@gmail.com to confirm order
     await resend.emails.send({
-      from: "GT <orders@globaltraders-usa.com>",
-      to: ["globaltradersww2@gmail.com"],
+      from: orderEmailFrom,
+      to: [adminNotificationEmail],
       subject: "New order on Global Traders",
       html: `<strong>New Orders!</strong> </br> <p>Order Id:  ${order._id}</p> </br> <h2>Go to Global Traders Admin page to see all orders</h2> </br> Link: https://globaltraders-usa.com/admin-secret/orders`,
     });

@@ -9,6 +9,7 @@ const {
 } = require("../utils/pagination");
 
 const resend = new Resend(process.env.RESEND_KEY);
+const orderEmailFrom = process.env.ORDER_EMAIL_FROM;
 
 async function getOrder(req, res, next) {
   try {
@@ -106,7 +107,7 @@ async function updateOrderStatus(req, res, next) {
     const clientEmail = order?.email;
 
     await resend.emails.send({
-      from: "GT <orders-update@globaltraders-usa.com>",
+      from: orderEmailFrom,
       to: [clientEmail],
       subject: `Order status changed to ${status}`,
       html: `<strong>Your order status updated!</strong> </br> <p> Your order with Order_Id:  <span style="color:blue">${order._id}</span>, status updated to <strong> ${status} </strong> </p> </br> <small> Thank you for staying with GlobalTraders </small>`,
