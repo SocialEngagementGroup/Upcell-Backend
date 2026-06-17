@@ -6,7 +6,6 @@ const {
   getCategories,
   getShopCategories,
   getAvailableCategories,
-  makeAvailableCategories,
   createCategory,
   createShopCategory,
   updateCategory,
@@ -18,7 +17,6 @@ const {
 router.get("/catagory", getCategories);
 router.get("/shop-categories", getShopCategories);
 router.get("/available-catagories", getAvailableCategories);
-router.get("/mka", verifyToken, requireAdmin, makeAvailableCategories);
 router.post("/catagory", verifyToken, requireAdmin, validateRequest(categorySchema), createCategory);
 router.post("/shop-categories", verifyToken, requireAdmin, validateRequest(categorySchema), createShopCategory);
 router.patch("/catagory/:id", verifyToken, requireAdmin, validateRequest(categorySchema.partial()), updateCategory);
