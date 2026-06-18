@@ -1,0 +1,29 @@
+const router = require("express").Router();
+const { verifyToken, requireAdmin } = require("../middleware/auth.middleware");
+const { validateRequest } = require("../middleware/validate.middleware");
+const { productCreateSchema, productSchema } = require("../schemas/request.schemas");
+const {
+  getProducts,
+  getProduct,
+  getProductsByParent,
+  searchProducts,
+  getFilteredProducts,
+  createProduct,
+  updateProduct,
+  deleteProduct,
+  deleteProductFamily,
+  getRepresentativeProducts,
+} = require("../controllers/product.controller");
+
+router.get("/product", getProducts);
+router.get("/product/:id", getProduct);
+router.get("/allSameParentProducts/:parentId", getProductsByParent);
+router.get("/searchproducts", searchProducts);
+router.post("/products/:n/:skip", getFilteredProducts);
+router.post("/product", verifyToken, requireAdmin, validateRequest(productCreateSchema), createProduct);
+router.patch("/product/:id", verifyToken, requireAdmin, validateRequest(productSchema.partial()), updateProduct);
+router.delete("/product/:id", verifyToken, requireAdmin, deleteProduct);
+router.delete("/product-family/:parentId", verifyToken, requireAdmin, deleteProductFamily);
+router.get("/all-products-single-variation", getRepresentativeProducts);
+
+module.exports = router;

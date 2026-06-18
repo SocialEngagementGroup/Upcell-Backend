@@ -4,6 +4,8 @@ const AddForm = require("../schema/addForm");
 const { Resend } = require("resend");
 
 const resend = new Resend(process.env.RESEND_KEY);
+const adminNotificationEmail = process.env.ADMIN_NOTIFICATION_EMAIL;
+const wholesaleEmailFrom = process.env.WHOLESALE_EMAIL_FROM;
 
 const wholesaleFormSubmit = async (req, res, next) => {
   const addForm = req.body;
@@ -16,8 +18,8 @@ const wholesaleFormSubmit = async (req, res, next) => {
     // sending emails to globaltradersww2@gmail.com to confirm order
 
     await resend.emails.send({
-      from: "GT <wholesale@globaltraders-usa.com>",
-      to: ["globaltradersww2@gmail.com"],
+      from: wholesaleEmailFrom,
+      to: [adminNotificationEmail],
       subject: "Whole-sale form submitted !!",
       html: `<strong>Whole-sale customer query from!</strong> 
       </br>

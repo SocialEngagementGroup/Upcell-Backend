@@ -1,7 +1,7 @@
 const mongoose = require("mongoose");
 require("dotenv").config();
 
-const uri = process.env.MONGODB_URL || "mongodb://localhost:27017/upcell";
+const uri = process.env.MONGODB_URL;
 
 function connectToDb() {
   let state = mongoose.connection.readyState;

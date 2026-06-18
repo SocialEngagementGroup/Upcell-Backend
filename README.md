@@ -8,7 +8,7 @@ The backend for the Upcell (Global Traders) platform, providing a RESTful API fo
 - **External Services**:
   - **Stripe**: Payment processing
   - **Resend**: Email notifications
-  - **Firebase Functions**: (Optional) Cloud hosting for backend logic
+  - **Clerk**: Session token verification and role-based access
 
 ## Project Structure
 - `index.js`: Main entry point and Express application setup.
@@ -41,17 +41,16 @@ The backend for the Upcell (Global Traders) platform, providing a RESTful API fo
 2. Create a `.env` file in the `Backend` directory:
    ```env
    MONGODB_URL=your_mongodb_uri
+   CLERK_SECRET_KEY=your_clerk_secret_key
    RESEND_KEY=your_resend_api_key
    TEST_SECRET=your_stripe_test_secret
    TEST_ENDPOINTSECRET=your_stripe_webhook_secret
-   PORT=5000
+   PORT=5001
    ```
 3. Run the server:
    ```bash
-   npm run start
+   npm run dev
    ```
 
 ### Deployment
-This project is configured for deployment as a Firebase Function. Use the following commands:
-- `npm run deploy`: Deploy functions to Firebase.
-- `npm run serve`: Run Firebase emulators locally.
+Deploy this Express API to the selected backend host and configure the same environment variables there.
