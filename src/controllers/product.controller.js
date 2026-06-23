@@ -2,15 +2,81 @@ const ParentProduct = require("../models/parentProduct.model");
 const SingleVariation = require("../models/singleVariation.model");
 const AvailableCatagories = require("../models/availableCategory.model");
 
+const productCardFields = "parentCatagory productName categoryName description storage color price image outOfStock";
+
+const normalizeProductCard = (product) => ({
+  ...product,
+  _id: String(product._id),
+  parentCatagory: String(product.parentCatagory),
+  color: {
+    ...(product.color || {}),
+    value: product.color?.value || product.color?.hex || "#d1d5db",
+  },
+  availableColors: product.availableColors || [],
+  availableStorages: product.availableStorages || [],
+});
+
+const groupProductCards = (products = []) => {
+  const map = new Map();
+
+  products.forEach((product) => {
+    if (!product.parentCatagory) return;
+
+    const key = String(product.parentCatagory);
+    const existing = map.get(key);
+    const nextColor = product.color?.name
+      ? {
+          name: product.color.name,
+          value: product.color?.value || product.color?.hex || "#d1d5db",
+        }
+      : null;
+
+    const mergeVariantMeta = (baseProduct) => {
+      const colorMap = new Map(
+        (baseProduct.availableColors || []).map((color) => [color.name, color])
+      );
+      const storageSet = new Set(baseProduct.availableStorages || []);
+
+      if (nextColor) colorMap.set(nextColor.name, nextColor);
+      if (product.storage) storageSet.add(product.storage);
+
+      return {
+        ...baseProduct,
+        availableColors: Array.from(colorMap.values()),
+        availableStorages: Array.from(storageSet.values()),
+      };
+    };
+
+    if (product.outOfStock && !existing) {
+      map.set(key, mergeVariantMeta(product));
+      return;
+    }
+    if (existing?.outOfStock && !product.outOfStock) {
+      map.set(key, mergeVariantMeta(product));
+      return;
+    }
+    if ((!existing || Number(product.price || 0) < Number(existing.price || 0)) && !(product.outOfStock && !existing?.outOfStock)) {
+      map.set(key, mergeVariantMeta(product));
+      return;
+    }
+
+    if (existing) {
+      map.set(key, mergeVariantMeta(existing));
+    }
+  });
+
+  return Array.from(map.values()).map(normalizeProductCard);
+};
+
 async function getProducts(req, res) {
-  const allProduct = await SingleVariation.find();
+  const allProduct = await SingleVariation.find().lean();
   res.json(allProduct);
 }
 
 async function getProduct(req, res, next) {
   try {
     const id = req.params.id;
-    const product = await SingleVariation.findById(id);
+    const product = await SingleVariation.findById(id).lean();
     res.status(200).json(product);
   } catch (error) {
     next(error);
@@ -20,8 +86,36 @@ async function getProduct(req, res, next) {
 async function getProductsByParent(req, res, next) {
   try {
     const id = req.params.parentId;
-    const product = await SingleVariation.find({ parentCatagory: id });
+    const product = await SingleVariation.find({ parentCatagory: id }).lean();
     res.status(200).json(product);
+  } catch (error) {
+    next(error);
+  }
+}
+
+async function getShopProducts(req, res, next) {
+  try {
+    const products = await SingleVariation.find({}, productCardFields)
+      .sort({ outOfStock: 1, price: 1 })
+      .lean();
+
+    res.status(200).json(groupProductCards(products));
+  } catch (error) {
+    next(error);
+  }
+}
+
+async function getRecommendedProducts(req, res, next) {
+  try {
+    const { excludeParentId, limit = 4 } = req.query;
+    const query = excludeParentId ? { parentCatagory: { $ne: excludeParentId } } : {};
+    const maxResults = Math.min(Number(limit) || 4, 12);
+
+    const products = await SingleVariation.find(query, productCardFields)
+      .sort({ outOfStock: 1, price: 1 })
+      .lean();
+
+    res.status(200).json(groupProductCards(products).slice(0, maxResults));
   } catch (error) {
     next(error);
   }
@@ -44,7 +138,7 @@ async function searchProducts(req, res, next) {
 
     const result = await SingleVariation.find({
       $or: [{ productName: { $regex: regex } }],
-    });
+    }).lean();
 
     res.status(200).json(result);
   } catch (error) {
@@ -71,7 +165,8 @@ async function getFilteredProducts(req, res, next) {
 
     const products = await SingleVariation.find(searchQuery)
       .skip(skip)
-      .limit(n);
+      .limit(n)
+      .lean();
 
     res.json(products);
   } catch (error) {
@@ -226,6 +321,8 @@ module.exports = {
   getProducts,
   getProduct,
   getProductsByParent,
+  getShopProducts,
+  getRecommendedProducts,
   searchProducts,
   getFilteredProducts,
   createProduct,
@@ -234,3 +331,4 @@ module.exports = {
   deleteProductFamily,
   getRepresentativeProducts,
 };
+
