@@ -6,6 +6,8 @@ const {
   getProducts,
   getProduct,
   getProductsByParent,
+  getShopProducts,
+  getRecommendedProducts,
   searchProducts,
   getFilteredProducts,
   createProduct,
@@ -16,6 +18,8 @@ const {
 } = require("../controllers/product.controller");
 
 router.get("/product", getProducts);
+router.get("/products/shop", getShopProducts);
+router.get("/products/recommended", getRecommendedProducts);
 router.get("/product/:id", getProduct);
 router.get("/allSameParentProducts/:parentId", getProductsByParent);
 router.get("/searchproducts", searchProducts);
