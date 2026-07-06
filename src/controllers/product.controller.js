@@ -242,7 +242,13 @@ async function createProduct(req, res, next) {
         parent = await ParentProduct.findById(existingParentId);
       }
       if (!parent) {
-        parent = await ParentProduct.findOne({ modelName: productName });
+        // Case/whitespace-insensitive fallback match, so re-saving a product
+        // whose name only differs by case or stray spaces updates the
+        // existing parent instead of silently creating a duplicate.
+        const escapedName = productName.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        parent = await ParentProduct.findOne({
+          modelName: new RegExp(`^${escapedName}$`, "i"),
+        });
       }
 
       if (parent) {
