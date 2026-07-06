@@ -8,7 +8,7 @@ const  parentProductSchema = new mongoose.Schema({
     description: String,
     images: {type: [mongoose.Schema.Types.Mixed],
             default: [] },
-})
+}, { timestamps: true })
 
 parentProductSchema.index({ modelName: 1 });
 
