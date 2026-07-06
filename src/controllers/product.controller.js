@@ -146,6 +146,47 @@ async function searchProducts(req, res, next) {
   }
 }
 
+async function getProductSuggestions(req, res, next) {
+  try {
+    const term = (req.query.q || req.query.search || "").trim();
+    if (term.length < 2) return res.status(200).json([]);
+
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(escaped, "i");
+
+    // Light projection + sorted so the best representative (in-stock, cheapest) comes first.
+    const matches = await SingleVariation.find(
+      { $or: [{ productName: regex }, { categoryName: regex }] },
+      "productName parentCatagory categoryName image price outOfStock"
+    )
+      .sort({ outOfStock: 1, price: 1 })
+      .limit(300)
+      .lean();
+
+    // Collapse variations to one suggestion per product family (no hard cap;
+    // the dropdown scrolls). Dedupe still keeps it to one row per product.
+    const byParent = new Map();
+    for (const variation of matches) {
+      const key = String(variation.parentCatagory);
+      if (!byParent.has(key)) byParent.set(key, variation);
+    }
+
+    const suggestions = Array.from(byParent.values())
+      .map((variation) => ({
+        _id: String(variation._id),
+        parentCatagory: String(variation.parentCatagory),
+        productName: variation.productName,
+        categoryName: variation.categoryName,
+        image: variation.image,
+        price: variation.price,
+      }));
+
+    res.status(200).json(suggestions);
+  } catch (error) {
+    next(error);
+  }
+}
+
 async function getFilteredProducts(req, res, next) {
   try {
     const n = req.params.n;
@@ -324,6 +365,7 @@ module.exports = {
   getShopProducts,
   getRecommendedProducts,
   searchProducts,
+  getProductSuggestions,
   getFilteredProducts,
   createProduct,
   updateProduct,

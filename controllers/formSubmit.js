@@ -1,5 +1,9 @@
 const { connectToDb } = require("../database");
 const AddForm = require("../schema/addForm");
+const {
+  getAdminListPagination,
+  sendPaginatedResults,
+} = require("../src/utils/pagination");
 
 const { Resend } = require("resend");
 
@@ -39,4 +43,50 @@ const wholesaleFormSubmit = async (req, res, next) => {
   }
 };
 
-module.exports = { wholesaleFormSubmit };
+async function getAdminAddForms(req, res, next) {
+  const filter = req.params.filter;
+  const { page, limit, skip } = getAdminListPagination(req);
+
+  try {
+    if (filter && filter.startsWith("byEmail:")) {
+      const email = filter.replace("byEmail:", "");
+      return sendPaginatedResults({
+        res,
+        model: AddForm,
+        query: { email: { $regex: new RegExp(email, "i") } },
+        sort: { createdAt: -1 },
+        page,
+        limit,
+        skip,
+      });
+    }
+
+    return sendPaginatedResults({
+      res,
+      model: AddForm,
+      query: {},
+      sort: { createdAt: -1 },
+      page,
+      limit,
+      skip,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+async function deleteAddForm(req, res, next) {
+  try {
+    const deleted = await AddForm.findByIdAndDelete(req.params.id);
+
+    if (!deleted) {
+      return res.status(404).json({ error: "Wholesale submission not found" });
+    }
+
+    res.status(200).json(deleted);
+  } catch (error) {
+    next(error);
+  }
+}
+
+module.exports = { wholesaleFormSubmit, getAdminAddForms, deleteAddForm };

@@ -10,6 +10,8 @@ const  parentProductSchema = new mongoose.Schema({
             default: [] },
 })
 
+parentProductSchema.index({ modelName: 1 });
+
 const ParentProduct =mongoose.models.ParentProduct || mongoose.model("ParentProduct", parentProductSchema)
 
 module.exports = ParentProduct

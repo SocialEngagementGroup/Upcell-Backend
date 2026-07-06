@@ -40,6 +40,12 @@ const analyticsEventSchema = new mongoose.Schema({
   timestamps: true,
 });
 
+// Auto-expire analytics events after 90 days so this collection doesn't grow forever.
+analyticsEventSchema.index({ createdAt: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 90 });
+analyticsEventSchema.index({ category: 1, createdAt: 1 });
+analyticsEventSchema.index({ status: 1, createdAt: 1 });
+analyticsEventSchema.index({ formName: 1, createdAt: 1 });
+
 const AnalyticsEvent = mongoose.model("analytics_event", analyticsEventSchema);
 
 module.exports = AnalyticsEvent;
