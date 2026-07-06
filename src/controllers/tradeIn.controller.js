@@ -9,7 +9,7 @@ const {
   sendPaginatedResults,
 } = require("../utils/pagination");
 
-const tradeInEmailFrom = process.env.TRADE_IN_EMAIL_FROM;
+const tradeInEmailFrom = process.env.EMAIL_FROM;
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({

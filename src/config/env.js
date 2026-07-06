@@ -6,8 +6,7 @@ const requiredEnvVars = [
   "FRONTEND_URL",
   "FRONTEND_ORIGINS",
   "ADMIN_NOTIFICATION_EMAIL",
-  "WHOLESALE_EMAIL_FROM",
-  "ORDER_EMAIL_FROM",
+  "EMAIL_FROM",
 ];
 
 function hasEnvValue(name) {

@@ -4,8 +4,7 @@ const EmailConfigSchema = new Schema(
   {
     tradeInAdminEmail: {
       type: String,
-      default: () =>
-        process.env.TRADE_ORDER_NOTIFICATION_EMAIL || process.env.ADMIN_NOTIFICATION_EMAIL,
+      default: () => process.env.ADMIN_NOTIFICATION_EMAIL,
     },
     enableCustomerEmails: { type: Boolean, default: true },
     enableAdminEmails: { type: Boolean, default: true },

@@ -9,7 +9,7 @@ const {
 } = require("../utils/pagination");
 
 const resend = new Resend(process.env.RESEND_KEY);
-const orderEmailFrom = process.env.ORDER_EMAIL_FROM;
+const orderEmailFrom = process.env.EMAIL_FROM;
 
 async function getOrder(req, res, next) {
   try {

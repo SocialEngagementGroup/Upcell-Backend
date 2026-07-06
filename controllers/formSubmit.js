@@ -9,7 +9,7 @@ const { Resend } = require("resend");
 
 const resend = new Resend(process.env.RESEND_KEY);
 const adminNotificationEmail = process.env.ADMIN_NOTIFICATION_EMAIL;
-const wholesaleEmailFrom = process.env.WHOLESALE_EMAIL_FROM;
+const wholesaleEmailFrom = process.env.EMAIL_FROM;
 
 const wholesaleFormSubmit = async (req, res, next) => {
   const addForm = req.body;
