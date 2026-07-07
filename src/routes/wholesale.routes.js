@@ -1,6 +1,9 @@
 const router = require("express").Router();
-const { wholesaleFormSubmit } = require("../controllers/wholesale.controller");
+const { verifyToken, requireAdmin } = require("../middleware/auth.middleware");
+const { wholesaleFormSubmit, getAdminAddForms, deleteAddForm } = require("../controllers/wholesale.controller");
 
 router.post("/", wholesaleFormSubmit);
+router.get("/admin/:filter", verifyToken, requireAdmin, getAdminAddForms);
+router.delete("/admin/:id", verifyToken, requireAdmin, deleteAddForm);
 
 module.exports = router;

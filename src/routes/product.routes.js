@@ -9,6 +9,7 @@ const {
   getShopProducts,
   getRecommendedProducts,
   searchProducts,
+  getProductSuggestions,
   getFilteredProducts,
   createProduct,
   updateProduct,
@@ -23,6 +24,7 @@ router.get("/products/recommended", getRecommendedProducts);
 router.get("/product/:id", getProduct);
 router.get("/allSameParentProducts/:parentId", getProductsByParent);
 router.get("/searchproducts", searchProducts);
+router.get("/products/suggest", getProductSuggestions);
 router.post("/products/:n/:skip", getFilteredProducts);
 router.post("/product", verifyToken, requireAdmin, validateRequest(productCreateSchema), createProduct);
 router.patch("/product/:id", verifyToken, requireAdmin, validateRequest(productSchema.partial()), updateProduct);

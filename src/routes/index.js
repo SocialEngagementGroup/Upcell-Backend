@@ -12,6 +12,8 @@ const stripeRoutes = require("./stripe.routes");
 const checkoutCustomerRoutes = require("./checkoutCustomer.routes");
 const wholesaleRoutes = require("./wholesale.routes");
 const monthlySellRoutes = require("./monthlySell.routes");
+const emailConfigRoutes = require("./emailConfig.routes");
+const notificationRoutes = require("./notification.routes");
 
 router.use("/", categoryRoutes);
 router.use("/", productRoutes);
@@ -25,5 +27,7 @@ router.use("/", stripeRoutes);
 router.use("/checkout-customer", checkoutCustomerRoutes);
 router.use("/add-run-form-submit", wholesaleRoutes);
 router.use("/this-month-sold-items", monthlySellRoutes);
+router.use("/", emailConfigRoutes);
+router.use("/", notificationRoutes);
 
 module.exports = router;

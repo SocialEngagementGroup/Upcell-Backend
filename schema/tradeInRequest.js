@@ -23,6 +23,12 @@ const TradeInRequestSchema = new Schema(
     email: { type: String, required: true },
     phone: { type: String, required: true },
     status: { type: String, enum: tradeInStatusEnum, default: "New" },
+    emailStatus: {
+      type: String,
+      enum: ["pending", "sent", "failed", "skipped"],
+      default: "pending",
+    },
+    emailThreadId: String,
   },
   { timestamps: true }
 );

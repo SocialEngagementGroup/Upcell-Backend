@@ -20,7 +20,7 @@ const singleVariationSchema = new mongoose.Schema({
         default: false,
         index: true,
     },
-})
+}, { timestamps: true })
 
 singleVariationSchema.index({ parentCatagory: 1, outOfStock: 1, price: 1 });
 singleVariationSchema.index({ categoryName: 1, storage: 1, price: 1 });

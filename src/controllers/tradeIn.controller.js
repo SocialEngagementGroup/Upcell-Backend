@@ -1,15 +1,153 @@
 const mongoose = require("mongoose");
 const { TradeInRequest, tradeInStatusEnum } = require("../models/tradeInRequest.model");
+const { EmailConfig } = require("../models/emailConfig.model");
+const { Notification } = require("../models/notification.model");
+const { sendMail, getMessageId } = require("../services/mailService");
 const {
   getAdminListPagination,
   emptyPaginatedResponse,
   sendPaginatedResults,
 } = require("../utils/pagination");
 
+const tradeInEmailFrom = process.env.EMAIL_FROM;
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[char]));
+}
+
+const customerStatusTemplates = {
+  New: (request) => `<strong>Thanks, ${escapeHtml(request.name)}!</strong></br>
+    <p>We received your trade-in request for <strong>${escapeHtml(request.modelTitle)}</strong> (Request ID: ${request._id}).</p></br>
+    <p>Estimated payout: <strong>$${request.estimate}</strong></p></br>
+    <p>We'll email your prepaid shipping label, inspection guidance, and next steps within 1 business day. Payout is issued within 24 hours of device inspection.</p></br>
+    <small>Thank you for choosing UpCell</small>`,
+  Contacted: (request) => `<p>Hi ${escapeHtml(request.name)},</p></br>
+    <p>Our team has reviewed your trade-in request (Request ID: ${request._id}) and will be in touch shortly with next steps.</p></br>
+    <small>Thank you for choosing UpCell</small>`,
+  Received: (request) => `<p>Hi ${escapeHtml(request.name)},</p></br>
+    <p>Your device for Request ID ${request._id} has arrived and is now being inspected.</p></br>
+    <small>Thank you for choosing UpCell</small>`,
+  Quoted: (request) => `<p>Hi ${escapeHtml(request.name)},</p></br>
+    <p>Your final trade-in offer for Request ID ${request._id} is confirmed at <strong>$${request.estimate}</strong>.</p></br>
+    <small>Thank you for choosing UpCell</small>`,
+  Paid: (request) => `<p>Hi ${escapeHtml(request.name)},</p></br>
+    <p>Payment for your trade-in request (Request ID: ${request._id}) has been sent.</p></br>
+    <small>Thank you for choosing UpCell</small>`,
+};
+
+function tradeInEmailSubject(request) {
+  const modelTitle = String(request.modelTitle ?? "").replace(/[\r\n]/g, " ");
+  return `Your UpCell trade-in request — ${modelTitle} (#${String(request._id).slice(-6)})`;
+}
+
+async function fetchEmailConfig() {
+  let config = await EmailConfig.findOne();
+  if (!config) {
+    config = await EmailConfig.create({});
+  }
+  return config;
+}
+
+async function sendCustomerStatusEmail(request, config) {
+  const buildHtml = customerStatusTemplates[request.status];
+  if (!config.enableCustomerEmails || !buildHtml) {
+    await TradeInRequest.findByIdAndUpdate(request._id, { emailStatus: "skipped" });
+    return;
+  }
+
+  const isThreadStarter = !request.emailThreadId;
+  const baseSubject = tradeInEmailSubject(request);
+
+  const result = await sendMail({
+    from: tradeInEmailFrom,
+    to: request.email,
+    subject: isThreadStarter ? baseSubject : `Re: ${baseSubject}`,
+    html: buildHtml(request),
+    headers: isThreadStarter
+      ? undefined
+      : { "In-Reply-To": request.emailThreadId, "References": request.emailThreadId },
+  });
+
+  const update = { emailStatus: result.sent ? "sent" : "failed" };
+
+  if (result.sent && isThreadStarter && result.id) {
+    const realMessageId = await getMessageId(result.id);
+    if (realMessageId) {
+      update.emailThreadId = realMessageId;
+    }
+  }
+
+  await TradeInRequest.findByIdAndUpdate(request._id, update);
+
+  if (result.sent) {
+    await EmailConfig.updateOne({ _id: config._id }, { $inc: { sentCount: 1 } });
+  }
+}
+
+async function sendAdminNewRequestEmail(request, config) {
+  if (!config.enableAdminEmails || !config.tradeInAdminEmail) return;
+
+  const result = await sendMail({
+    from: tradeInEmailFrom,
+    to: config.tradeInAdminEmail,
+    subject: "New trade-in request received",
+    html: `<strong>New trade-in request</strong></br>
+      <p>Device: ${escapeHtml(request.modelTitle)} (${escapeHtml(request.storage)})</p></br>
+      <p>Estimate: $${request.estimate}</p></br>
+      <p>Customer: ${escapeHtml(request.name)} — ${escapeHtml(request.email)} — ${escapeHtml(request.phone)}</p></br>
+      <p>Request ID: ${request._id}</p>`,
+  });
+
+  if (result.sent) {
+    await EmailConfig.updateOne({ _id: config._id }, { $inc: { sentCount: 1 } });
+  }
+}
+
+async function notifyNewTradeIn(request) {
+  const config = await fetchEmailConfig();
+
+  await Promise.all([
+    sendCustomerStatusEmail(request, config),
+    sendAdminNewRequestEmail(request, config),
+  ]);
+
+  await Notification.create({
+    type: "trade-in",
+    title: "New trade-in request",
+    message: `${request.name} submitted a trade-in request for ${request.modelTitle} ($${request.estimate})`,
+    link: `/admin-secret/trade-in/${request._id}`,
+    relatedId: request._id,
+  });
+}
+
+async function notifyTradeInStatusChange(request) {
+  const config = await fetchEmailConfig();
+
+  await sendCustomerStatusEmail(request, config);
+
+  await Notification.create({
+    type: "trade-in",
+    title: `Trade-in status: ${request.status}`,
+    message: `Request ${request._id} for ${request.name} moved to "${request.status}"`,
+    link: `/admin-secret/trade-in/${request._id}`,
+    relatedId: request._id,
+  });
+}
+
 async function createTradeInRequest(req, res, next) {
   try {
     const request = await TradeInRequest.create(req.body);
     res.status(201).json(request);
+
+    notifyNewTradeIn(request).catch((error) => {
+      console.error("[tradeIn] new-request notification failed:", error);
+    });
   } catch (error) {
     next(error);
   }
@@ -91,6 +229,10 @@ async function updateTradeInStatus(req, res, next) {
     }
 
     res.status(200).json(updated);
+
+    notifyTradeInStatusChange(updated).catch((error) => {
+      console.error("[tradeIn] status-change notification failed:", error);
+    });
   } catch (error) {
     next(error);
   }

@@ -33,6 +33,9 @@ const OrderSchema = new Schema(
 
 OrderSchema.index({ paypalId: 1 });
 OrderSchema.index({ stripeSessionId: 1 });
+OrderSchema.index({ email: 1, paid: 1 });
+OrderSchema.index({ status: 1, updatedAt: -1 });
+OrderSchema.index({ createdAt: 1 });
 
 const Order = models?.Order || model("Order", OrderSchema);
 

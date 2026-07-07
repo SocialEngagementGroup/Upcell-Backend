@@ -22,6 +22,16 @@ async function getCategories(req, res, next) {
   }
 }
 
+async function getCategoryById(req, res, next) {
+  try {
+    const product = await ParentProduct.findById(req.params.id);
+    if (!product) return res.status(404).json({ error: "Product family not found" });
+    res.json(product);
+  } catch (error) {
+    next(error);
+  }
+}
+
 async function getShopCategories(req, res, next) {
   try {
     await ensureShopCategories();
@@ -112,6 +122,7 @@ function deleteShopCategory(req, res, next) {
 
 module.exports = {
   getCategories,
+  getCategoryById,
   getShopCategories,
   getAvailableCategories,
   makeAvailableCategories,

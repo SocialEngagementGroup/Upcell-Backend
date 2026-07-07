@@ -5,7 +5,7 @@ const { Resend } = require("resend");
 
 const resend = new Resend(process.env.RESEND_KEY);
 const adminNotificationEmail = process.env.ADMIN_NOTIFICATION_EMAIL;
-const orderEmailFrom = process.env.ORDER_EMAIL_FROM;
+const orderEmailFrom = process.env.EMAIL_FROM;
 
 const endpoint_url =
   process.env.ENVIRONMENT === "PRODUCTION"

@@ -4,6 +4,7 @@ const { validateRequest } = require("../middleware/validate.middleware");
 const { categorySchema } = require("../schemas/request.schemas");
 const {
   getCategories,
+  getCategoryById,
   getShopCategories,
   getAvailableCategories,
   createCategory,
@@ -15,6 +16,7 @@ const {
 } = require("../controllers/category.controller");
 
 router.get("/catagory", getCategories);
+router.get("/catagory/:id", getCategoryById);
 router.get("/shop-categories", getShopCategories);
 router.get("/available-catagories", getAvailableCategories);
 router.post("/catagory", verifyToken, requireAdmin, validateRequest(categorySchema), createCategory);
