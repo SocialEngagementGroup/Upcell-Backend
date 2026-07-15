@@ -65,4 +65,30 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
-module.exports = { verifyToken, requireAdmin };
+const optionalAuth = async (req, res, next) => {
+  const token = getBearerToken(req);
+
+  if (!token) {
+    return next();
+  }
+
+  try {
+    const claims = await clerkClient.verifyToken(token);
+    const userId = claims.sub;
+
+    if (userId) {
+      const clerkUser = await clerkClient.users.getUser(userId);
+      req.user = {
+        id: clerkUser.id,
+        email: getPrimaryEmail(clerkUser),
+        role: normalizeRole(clerkUser.publicMetadata?.role),
+      };
+    }
+  } catch (error) {
+    // Invalid/expired token on an optional-auth route: treat as anonymous.
+  }
+
+  next();
+};
+
+module.exports = { verifyToken, requireAdmin, optionalAuth };

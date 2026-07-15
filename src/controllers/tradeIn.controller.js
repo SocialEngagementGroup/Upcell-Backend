@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const { TradeInRequest, tradeInStatusEnum } = require("../models/tradeInRequest.model");
 const { EmailConfig } = require("../models/emailConfig.model");
 const { Notification } = require("../models/notification.model");
+const AuditLog = require("../models/auditLog.model");
 const { sendMail, getMessageId } = require("../services/mailService");
 const {
   getAdminListPagination,
@@ -218,17 +219,30 @@ async function updateTradeInStatus(req, res, next) {
       return res.status(400).json({ error: "Invalid trade-in status" });
     }
 
+    const previous = await TradeInRequest.findById(req.params.id);
+    if (!previous) {
+      return res.status(404).json({ error: "Trade-in request not found" });
+    }
+    const previousStatus = previous.status;
+
     const updated = await TradeInRequest.findByIdAndUpdate(
       req.params.id,
       { status },
       { new: true }
     );
 
-    if (!updated) {
-      return res.status(404).json({ error: "Trade-in request not found" });
-    }
-
     res.status(200).json(updated);
+
+    AuditLog.create({
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      action: "trade_in.status_update",
+      targetType: "TradeInRequest",
+      targetId: updated._id,
+      metadata: { from: previousStatus, to: status },
+    }).catch((error) => {
+      console.error("[audit] trade_in.status_update log failed:", error);
+    });
 
     notifyTradeInStatusChange(updated).catch((error) => {
       console.error("[tradeIn] status-change notification failed:", error);
