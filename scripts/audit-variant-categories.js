@@ -1,6 +1,6 @@
 require("dotenv").config();
 const mongoose = require("mongoose");
-const SingleVariation = require("../schema/singleVariation");
+const SingleVariation = require("../src/models/singleVariation.model");
 
 async function main() {
   const uri = process.env.MONGODB_URL || "mongodb://localhost:27017/upcell";

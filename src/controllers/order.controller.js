@@ -2,7 +2,7 @@ const mongoose = require("mongoose");
 const { Resend } = require("resend");
 const Order = require("../models/order.model");
 const AuditLog = require("../models/auditLog.model");
-const { makeOrderObjAndTotal } = require("../../checkout-customer/controllers/checkout");
+const { makeOrderObjAndTotal } = require("./checkout.controller");
 const {
   getAdminListPagination,
   emptyPaginatedResponse,

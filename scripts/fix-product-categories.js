@@ -1,8 +1,8 @@
 require("dotenv").config();
 const mongoose = require("mongoose");
-const ParentProduct = require("../schema/parentProduct");
-const SingleVariation = require("../schema/singleVariation");
-const ShopCategory = require("../schema/shopCategory");
+const ParentProduct = require("../src/models/parentProduct.model");
+const SingleVariation = require("../src/models/singleVariation.model");
+const ShopCategory = require("../src/models/shopCategory.model");
 
 function resolveCategoryName(modelName = "") {
   if (modelName.startsWith("iPhone")) {
