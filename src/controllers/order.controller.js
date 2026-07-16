@@ -1,7 +1,8 @@
 const mongoose = require("mongoose");
 const { Resend } = require("resend");
 const Order = require("../models/order.model");
-const { makeOrderObjAndTotal } = require("../../checkout-customer/controllers/checkout");
+const AuditLog = require("../models/auditLog.model");
+const { makeOrderObjAndTotal } = require("./checkout.controller");
 const {
   getAdminListPagination,
   emptyPaginatedResponse,
@@ -15,7 +16,15 @@ async function getOrder(req, res, next) {
   try {
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ error: "Order not found" });
-    res.status(200).json(order);
+
+    const isOwner = req.user?.role === "admin" || req.user?.email === order.email;
+    if (isOwner) {
+      return res.status(200).json(order);
+    }
+
+    const { name, email, phone, city, postal, street, country, ...safeOrder } =
+      order.toObject();
+    res.status(200).json(safeOrder);
   } catch (error) {
     next(error);
   }
@@ -100,9 +109,21 @@ async function updateOrderStatus(req, res, next) {
 
   try {
     const order = await Order.findById(orderId);
+    const previousStatus = order.status;
     order.status = status;
 
     await order.save();
+
+    AuditLog.create({
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      action: "order.status_update",
+      targetType: "Order",
+      targetId: order._id,
+      metadata: { from: previousStatus, to: status },
+    }).catch((error) => {
+      console.error("[audit] order.status_update log failed:", error);
+    });
 
     const clientEmail = order?.email;
 
@@ -110,7 +131,7 @@ async function updateOrderStatus(req, res, next) {
       from: orderEmailFrom,
       to: [clientEmail],
       subject: `Order status changed to ${status}`,
-      html: `<strong>Your order status updated!</strong> </br> <p> Your order with Order_Id:  <span style="color:blue">${order._id}</span>, status updated to <strong> ${status} </strong> </p> </br> <small> Thank you for staying with GlobalTraders </small>`,
+      html: `<strong>Your order status updated!</strong> </br> <p> Your order with Order_Id:  <span style="color:blue">${order._id}</span>, status updated to <strong> ${status} </strong> </p> </br> <small> Thank you for staying with UpCell IT </small>`,
     });
 
     res.send("success");

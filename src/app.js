@@ -8,6 +8,12 @@ const { errorHandler } = require("./middleware/error.middleware");
 
 const app = express();
 
+// Render (and most PaaS hosts) put the app behind a reverse proxy, so
+// Express needs this to read the real client IP from X-Forwarded-For —
+// otherwise every request looks like it comes from the proxy and
+// IP-based rate limiting effectively applies to all users at once.
+app.set("trust proxy", 1);
+
 app.use(cors(corsOptions));
 
 app.use(

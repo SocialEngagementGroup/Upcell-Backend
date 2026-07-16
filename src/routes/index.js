@@ -14,6 +14,7 @@ const wholesaleRoutes = require("./wholesale.routes");
 const monthlySellRoutes = require("./monthlySell.routes");
 const emailConfigRoutes = require("./emailConfig.routes");
 const notificationRoutes = require("./notification.routes");
+const auditLogRoutes = require("./auditLog.routes");
 
 router.use("/", categoryRoutes);
 router.use("/", productRoutes);
@@ -29,5 +30,6 @@ router.use("/add-run-form-submit", wholesaleRoutes);
 router.use("/this-month-sold-items", monthlySellRoutes);
 router.use("/", emailConfigRoutes);
 router.use("/", notificationRoutes);
+router.use("/", auditLogRoutes);
 
 module.exports = router;

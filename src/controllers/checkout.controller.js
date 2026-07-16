@@ -1,6 +1,6 @@
 const { default: axios } = require("axios");
-const Order = require("../../schema/order");
-const SingleVariation = require("../../schema/singleVariation");
+const Order = require("../models/order.model");
+const SingleVariation = require("../models/singleVariation.model");
 const { Resend } = require("resend");
 
 const resend = new Resend(process.env.RESEND_KEY);

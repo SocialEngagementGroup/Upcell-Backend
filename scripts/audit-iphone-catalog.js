@@ -1,7 +1,7 @@
 require("dotenv").config();
 const mongoose = require("mongoose");
-const ParentProduct = require("../schema/parentProduct");
-const SingleVariation = require("../schema/singleVariation");
+const ParentProduct = require("../src/models/parentProduct.model");
+const SingleVariation = require("../src/models/singleVariation.model");
 
 const expectedVariantCounts = {
   "iPhone 13 mini": 18,
