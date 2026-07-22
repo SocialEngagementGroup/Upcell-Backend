@@ -36,9 +36,16 @@ function errorHandler(err, req, res, next) {
     sendErrorAlert(err, req);
   }
 
+  // 5xx means something unexpected broke (DB error, third-party API
+  // failure, a bug) — err.message can contain internal details (stack
+  // context, library internals) that shouldn't reach the client. The real
+  // message still goes to the console log and the admin alert email above;
+  // only the client-facing response is genericized. 4xx errors are
+  // deliberately client-facing (e.g. explicit res.status(4xx) calls
+  // elsewhere), so this branch never touches those.
   res.status(status).json({
-    error: err.message || "Internal Server Error",
-    details: err.details || null,
+    error: status >= 500 ? "Internal Server Error" : err.message || "Internal Server Error",
+    details: status >= 500 ? null : err.details || null,
   });
 }
 

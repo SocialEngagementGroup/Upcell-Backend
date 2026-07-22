@@ -3,6 +3,7 @@ const {
   getAdminListPagination,
   sendPaginatedResults,
 } = require("../utils/pagination");
+const { escapeRegex } = require("../utils/regex");
 
 async function createNewsletterSubscriber(req, res, next) {
   try {
@@ -31,7 +32,7 @@ async function getAdminNewsletterSubscribers(req, res, next) {
       return sendPaginatedResults({
         res,
         model: NewsletterSubscriber,
-        query: { email: { $regex: new RegExp(email, "i") } },
+        query: { email: { $regex: new RegExp(escapeRegex(email), "i") } },
         sort: { createdAt: -1 },
         page,
         limit,
