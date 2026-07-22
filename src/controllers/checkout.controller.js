@@ -4,6 +4,39 @@ const Order = require("../models/order.model");
 const SingleVariation = require("../models/singleVariation.model");
 const PaymentEventLog = require("../models/paymentEventLog.model");
 const { Resend } = require("resend");
+const { paymentReceiptEmail } = require("../services/emailTemplates");
+
+// Order.line_items are stored in a Stripe price_data-shaped structure
+// (checkout.controller.js models both gateways after Stripe's shape) —
+// this flattens them to the {name, qty, price} rows the payment receipt
+// email template expects, for either gateway.
+exports.orderLineItemsForReceipt = (order) =>
+  (order?.line_items || []).map((item) => ({
+    name: item?.price_data?.product_data?.name || "Item",
+    qty: item?.quantity || item?.price_data?.product_data?.metadata?.quantity || 1,
+    price: item?.price_data?.product_data?.metadata?.totalPaid || 0,
+  }));
+
+// Fire-and-forget on purpose — a failed receipt email shouldn't fail the
+// whole webhook/capture response (which is what tells PayPal/Stripe whether
+// to retry), the way an admin-notification failure currently does.
+exports.sendPaymentReceiptEmail = (order) => {
+  if (!order?.email) return;
+  const lineItems = exports.orderLineItemsForReceipt(order);
+  const total = lineItems.reduce((sum, item) => sum + item.price, 0);
+  const { subject, html } = paymentReceiptEmail({
+    orderId: order._id,
+    paidWith: order.paidWith,
+    lineItems,
+    total,
+  });
+
+  resend.emails
+    .send({ from: orderEmailFrom, to: [order.email], subject, html })
+    .catch((error) => {
+      console.error("Failed to send payment receipt email:", error);
+    });
+};
 
 // Fire-and-forget on purpose, same pattern as AuditLog.create() calls
 // elsewhere — a logging failure must never block or fail the actual webhook
@@ -378,6 +411,7 @@ exports.updateOrderPaid = async (paypalId) => {
       subject: "New order on Global Traders",
       html: `<strong>New Orders!</strong> </br> <p>Order Id:  ${updatedOrder._id}</p> </br> <h2>Go to Global Traders Admin page to see all orders</h2> </br> Link: https://globaltraders-usa.com/admin-secret/orders`,
     });
+    exports.sendPaymentReceiptEmail(updatedOrder);
     return updatedOrder;
   }
 

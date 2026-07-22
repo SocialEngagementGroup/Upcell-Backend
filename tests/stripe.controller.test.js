@@ -22,6 +22,7 @@ jest.mock("../src/controllers/checkout.controller", () => ({
   makeOrderObjAndTotal: jest.fn(),
   hasPendingCheckout: jest.fn(),
   logPaymentEvent: jest.fn(),
+  sendPaymentReceiptEmail: jest.fn(),
 }));
 
 const Order = require("../src/models/order.model");
@@ -61,7 +62,8 @@ describe("stripeWebhook — checkout.session.completed (atomic paid-marking)", (
       id: "evt_1",
       data: { object: { id: "cs_test_1", metadata: { orderId: "order1" } } },
     });
-    Order.findOneAndUpdate.mockResolvedValue({ _id: "order1", paid: true, status: "Processing" });
+    const paidOrder = { _id: "order1", paid: true, status: "Processing" };
+    Order.findOneAndUpdate.mockResolvedValue(paidOrder);
 
     const { req, res, next } = makeReqRes();
     await stripeController.stripeWebhook(req, res, next);
@@ -71,6 +73,7 @@ describe("stripeWebhook — checkout.session.completed (atomic paid-marking)", (
       { paid: true, status: "Processing" },
       { new: true }
     );
+    expect(checkoutController.sendPaymentReceiptEmail).toHaveBeenCalledWith(paidOrder);
     expect(res.json).toHaveBeenCalledWith({ received: true });
   });
 

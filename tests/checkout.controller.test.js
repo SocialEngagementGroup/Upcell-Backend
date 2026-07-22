@@ -52,7 +52,7 @@ beforeEach(() => {
 });
 
 describe("updateOrderPaid — the atomic race-condition fix", () => {
-  it("marks an unpaid order paid and sends exactly one admin email", async () => {
+  it("marks an unpaid order paid and sends exactly one admin email (no customer email on the order)", async () => {
     const updated = { _id: "order1", paypalId: "PP123", paid: true, status: "Processing" };
     Order.findOneAndUpdate.mockResolvedValue(updated);
 
@@ -64,7 +64,37 @@ describe("updateOrderPaid — the atomic race-condition fix", () => {
       { new: true }
     );
     expect(result).toBe(updated);
+    // No `email` field on this mock order — sendPaymentReceiptEmail's own
+    // guard should skip silently rather than send a broken receipt.
     expect(mockSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("also sends a customer payment receipt when the order has an email and line items", async () => {
+    const updated = {
+      _id: "order1",
+      paypalId: "PP123",
+      paid: true,
+      status: "Processing",
+      email: "buyer@example.com",
+      paidWith: "Paypal",
+      line_items: [
+        {
+          quantity: 1,
+          price_data: { product_data: { name: "iPhone 15", metadata: { quantity: 1, totalPaid: 999 } } },
+        },
+      ],
+    };
+    Order.findOneAndUpdate.mockResolvedValue(updated);
+
+    await checkout.updateOrderPaid("PP123");
+    await flushMicrotasks(); // sendPaymentReceiptEmail is fire-and-forget
+
+    expect(mockSend).toHaveBeenCalledTimes(2);
+    const receiptCall = mockSend.mock.calls.find((call) => call[0].to[0] === "buyer@example.com");
+    expect(receiptCall).toBeDefined();
+    expect(receiptCall[0].subject).toMatch(/payment received/i);
+    expect(receiptCall[0].html).toContain("iPhone 15");
+    expect(receiptCall[0].html).toContain("999.00");
   });
 
   it("does NOT send a second email when the order was already claimed by another caller (simulates the webhook + synchronous capture race)", async () => {

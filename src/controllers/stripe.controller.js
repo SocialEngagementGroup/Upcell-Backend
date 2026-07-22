@@ -5,7 +5,7 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY || process.env.TE
   maxNetworkRetries: 2,
 });
 const Order = require("../models/order.model");
-const { makeOrderObjAndTotal, hasPendingCheckout, logPaymentEvent } = require("./checkout.controller");
+const { makeOrderObjAndTotal, hasPendingCheckout, logPaymentEvent, sendPaymentReceiptEmail } = require("./checkout.controller");
 
 // Stripe requires product_data.images to be absolute URLs. Some product
 // images are stored as relative paths served by the frontend's static
@@ -128,6 +128,7 @@ exports.stripeWebhook = async (req, res, next) => {
           orderId: order._id,
           gatewayReference: session.id,
         });
+        sendPaymentReceiptEmail(order);
       }
     } else if (event.type === "charge.refunded") {
       const charge = event.data.object;

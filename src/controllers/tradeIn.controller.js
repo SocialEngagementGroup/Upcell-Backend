@@ -4,6 +4,7 @@ const { EmailConfig } = require("../models/emailConfig.model");
 const { Notification } = require("../models/notification.model");
 const AuditLog = require("../models/auditLog.model");
 const { sendMail, getMessageId } = require("../services/mailService");
+const { tradeInRequestEmail, tradeInStatusEmail } = require("../services/emailTemplates");
 const {
   getAdminListPagination,
   emptyPaginatedResponse,
@@ -22,25 +23,30 @@ function escapeHtml(value) {
   }[char]));
 }
 
-const customerStatusTemplates = {
-  New: (request) => `<strong>Thanks, ${escapeHtml(request.name)}!</strong></br>
-    <p>We received your trade-in request for <strong>${escapeHtml(request.modelTitle)}</strong> (Request ID: ${request._id}).</p></br>
-    <p>Estimated payout: <strong>$${request.estimate}</strong></p></br>
-    <p>We'll email your prepaid shipping label, inspection guidance, and next steps within 1 business day. Payout is issued within 24 hours of device inspection.</p></br>
-    <small>Thank you for choosing UpCell</small>`,
-  Contacted: (request) => `<p>Hi ${escapeHtml(request.name)},</p></br>
-    <p>Our team has reviewed your trade-in request (Request ID: ${request._id}) and will be in touch shortly with next steps.</p></br>
-    <small>Thank you for choosing UpCell</small>`,
-  Received: (request) => `<p>Hi ${escapeHtml(request.name)},</p></br>
-    <p>Your device for Request ID ${request._id} has arrived and is now being inspected.</p></br>
-    <small>Thank you for choosing UpCell</small>`,
-  Quoted: (request) => `<p>Hi ${escapeHtml(request.name)},</p></br>
-    <p>Your final trade-in offer for Request ID ${request._id} is confirmed at <strong>$${request.estimate}</strong>.</p></br>
-    <small>Thank you for choosing UpCell</small>`,
-  Paid: (request) => `<p>Hi ${escapeHtml(request.name)},</p></br>
-    <p>Payment for your trade-in request (Request ID: ${request._id}) has been sent.</p></br>
-    <small>Thank you for choosing UpCell</small>`,
-};
+// Statuses that should notify the customer at all — "Closed" (a rejected/
+// withdrawn request) intentionally has no customer-facing copy, same as
+// before this template swap.
+const CUSTOMER_NOTIFIABLE_STATUSES = new Set(["New", "Contacted", "Received", "Quoted", "Paid"]);
+
+function buildCustomerEmail(request) {
+  if (!CUSTOMER_NOTIFIABLE_STATUSES.has(request.status)) {
+    return null;
+  }
+  if (request.status === "New") {
+    return tradeInRequestEmail({
+      name: request.name,
+      modelTitle: request.modelTitle,
+      estimate: request.estimate,
+      requestId: request._id,
+    });
+  }
+  return tradeInStatusEmail({
+    name: request.name,
+    status: request.status,
+    estimate: request.estimate,
+    requestId: request._id,
+  });
+}
 
 function tradeInEmailSubject(request) {
   const modelTitle = String(request.modelTitle ?? "").replace(/[\r\n]/g, " ");
@@ -56,20 +62,23 @@ async function fetchEmailConfig() {
 }
 
 async function sendCustomerStatusEmail(request, config) {
-  const buildHtml = customerStatusTemplates[request.status];
-  if (!config.enableCustomerEmails || !buildHtml) {
+  const built = buildCustomerEmail(request);
+  if (!config.enableCustomerEmails || !built) {
     await TradeInRequest.findByIdAndUpdate(request._id, { emailStatus: "skipped" });
     return;
   }
 
   const isThreadStarter = !request.emailThreadId;
+  // Deliberately NOT using built.subject here — tradeInEmailSubject stays
+  // fixed across every status update so replies keep threading correctly
+  // in the customer's inbox. Only the HTML design comes from the new template.
   const baseSubject = tradeInEmailSubject(request);
 
   const result = await sendMail({
     from: tradeInEmailFrom,
     to: request.email,
     subject: isThreadStarter ? baseSubject : `Re: ${baseSubject}`,
-    html: buildHtml(request),
+    html: built.html,
     headers: isThreadStarter
       ? undefined
       : { "In-Reply-To": request.emailThreadId, "References": request.emailThreadId },

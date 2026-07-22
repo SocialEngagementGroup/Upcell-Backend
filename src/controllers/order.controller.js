@@ -3,6 +3,7 @@ const { Resend } = require("resend");
 const Order = require("../models/order.model");
 const AuditLog = require("../models/auditLog.model");
 const { makeOrderObjAndTotal } = require("./checkout.controller");
+const { orderStatusEmail } = require("../services/emailTemplates");
 const {
   getAdminListPagination,
   emptyPaginatedResponse,
@@ -136,12 +137,13 @@ async function updateOrderStatus(req, res, next) {
     });
 
     const clientEmail = order?.email;
+    const { subject, html } = orderStatusEmail({ orderId: order._id, status });
 
     await resend.emails.send({
       from: orderEmailFrom,
       to: [clientEmail],
-      subject: `Order status changed to ${status}`,
-      html: `<strong>Your order status updated!</strong> </br> <p> Your order with Order_Id:  <span style="color:blue">${order._id}</span>, status updated to <strong> ${status} </strong> </p> </br> <small> Thank you for staying with UpCell IT </small>`,
+      subject,
+      html,
     });
 
     res.send("success");
