@@ -39,4 +39,16 @@ const cartLimiter = rateLimit({
   message: { error: "Too many requests. Please try again later." },
 });
 
-module.exports = { publicFormLimiter, checkoutLimiter, analyticsLimiter, cartLimiter };
+// Webhook endpoints are called by PayPal/Stripe's own infrastructure, not a
+// single customer IP, so this must stay far above real gateway traffic. It
+// exists only to blunt a flood of garbage/unsigned POSTs, each of which
+// otherwise costs an outbound signature-verification call to PayPal.
+const webhookLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests. Please try again later." },
+});
+
+module.exports = { publicFormLimiter, checkoutLimiter, analyticsLimiter, cartLimiter, webhookLimiter };

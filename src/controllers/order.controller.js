@@ -104,11 +104,21 @@ async function getAdminOrdersByDate(req, res, next) {
   }
 }
 
+const ORDER_STATUS_VALUES = ["Processing", "Shipped", "Delivered", "Returned", "Refunded", "payment failed"];
+
 async function updateOrderStatus(req, res, next) {
   const { orderId, status } = req.body;
 
   try {
-    const order = await Order.findById(orderId);
+    if (!ORDER_STATUS_VALUES.includes(status)) {
+      return res.status(400).json({ error: "Invalid order status" });
+    }
+
+    const order = await Order.findById(orderId || null);
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
     const previousStatus = order.status;
     order.status = status;
 
@@ -161,8 +171,16 @@ async function createOrder(req, res, next) {
   try {
     const paidWith = req.body.paidWith || "Card";
     const { order } = await makeOrderObjAndTotal({ req, paidWith });
-    order.paid = true;
-    order.status = "Processing";
+
+    // Manual/"Contact to order" submissions haven't actually been paid —
+    // no payment was collected, admin still needs to reach out. Only
+    // auto-mark paid+Processing for paths where payment is confirmed by
+    // this point. (makeOrderObjAndTotal already defaults paid:false,
+    // status:"payment failed" — that default is correct for Manual.)
+    if (paidWith !== "Manual") {
+      order.paid = true;
+      order.status = "Processing";
+    }
 
     const newOrder = await Order.create(order);
     res.status(201).json(newOrder);

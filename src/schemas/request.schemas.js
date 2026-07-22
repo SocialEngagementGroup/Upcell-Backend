@@ -5,6 +5,16 @@ const numericField = z.preprocess((value) => {
   return Number(value);
 }, z.number().nonnegative());
 
+// `numericField.optional()` doesn't work as expected: Zod's optional-check
+// only looks at the raw input, so an empty string ("" from a blank form
+// field) still gets passed through the preprocess (which turns it into
+// undefined) and then rejected by z.number(). Putting .optional() on the
+// inner schema instead means preprocess's undefined output is accepted.
+const optionalNumericField = z.preprocess((value) => {
+  if (value === "" || value === null || typeof value === "undefined") return undefined;
+  return Number(value);
+}, z.number().nonnegative().optional());
+
 const objectIdField = z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid ID");
 const trimmedString = (label, min = 1, max = 255) => z.string().trim().min(min, `${label} is required`).max(max, `${label} must be ${max} characters or fewer`);
 const emailField = z.string().trim().email("Please enter a valid email address");
@@ -27,10 +37,10 @@ const productSchema = z.object({
     hex: z.string().optional(),
   }),
   price: numericField.refine((value) => value > 0, "Price must be positive"),
-  discountPrice: numericField.optional(),
-  originalPrice: numericField.optional(),
-  reviewScore: numericField.optional(),
-  peopleReviewed: numericField.optional(),
+  discountPrice: optionalNumericField,
+  originalPrice: optionalNumericField,
+  reviewScore: optionalNumericField,
+  peopleReviewed: optionalNumericField,
   condition: z.enum(["Mint", "Excellent", "Good", "Fair", "Refubrished", "New"]),
   image: trimmedString("Image", 1, 20000000),
   categoryName: trimmedString("Category", 1, 140).optional(),
@@ -46,8 +56,8 @@ const productVariantSchema = z.object({
     hex: z.string().optional(),
   }),
   price: numericField.refine((value) => value > 0, "Price must be positive"),
-  discountPrice: numericField.optional(),
-  originalPrice: numericField.optional(),
+  discountPrice: optionalNumericField,
+  originalPrice: optionalNumericField,
   outOfStock: z.boolean().optional().default(false),
 });
 
@@ -58,13 +68,29 @@ const productBatchSchema = z.object({
   categoryId: objectIdField.optional(),
   image: trimmedString("Image", 1, 20000000),
   images: z.array(z.object({ url: trimmedString("Image URL", 1, 20000000) })).optional(),
-  reviewScore: numericField.optional(),
-  peopleReviewed: numericField.optional(),
+  reviewScore: optionalNumericField,
+  peopleReviewed: optionalNumericField,
   condition: z.enum(["Mint", "Excellent", "Good", "Fair", "Refubrished", "New"]).default("Excellent"),
   variants: z.array(productVariantSchema).min(1, "At least one variant is required"),
 });
 
 const productCreateSchema = z.union([productSchema, productBatchSchema]);
+
+// getFilteredProducts (POST /products/:n/:skip) builds a Mongo query
+// straight from these fields with no prior type check — e.g. price[0]/[1]
+// were indexed into without confirming price is even an array first, so a
+// crafted object in place of an array/number could inject query operators.
+// Public, unauthenticated endpoint, so this matters even though the
+// frontend doesn't currently call it.
+const productFilterSchema = z.object({
+  productName: z.array(z.string()).default([]),
+  storage: z.array(z.string()).default([]),
+  color: z.array(z.string()).default([]),
+  condition: z.array(z.string()).default([]),
+  price: z
+    .tuple([z.number().nonnegative(), z.number().nonnegative()])
+    .default([0, Number.MAX_SAFE_INTEGER]),
+});
 
 const orderSchema = z.object({
   name: trimmedString("Name", 2, 120),
@@ -77,6 +103,18 @@ const orderSchema = z.object({
   orders: z.array(z.string().regex(/^[0-9a-fA-F]{24}$/)).min(1, "At least one product is required"),
   shipping: z.enum(["standard", "priority", "express"]).default("standard"),
   paidWith: z.enum(["Stripe", "Paypal", "Card", "Manual"]).optional(),
+  // Client-generated, once per checkout attempt — forwarded as the
+  // PayPal-Request-Id / Stripe idempotencyKey on the outbound gateway call
+  // so a retried request lands on the original transaction. Optional since
+  // the Manual/"Contact to order" path doesn't call an external gateway.
+  idempotencyKey: z.string().trim().max(100).optional(),
+});
+
+const captureSchema = z.object({
+  // PayPal order IDs are uppercase alphanumeric, ~17 chars in practice, but
+  // PayPal doesn't guarantee an exact length — this just blocks obviously
+  // malformed/garbage input before it's used to build the PayPal API URL.
+  orderID: z.string().trim().regex(/^[A-Z0-9]{10,30}$/, "Invalid PayPal order ID"),
 });
 
 const tradeInRequestSchema = z.object({
@@ -96,6 +134,13 @@ const tradeInRequestSchema = z.object({
 const newsletterSubscriberSchema = z.object({
   email: emailField,
   source: z.string().trim().max(80, "Source must be 80 characters or fewer").optional(),
+});
+
+const wholesaleFormSchema = z.object({
+  name: trimmedString("Name", 2, 120),
+  email: emailField,
+  phone: phoneField,
+  devices: z.string().trim().max(500, "Devices must be 500 characters or fewer"),
 });
 
 const contactSubmissionSchema = z.object({
@@ -121,6 +166,9 @@ module.exports = {
   productCreateSchema,
   productSchema,
   orderSchema,
+  captureSchema,
+  productFilterSchema,
+  wholesaleFormSchema,
   tradeInRequestSchema,
   newsletterSubscriberSchema,
   contactSubmissionSchema,
