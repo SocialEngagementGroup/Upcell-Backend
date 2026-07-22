@@ -122,6 +122,127 @@ describe("updateOrderPaid — the atomic race-condition fix", () => {
   });
 });
 
+describe("sendPaymentReceiptEmail — failure path", () => {
+  it("logs but does not throw when the receipt email fails to send", async () => {
+    const consoleSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    mockSend.mockRejectedValueOnce(new Error("Resend is down"));
+
+    checkout.sendPaymentReceiptEmail({
+      _id: "order1",
+      email: "buyer@example.com",
+      paidWith: "Paypal",
+      line_items: [],
+    });
+    await flushMicrotasks();
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "Failed to send payment receipt email:",
+      expect.any(Error)
+    );
+    consoleSpy.mockRestore();
+  });
+});
+
+describe("logPaymentEvent — failure path", () => {
+  it("logs but does not throw when PaymentEventLog.create rejects", async () => {
+    const consoleSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    PaymentEventLog.create.mockRejectedValueOnce(new Error("Mongo is down"));
+
+    checkout.logPaymentEvent({ gateway: "Paypal", eventType: "webhook_received" });
+    await flushMicrotasks();
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "[payment-event-log] failed to write:",
+      expect.any(Error)
+    );
+    consoleSpy.mockRestore();
+  });
+});
+
+describe("paypalCheckout — pending-checkout guard, happy path, and error branches", () => {
+  const dbProduct = {
+    _id: "prod1",
+    price: 999,
+    productName: "iPhone 15",
+    color: { name: "Black" },
+    condition: "Mint",
+    storage: "128GB",
+    image: "/staticImages/iphone.png",
+  };
+
+  const makeReqRes = (body) => {
+    const req = { body };
+    const res = { json: jest.fn(), send: jest.fn() };
+    res.status = jest.fn().mockReturnValue(res);
+    const next = jest.fn();
+    return { req, res, next };
+  };
+
+  it("returns 409 without creating an order when a checkout is already pending for this email", async () => {
+    Order.findOne.mockReturnValue({ lean: () => Promise.resolve({ _id: "existing" }) });
+
+    const { req, res, next } = makeReqRes({ email: "buyer@example.com", orders: ["prod1"] });
+    await checkout.paypalCheckout(req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ error: "Checkout already in progress" })
+    );
+    expect(Order.create).not.toHaveBeenCalled();
+  });
+
+  it("creates the order and returns the PayPal order on the happy path", async () => {
+    Order.findOne.mockReturnValue({ lean: () => Promise.resolve(null) }); // no pending checkout
+    SingleVariation.find.mockResolvedValue([dbProduct]);
+    Order.create.mockResolvedValue({ _id: "order1" });
+    global.fetch = jest.fn().mockResolvedValue({
+      json: () => Promise.resolve({ id: "PP-NEW-ORDER", status: "CREATED" }),
+    });
+
+    const { req, res, next } = makeReqRes({
+      email: "buyer@example.com",
+      orders: ["prod1"],
+      shipping: "standard",
+    });
+    await checkout.paypalCheckout(req, res, next);
+
+    expect(Order.create).toHaveBeenCalledWith(
+      expect.objectContaining({ paypalId: "PP-NEW-ORDER" })
+    );
+    expect(res.json).toHaveBeenCalledWith({ id: "PP-NEW-ORDER", status: "CREATED" });
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it("responds 400 without creating an order when PayPal doesn't return an order id", async () => {
+    Order.findOne.mockReturnValue({ lean: () => Promise.resolve(null) });
+    SingleVariation.find.mockResolvedValue([dbProduct]);
+    global.fetch = jest.fn().mockResolvedValue({
+      json: () => Promise.resolve({ error: "something went wrong", status: 500 }), // no `id`
+    });
+
+    const { req, res, next } = makeReqRes({
+      email: "buyer@example.com",
+      orders: ["prod1"],
+      shipping: "standard",
+    });
+    await checkout.paypalCheckout(req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.send).toHaveBeenCalledWith("paypal error getting order id");
+    expect(Order.create).not.toHaveBeenCalled();
+  });
+
+  it("routes unexpected errors through next(error)", async () => {
+    const dbError = new Error("Mongo is down");
+    Order.findOne.mockReturnValue({ lean: () => Promise.reject(dbError) });
+
+    const { req, res, next } = makeReqRes({ email: "buyer@example.com", orders: ["prod1"] });
+    await checkout.paypalCheckout(req, res, next);
+
+    expect(next).toHaveBeenCalledWith(dbError);
+  });
+});
+
 describe("hasPendingCheckout — multi-tab duplicate-checkout guard", () => {
   it("returns true when a recent unpaid Stripe/PayPal order exists for the email", async () => {
     Order.findOne.mockReturnValue({ lean: () => Promise.resolve({ _id: "existing" }) });
@@ -224,6 +345,28 @@ describe("paypalWebhook — signature verification and event handling", () => {
     expect(next).not.toHaveBeenCalled();
   });
 
+  it("does nothing (no order lookup) for a COMPLETED event missing the PayPal order id (malformed payload)", async () => {
+    const { req, res, next } = makeReqRes({
+      event_type: "PAYMENT.CAPTURE.COMPLETED",
+      resource: {}, // no supplementary_data.related_ids.order_id
+    });
+    await checkout.paypalWebhook(req, res, next);
+
+    expect(Order.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith({ received: true });
+  });
+
+  it("does nothing (no order lookup) for a REFUNDED event missing the PayPal order id (malformed payload)", async () => {
+    const { req, res, next } = makeReqRes({
+      event_type: "PAYMENT.CAPTURE.REFUNDED",
+      resource: {},
+    });
+    await checkout.paypalWebhook(req, res, next);
+
+    expect(Order.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith({ received: true });
+  });
+
   it("does nothing (no crash) for an event type this app doesn't handle", async () => {
     const { req, res, next } = makeReqRes({
       event_type: "PAYMENT.AUTHORIZATION.VOIDED",
@@ -285,6 +428,80 @@ describe("capturePayment — ORDER_ALREADY_CAPTURED self-healing", () => {
 
     expect(res.json).toHaveBeenCalledWith({ status: "COMPLETED", orderId: "order1" });
     expect(next).not.toHaveBeenCalled();
+  });
+
+  it("marks the order paid on a normal (first-attempt) COMPLETED capture", async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      json: () => Promise.resolve({ id: "PP123", status: "COMPLETED" }),
+    });
+    Order.findOneAndUpdate.mockResolvedValue({ _id: "order1", paypalId: "PP123", paid: true });
+
+    const { req, res, next } = makeReqRes({ orderID: "PP123" });
+    await checkout.capturePayment(req, res, next);
+
+    expect(Order.findOneAndUpdate).toHaveBeenCalledWith(
+      { paypalId: "PP123", paid: false },
+      { paid: true, status: "Processing" },
+      { new: true }
+    );
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "COMPLETED", orderId: "order1" })
+    );
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it("passes through a declined/failed capture without touching the order (neither COMPLETED nor ORDER_ALREADY_CAPTURED)", async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      json: () =>
+        Promise.resolve({ name: "UNPROCESSABLE_ENTITY", details: [{ issue: "INSTRUMENT_DECLINED" }] }),
+    });
+
+    const { req, res, next } = makeReqRes({ orderID: "PP123" });
+    await checkout.capturePayment(req, res, next);
+
+    expect(Order.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "UNPROCESSABLE_ENTITY", orderId: undefined })
+    );
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it("routes a PayPal API failure through next(error)", async () => {
+    const fetchError = new Error("PayPal is unreachable");
+    global.fetch = jest.fn().mockRejectedValue(fetchError);
+
+    const { req, res, next } = makeReqRes({ orderID: "PP123" });
+    await checkout.capturePayment(req, res, next);
+
+    expect(next).toHaveBeenCalledWith(fetchError);
+    expect(res.json).not.toHaveBeenCalled();
+  });
+});
+
+describe("paypalWebhook — missing webhook ID configuration", () => {
+  it("rejects and alerts when no PayPal webhook ID is configured for this environment", async () => {
+    jest.resetModules();
+    process.env.TEST_PAYPAL_WEBHOOK_ID = ""; // simulate the misconfiguration this branch guards against
+
+    // resetModules gives checkout.controller a fresh (unconfigured) copy of
+    // its PaymentEventLog dependency too — has to be re-required and
+    // reconfigured here, independent of the outer-scope PaymentEventLog.
+    // eslint-disable-next-line global-require
+    const IsolatedPaymentEventLog = require("../src/models/paymentEventLog.model");
+    IsolatedPaymentEventLog.create.mockResolvedValue({});
+    // eslint-disable-next-line global-require
+    const isolatedCheckout = require("../src/controllers/checkout.controller");
+    const req = { body: {}, headers: {} };
+    const res = { json: jest.fn() };
+    const next = jest.fn();
+
+    await isolatedCheckout.paypalWebhook(req, res, next);
+
+    expect(next).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining("No PayPal webhook ID configured") })
+    );
+
+    process.env.TEST_PAYPAL_WEBHOOK_ID = "test-webhook-id"; // restore for subsequent tests
   });
 });
 
