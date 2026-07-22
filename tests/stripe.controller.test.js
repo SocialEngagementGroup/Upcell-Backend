@@ -122,6 +122,37 @@ describe("stripeWebhook — charge.refunded", () => {
     expect(Order.findOneAndUpdate).not.toHaveBeenCalled();
     expect(res.json).toHaveBeenCalledWith({ received: true });
   });
+
+  it("does not crash or error when the orderId in metadata doesn't match any real order", async () => {
+    mockConstructEvent.mockReturnValue({
+      type: "charge.refunded",
+      id: "evt_2",
+      data: { object: { id: "ch_1", metadata: { orderId: "does-not-exist" } } },
+    });
+    Order.findOneAndUpdate.mockResolvedValue(null);
+
+    const { req, res, next } = makeReqRes();
+    await stripeController.stripeWebhook(req, res, next);
+
+    expect(res.json).toHaveBeenCalledWith({ received: true });
+    expect(next).not.toHaveBeenCalled();
+  });
+});
+
+describe("stripeWebhook — unhandled event types", () => {
+  it("acknowledges (200) an event type this app doesn't act on, without touching any order", async () => {
+    mockConstructEvent.mockReturnValue({
+      type: "payment_intent.created",
+      id: "evt_3",
+      data: { object: {} },
+    });
+
+    const { req, res, next } = makeReqRes();
+    await stripeController.stripeWebhook(req, res, next);
+
+    expect(Order.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith({ received: true });
+  });
 });
 
 describe("stripeWebhook — error routing", () => {
@@ -150,5 +181,73 @@ describe("stripeCheckout — duplicate-checkout guard integration", () => {
 
     expect(res.statusCode).toBe(409);
     expect(mockSessionsCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe("stripeCheckout — happy path (session creation)", () => {
+  const sampleOrder = {
+    email: "buyer@example.com",
+    line_items: [
+      {
+        quantity: 1,
+        price_data: {
+          currency: "USD",
+          unit_amount: 99900,
+          product_data: { name: "iPhone 15", description: "Black 128GB", images: ["/staticImages/iphone.png"] },
+        },
+      },
+    ],
+  };
+
+  beforeEach(() => {
+    checkoutController.hasPendingCheckout.mockResolvedValue(false);
+    checkoutController.makeOrderObjAndTotal.mockResolvedValue({ order: sampleOrder, totalPrice: 999 });
+    Order.create.mockResolvedValue({ _id: "order1", save: jest.fn().mockResolvedValue(true) });
+    mockSessionsCreate.mockResolvedValue({ id: "cs_test_1", url: "https://checkout.stripe.com/session/cs_test_1" });
+  });
+
+  it("creates the order, then a Stripe session, saves the session id, and returns the checkout URL", async () => {
+    const { req, res, next } = makeReqRes({ body: { email: "buyer@example.com" } });
+    await stripeController.stripeCheckout(req, res, next);
+
+    expect(Order.create).toHaveBeenCalledWith(sampleOrder);
+    expect(res.json).toHaveBeenCalledWith({ url: "https://checkout.stripe.com/session/cs_test_1" });
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it("resolves relative product image paths to absolute URLs before sending to Stripe (Stripe rejects relative URLs)", async () => {
+    const { req, res, next } = makeReqRes({ body: { email: "buyer@example.com" } });
+    await stripeController.stripeCheckout(req, res, next);
+
+    const [sessionPayload] = mockSessionsCreate.mock.calls[0];
+    expect(sessionPayload.line_items[0].price_data.product_data.images[0]).toBe(
+      "http://localhost:5173/staticImages/iphone.png"
+    );
+  });
+
+  it("uses the client-generated idempotency key when the request supplies one", async () => {
+    const { req, res, next } = makeReqRes({ body: { email: "buyer@example.com", idempotencyKey: "client-key-123" } });
+    await stripeController.stripeCheckout(req, res, next);
+
+    const [, options] = mockSessionsCreate.mock.calls[0];
+    expect(options).toEqual({ idempotencyKey: "client-key-123" });
+  });
+
+  it("falls back to an order-scoped idempotency key when the client doesn't supply one", async () => {
+    const { req, res, next } = makeReqRes({ body: { email: "buyer@example.com" } });
+    await stripeController.stripeCheckout(req, res, next);
+
+    const [, options] = mockSessionsCreate.mock.calls[0];
+    expect(options).toEqual({ idempotencyKey: "checkout-order1" });
+  });
+
+  it("routes a Stripe API failure through next(error)", async () => {
+    const stripeError = new Error("Stripe API is down");
+    mockSessionsCreate.mockRejectedValue(stripeError);
+
+    const { req, res, next } = makeReqRes({ body: { email: "buyer@example.com" } });
+    await stripeController.stripeCheckout(req, res, next);
+
+    expect(next).toHaveBeenCalledWith(stripeError);
   });
 });

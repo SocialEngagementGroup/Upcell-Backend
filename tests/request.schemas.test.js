@@ -114,4 +114,69 @@ describe("orderSchema.idempotencyKey", () => {
     const result = orderSchema.parse({ ...base, idempotencyKey: "abc-123" });
     expect(result.idempotencyKey).toBe("abc-123");
   });
+
+  it("defaults shipping to 'standard' when omitted", () => {
+    expect(orderSchema.parse(base).shipping).toBe("standard");
+  });
+
+  it("accepts an explicit shipping tier", () => {
+    expect(orderSchema.parse({ ...base, shipping: "express" }).shipping).toBe("express");
+  });
+
+  it("rejects a shipping tier outside the enum", () => {
+    expect(() => orderSchema.parse({ ...base, shipping: "overnight-drone" })).toThrow();
+  });
+
+  it("rejects an empty orders array — a checkout needs at least one item", () => {
+    expect(() => orderSchema.parse({ ...base, orders: [] })).toThrow();
+  });
+
+  it("paidWith is optional (not every caller of orderSchema knows it yet at validation time)", () => {
+    expect(() => orderSchema.parse(base)).not.toThrow();
+  });
+});
+
+describe("productFilterSchema — partial input (mix of provided and omitted fields)", () => {
+  it("accepts productName provided with everything else defaulted", () => {
+    const result = productFilterSchema.parse({ productName: ["iPhone 15"] });
+    expect(result.productName).toEqual(["iPhone 15"]);
+    expect(result.storage).toEqual([]);
+    expect(result.price).toEqual([0, Number.MAX_SAFE_INTEGER]);
+  });
+
+  it("accepts a price range provided with everything else defaulted", () => {
+    const result = productFilterSchema.parse({ price: [500, 1500] });
+    expect(result.price).toEqual([500, 1500]);
+    expect(result.productName).toEqual([]);
+  });
+});
+
+describe("wholesaleFormSchema — remaining validation branches", () => {
+  it("rejects a phone number that's too short to be real", () => {
+    expect(() =>
+      wholesaleFormSchema.parse({ name: "Jane", email: "jane@example.com", phone: "12", devices: "50x iPhone" })
+    ).toThrow();
+  });
+
+  it("rejects a devices description over 500 characters", () => {
+    expect(() =>
+      wholesaleFormSchema.parse({
+        name: "Jane",
+        email: "jane@example.com",
+        phone: "1234567890",
+        devices: "x".repeat(501),
+      })
+    ).toThrow();
+  });
+
+  it("accepts a devices description right at the 500-character boundary", () => {
+    expect(() =>
+      wholesaleFormSchema.parse({
+        name: "Jane",
+        email: "jane@example.com",
+        phone: "1234567890",
+        devices: "x".repeat(500),
+      })
+    ).not.toThrow();
+  });
 });

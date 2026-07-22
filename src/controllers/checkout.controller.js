@@ -404,12 +404,11 @@ exports.updateOrderPaid = async (paypalId) => {
   );
 
   if (updatedOrder) {
-    // sending emails to globaltradersww2@gmail.com to confirm order
     await resend.emails.send({
       from: orderEmailFrom,
       to: [adminNotificationEmail],
-      subject: "New order on Global Traders",
-      html: `<strong>New Orders!</strong> </br> <p>Order Id:  ${updatedOrder._id}</p> </br> <h2>Go to Global Traders Admin page to see all orders</h2> </br> Link: https://globaltraders-usa.com/admin-secret/orders`,
+      subject: "New order on UpCell",
+      html: `<strong>New Order!</strong> </br> <p>Order Id:  ${updatedOrder._id}</p> </br> <h2>Go to the UpCell Admin page to see all orders</h2> </br> Link: ${process.env.FRONTEND_URL}/admin-secret/orders`,
     });
     exports.sendPaymentReceiptEmail(updatedOrder);
     return updatedOrder;

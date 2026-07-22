@@ -24,6 +24,7 @@ jest.mock("../src/models/singleVariation.model");
 
 const Order = require("../src/models/order.model");
 const PaymentEventLog = require("../src/models/paymentEventLog.model");
+const SingleVariation = require("../src/models/singleVariation.model");
 const checkout = require("../src/controllers/checkout.controller");
 
 const flushMicrotasks = () => new Promise((resolve) => setImmediate(resolve));
@@ -209,6 +210,56 @@ describe("paypalWebhook — signature verification and event handling", () => {
 
     expect(next).toHaveBeenCalledWith(dbError);
   });
+
+  it("handles a REFUNDED event for an order id that doesn't match anything, without crashing or erroring", async () => {
+    Order.findOneAndUpdate.mockResolvedValue(null); // no matching order
+
+    const { req, res, next } = makeReqRes({
+      event_type: "PAYMENT.CAPTURE.REFUNDED",
+      resource: { supplementary_data: { related_ids: { order_id: "PP-DOES-NOT-EXIST" } } },
+    });
+    await checkout.paypalWebhook(req, res, next);
+
+    expect(res.json).toHaveBeenCalledWith({ received: true });
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it("does nothing (no crash) for an event type this app doesn't handle", async () => {
+    const { req, res, next } = makeReqRes({
+      event_type: "PAYMENT.AUTHORIZATION.VOIDED",
+      resource: {},
+    });
+    await checkout.paypalWebhook(req, res, next);
+
+    expect(Order.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith({ received: true });
+  });
+
+  it("redelivering the same COMPLETED event twice only sends one admin/receipt email pair (idempotent at the webhook layer too)", async () => {
+    // First delivery: genuinely claims the order.
+    Order.findOneAndUpdate.mockResolvedValueOnce({
+      _id: "order1",
+      paypalId: "PP123",
+      paid: true,
+      status: "Processing",
+    });
+    // Second (redelivered) call: atomic guard means findOneAndUpdate finds
+    // nothing left to claim.
+    Order.findOneAndUpdate.mockResolvedValueOnce(null);
+    Order.findOne.mockResolvedValue({ _id: "order1", paypalId: "PP123", paid: true });
+
+    const event = {
+      event_type: "PAYMENT.CAPTURE.COMPLETED",
+      resource: { supplementary_data: { related_ids: { order_id: "PP123" } } },
+    };
+
+    const first = makeReqRes(event);
+    await checkout.paypalWebhook(first.req, first.res, first.next);
+    const second = makeReqRes(event);
+    await checkout.paypalWebhook(second.req, second.res, second.next);
+
+    expect(mockSend).toHaveBeenCalledTimes(1); // admin email only sent once, not twice
+  });
 });
 
 describe("capturePayment — ORDER_ALREADY_CAPTURED self-healing", () => {
@@ -234,5 +285,96 @@ describe("capturePayment — ORDER_ALREADY_CAPTURED self-healing", () => {
 
     expect(res.json).toHaveBeenCalledWith({ status: "COMPLETED", orderId: "order1" });
     expect(next).not.toHaveBeenCalled();
+  });
+});
+
+describe("createPaypalOrder — happy path and idempotency key", () => {
+  beforeEach(() => {
+    mockAxios.mockImplementation((config) => {
+      if (config.url.includes("/oauth2/token")) {
+        return Promise.resolve({ data: { access_token: "tok", expires_in: 3600 } });
+      }
+      return Promise.resolve({ data: {} });
+    });
+    global.fetch = jest.fn().mockResolvedValue({
+      json: () => Promise.resolve({ id: "PP-NEW-ORDER", status: "CREATED" }),
+    });
+  });
+
+  it("sends the total price and uses the client-provided idempotency key as PayPal-Request-Id", async () => {
+    const result = await checkout.createPaypalOrder(999, "client-key-123");
+
+    expect(result).toEqual({ id: "PP-NEW-ORDER", status: "CREATED" });
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toContain("/v2/checkout/orders");
+    expect(options.headers["PayPal-Request-Id"]).toBe("client-key-123");
+    const body = JSON.parse(options.body);
+    expect(body.purchase_units[0].amount.value).toBe("999");
+    expect(body.intent).toBe("CAPTURE");
+  });
+
+  it("falls back to a generated id when no idempotency key is supplied", async () => {
+    await checkout.createPaypalOrder(500);
+
+    const [, options] = global.fetch.mock.calls[0];
+    expect(options.headers["PayPal-Request-Id"]).toEqual(expect.any(String));
+    expect(options.headers["PayPal-Request-Id"].length).toBeGreaterThan(0);
+  });
+});
+
+describe("makeOrderObjAndTotal — server-side pricing (the core anti-tampering property)", () => {
+  const dbProduct = {
+    _id: "prod1",
+    price: 999, // the real, database price
+    productName: "iPhone 15",
+    color: { name: "Black" },
+    condition: "Mint",
+    storage: "128GB",
+    image: "/staticImages/iphone.png",
+  };
+
+  it("computes the price from the database, ignoring anything price-like the client sent", async () => {
+    SingleVariation.find.mockResolvedValue([dbProduct]);
+    const req = {
+      body: {
+        name: "Jane Doe",
+        email: "jane@example.com",
+        orders: ["prod1"],
+        shipping: "standard",
+        // A malicious/buggy client sending its own price — must be ignored.
+        totalPrice: 1,
+        price: 1,
+      },
+    };
+
+    const { order, totalPrice } = await checkout.makeOrderObjAndTotal({ req, paidWith: "Stripe" });
+
+    expect(totalPrice).toBe(999); // from dbProduct.price, not req.body
+    expect(order.line_items[0].price_data.unit_amount).toBe(99900); // cents
+    expect(order.paid).toBe(false);
+    expect(order.status).toBe("payment failed");
+  });
+
+  it("aggregates quantity when the same product id appears more than once in orders[]", async () => {
+    SingleVariation.find.mockResolvedValue([dbProduct]);
+    const req = { body: { orders: ["prod1", "prod1", "prod1"], shipping: "standard" } };
+
+    const { order, totalPrice } = await checkout.makeOrderObjAndTotal({ req, paidWith: "Paypal" });
+
+    expect(order.line_items[0].quantity).toBe(3);
+    expect(totalPrice).toBe(999 * 3);
+  });
+
+  it.each([
+    ["standard", 0],
+    ["priority", 10.5],
+    ["express", 25.0],
+  ])("adds the correct shipping cost for '%s' shipping", async (shipping, expectedShippingCost) => {
+    SingleVariation.find.mockResolvedValue([dbProduct]);
+    const req = { body: { orders: ["prod1"], shipping } };
+
+    const { totalPrice } = await checkout.makeOrderObjAndTotal({ req, paidWith: "Stripe" });
+
+    expect(totalPrice).toBe(999 + expectedShippingCost);
   });
 });

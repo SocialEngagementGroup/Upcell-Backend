@@ -19,8 +19,6 @@ const wholesaleFormSubmit = async (req, res, next) => {
 
     await newAddForm.save();
 
-    // sending emails to globaltradersww2@gmail.com to confirm order
-
     await resend.emails.send({
       from: wholesaleEmailFrom,
       to: [adminNotificationEmail],

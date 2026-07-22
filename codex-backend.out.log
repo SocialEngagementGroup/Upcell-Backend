@@ -1,5 +1,0 @@
-
-> golbal-traders-server-side@1.0.0 start
-> node index.js
-
-📡 Attempting to connect to local database at: mongodb://sunitsen50_db_user:VlFlYMJrjIpF4dLN@ac-ogldsyc-shard-00-00.6kxnnph.mongodb.net:27017,ac-ogldsyc-shard-00-01.6kxnnph.mongodb.net:27017,ac-ogldsyc-shard-00-02.6kxnnph.mongodb.net:27017/upcell?ssl=true&authSource=admin&replicaSet=atlas-jmfrno-shard-0&retryWrites=true&w=majority&appName=Cluster0

@@ -1,6 +1,6 @@
 # Upcell Backend
 
-The backend for the Upcell (Global Traders) platform, providing a RESTful API for product management, order processing, and administrative tasks.
+The backend for the UpCell platform, providing a RESTful API for product management, order processing, and administrative tasks.
 
 ## Tech Stack
 - **Server**: Express.js

@@ -42,6 +42,7 @@ function buildCustomerEmail(request) {
   }
   return tradeInStatusEmail({
     name: request.name,
+    modelTitle: request.modelTitle,
     status: request.status,
     estimate: request.estimate,
     requestId: request._id,

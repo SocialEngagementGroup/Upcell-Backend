@@ -1,7 +1,11 @@
 const FRONTEND_URL = process.env.FRONTEND_URL || "";
-const LOGO_URL = `${FRONTEND_URL}/staticImages/upcellLogoLight.png`;
+// Dark-on-transparent mark on a light logo panel — see emailShell below.
+const LOGO_URL = `${FRONTEND_URL}/staticImages/upcellLogo.png`;
 const SUPPORT_URL = `${FRONTEND_URL}/support`;
 const ACCOUNT_URL = `${FRONTEND_URL}/myaccount`;
+
+const FONT = "'Roboto',Helvetica,Arial,sans-serif";
+const RED = "#D90B0F";
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -15,23 +19,34 @@ function escapeHtml(value) {
 
 const money = (value) => `$${Number(value ?? 0).toFixed(2)}`;
 
-// tone controls the status pill color — success (green) for terminal-positive
-// states, progress (brand red tint) for everything still in motion.
-const PILL_TONES = {
-  progress: { bg: "rgba(217,11,15,0.14)", text: "#FF6B6E", border: "rgba(217,11,15,0.35)" },
-  success: { bg: "rgba(52,199,89,0.14)", text: "#4CD873", border: "rgba(52,199,89,0.35)" },
-  neutral: { bg: "rgba(255,255,255,0.08)", text: "#B4B4BA", border: "rgba(255,255,255,0.16)" },
-};
+// One <tr> in the dark detail-rows box — label on the left, value on the
+// right, with a divider under every row except the last (bordered=false).
+function detailRow(label, value, { bordered = true, valueColor = "#FFFFFF", valueWeight = 600 } = {}) {
+  const border = bordered ? "border-bottom:1px solid #2E2E2E;" : "";
+  return `<tr>
+    <td style="padding:9px 0;${border}font-family:${FONT};font-size:14px;color:#9A9A9A;">${label}</td>
+    <td align="right" style="padding:9px 0;${border}font-family:${FONT};font-weight:${valueWeight};font-size:14px;color:${valueColor};">${value}</td>
+  </tr>`;
+}
+
+// The dark #1B1B1B rounded box that wraps a set of detailRow()s.
+function detailRowsBox(rowsHtml) {
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#1B1B1B;border-radius:16px;">
+    <tr><td style="padding:18px 22px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">${rowsHtml}</table>
+    </td></tr>
+  </table>`;
+}
 
 /**
- * Shared table-based shell — dark card floating on a light page background,
- * built for Gmail/Outlook/Apple Mail rather than modern CSS (no flex/grid,
- * inline styles on every element, real <table> layout throughout).
+ * Shared shell for every transactional email: a light logo panel sitting
+ * directly on top of a dark body card (two separately-rounded boxes, not
+ * one), a solid-red icon badge, headline, subtext, a dark detail-rows box,
+ * and a full-width CTA pill. Table-based layout throughout — built for
+ * Gmail/Outlook/Apple Mail, not modern CSS (no flex/grid, inline styles on
+ * every element).
  */
-function emailShell({ preheader, badgeGlyph = "✓", headline, pill, bodyHtml, extraRowsHtml = "", ctaLabel, ctaHref }) {
-  const tone = PILL_TONES[pill?.tone] || PILL_TONES.neutral;
-  const font = "'Roboto',Helvetica,Arial,sans-serif";
-
+function emailShell({ preheader, badgeGlyph = "&#10003;", headline, subtext, detailRowsHtml, ctaLabel, ctaHref, footerNote }) {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -46,9 +61,9 @@ function emailShell({ preheader, badgeGlyph = "✓", headline, pill, bodyHtml, e
   img{ -ms-interpolation-mode:bicubic; border:0; height:auto; line-height:100%; outline:none; text-decoration:none; }
   body{ margin:0; padding:0; width:100% !important; background-color:#EDEDED; }
   a[x-apple-data-detectors]{ color:inherit !important; text-decoration:none !important; }
-  @media screen and (max-width:600px){
-    .email-container{ width:100% !important; border-radius:0 !important; }
-    .email-pad{ padding-left:24px !important; padding-right:24px !important; }
+  @media screen and (max-width:520px){
+    .email-wrapper, .logo-panel, .card{ width:100% !important; max-width:100% !important; }
+    .card-pad{ padding-left:24px !important; padding-right:24px !important; }
   }
 </style>
 </head>
@@ -56,47 +71,56 @@ function emailShell({ preheader, badgeGlyph = "✓", headline, pill, bodyHtml, e
   <span style="display:none;font-size:1px;color:#EDEDED;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">${escapeHtml(preheader || "")}</span>
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#EDEDED;">
     <tr><td align="center" style="padding:40px 16px;">
-      <table role="presentation" class="email-container" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:600px;background-color:#141416;border:1px solid #2A2A2E;border-radius:16px;overflow:hidden;">
 
-        <tr><td align="center" class="email-pad" bgcolor="#0E0E10" style="background-color:#0E0E10;padding:28px 40px 20px;border-bottom:1px solid #2A2A2E;">
-          <img src="${LOGO_URL}" width="120" alt="UpCell" style="display:block;border:0;" />
+      <table role="presentation" class="email-wrapper" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:600px;">
+
+        <!-- Logo panel -->
+        <tr><td align="center">
+          <table role="presentation" class="logo-panel" width="480" cellpadding="0" cellspacing="0" style="width:480px;max-width:480px;background-color:#F7F7F7;border-radius:24px 24px 0 0;">
+            <tr><td align="center" valign="middle" style="height:109px;">
+              <img src="${LOGO_URL}" width="220" alt="UpCell" style="display:block;border:0;max-width:70%;" />
+            </td></tr>
+          </table>
         </td></tr>
 
-        <tr><td align="center" style="padding:24px 0 0;">
-          <table role="presentation" cellpadding="0" cellspacing="0"><tr>
-            <td style="width:44px;height:44px;border-radius:50%;background-color:${tone.bg};border:1px solid ${tone.border};text-align:center;vertical-align:middle;font-family:${font};font-size:19px;line-height:44px;color:${tone.text};">${badgeGlyph}</td>
-          </tr></table>
+        <!-- Body card -->
+        <tr><td align="center">
+          <table role="presentation" class="card" width="480" cellpadding="0" cellspacing="0" style="width:480px;max-width:480px;background-color:#0C0C0C;border-radius:0 0 24px 24px;box-shadow:0 8px 28px rgba(20,20,20,0.10);">
+            <tr><td class="card-pad" style="padding:44px 40px 40px 40px;">
+
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr><td align="center" style="padding-bottom:24px;">
+                  <table role="presentation" cellpadding="0" cellspacing="0" style="width:64px;height:64px;">
+                    <tr><td align="center" valign="middle" bgcolor="${RED}" style="width:64px;height:64px;border-radius:32px;background-color:${RED};box-shadow:0 6px 16px rgba(217,11,15,0.35);font-family:Arial,Helvetica,sans-serif;font-size:26px;line-height:64px;color:#FFFFFF;font-weight:bold;">${badgeGlyph}</td></tr>
+                  </table>
+                </td></tr>
+              </table>
+
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr><td align="center" style="font-family:${FONT};font-weight:bold;font-size:24px;line-height:30px;color:#FFFFFF;padding:0 8px;">${headline}</td></tr>
+              </table>
+
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr><td align="center" style="font-family:${FONT};font-weight:normal;font-size:14px;line-height:21px;color:#A6A6A6;padding:10px 6px 28px 6px;">${subtext}</td></tr>
+              </table>
+
+              ${detailRowsHtml ? detailRowsBox(detailRowsHtml) : ""}
+
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:28px;">
+                <tr><td align="center" bgcolor="${RED}" style="border-radius:999px;">
+                  <a href="${ctaHref}" target="_blank" style="display:block;padding:16px 24px;font-family:${FONT};font-weight:bold;font-size:15px;color:#FFFFFF;text-decoration:none;border-radius:999px;">${escapeHtml(ctaLabel)}</a>
+                </td></tr>
+              </table>
+
+            </td></tr>
+          </table>
         </td></tr>
 
-        <tr><td align="center" class="email-pad" style="padding:18px 40px 0;">
-          <h1 style="margin:0;font-family:${font};font-size:21px;line-height:1.3;font-weight:700;color:#FFFFFF;">${headline}</h1>
-        </td></tr>
-
-        ${pill ? `<tr><td align="center" style="padding:10px 40px 0;">
-          <span style="display:inline-block;padding:4px 14px;border-radius:100px;font-family:${font};font-size:11.5px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;background-color:${tone.bg};color:${tone.text};border:1px solid ${tone.border};">${escapeHtml(pill.label)}</span>
-        </td></tr>` : ""}
-
-        <tr><td align="center" class="email-pad" style="padding:18px 40px 4px;">
-          <p style="margin:0;font-family:${font};font-size:14.5px;line-height:1.65;color:#B4B4BA;">${bodyHtml}</p>
-        </td></tr>
-
-        ${extraRowsHtml}
-
-        ${ctaHref ? `<tr><td align="center" class="email-pad" style="padding:26px 40px 36px;">
-          <table role="presentation" cellpadding="0" cellspacing="0"><tr><td style="border-radius:100px;background-color:#D90B0F;">
-            <a href="${ctaHref}" style="display:inline-block;padding:14px 34px;font-family:${font};font-size:14px;font-weight:700;color:#FFFFFF;text-decoration:none;border-radius:100px;">${escapeHtml(ctaLabel)}</a>
-          </td></tr></table>
-        </td></tr>` : `<tr><td style="padding:0 0 24px;">&nbsp;</td></tr>`}
-
-        <tr><td class="email-pad" style="padding:0 40px;">
-          <div style="height:1px;background-color:#232326;line-height:1px;font-size:1px;">&nbsp;</div>
-        </td></tr>
-
-        <tr><td align="center" class="email-pad" style="padding:20px 40px 32px;">
-          <p style="margin:0;font-family:${font};font-size:11.5px;line-height:1.6;color:#77777D;">
-            Certified pre-owned Apple devices, backed by UpCell.<br />
-            Questions? Reply to this email or visit our <a href="${SUPPORT_URL}" style="color:#9A9AA0;">support page</a>.
-          </p>
+        <!-- Footer -->
+        <tr><td align="center" style="padding:28px 16px 0 16px;font-family:${FONT};font-size:12px;line-height:18px;color:#9A9A9A;">
+          UpCell Inc. &mdash; 973 Harrisburg Pike, Columbus, OH, United States, Ohio<br />
+          ${footerNote}
+          <a href="${SUPPORT_URL}" style="color:#9A9AA0;text-decoration:underline;">Unsubscribe</a>
         </td></tr>
 
       </table>
@@ -107,114 +131,113 @@ function emailShell({ preheader, badgeGlyph = "✓", headline, pill, bodyHtml, e
 }
 
 function tradeInRequestEmail({ name, modelTitle, estimate, requestId }) {
+  const rows =
+    detailRow("Device", escapeHtml(modelTitle)) +
+    detailRow("Request ID", `#${escapeHtml(requestId)}`) +
+    detailRow("Estimated Value", money(estimate)) +
+    detailRow("Status", "New", { bordered: false, valueColor: RED, valueWeight: 700 });
+
   return {
     subject: `Your UpCell trade-in request — ${modelTitle} (#${String(requestId).slice(-6)})`,
     html: emailShell({
       preheader: `We received your ${modelTitle} trade-in — estimated payout ${money(estimate)}.`,
-      badgeGlyph: "✓",
+      badgeGlyph: "&#10003;",
       headline: `Request received, ${escapeHtml(name)}!`,
-      pill: { label: "New", tone: "progress" },
-      bodyHtml: `We received your trade-in request for <strong style="color:#FFFFFF;">${escapeHtml(modelTitle)}</strong> (Request ID: ${escapeHtml(requestId)}). Estimated payout: <strong style="color:#FFFFFF;">${money(estimate)}</strong>. We'll email your prepaid shipping label and next steps within 1 business day.`,
-      ctaLabel: "Contact Support",
+      subtext: "We&rsquo;ve got your trade-in details. Our team will review your device and follow up shortly.",
+      detailRowsHtml: rows,
+      ctaLabel: "Track Your Trade-In",
       ctaHref: SUPPORT_URL,
+      footerNote: "You're receiving this because you submitted a trade-in request.",
     }),
   };
 }
 
 const TRADE_IN_STATUS_COPY = {
-  New: { pillTone: "progress", body: "We've logged your request and will review it shortly." },
-  Contacted: { pillTone: "progress", body: "Our team has reviewed your trade-in request and will be in touch shortly with next steps." },
-  Received: { pillTone: "progress", body: "Your device has arrived and is now being inspected." },
-  Quoted: { pillTone: "progress", body: "Your final trade-in offer is ready — see the amount above." },
-  Paid: { pillTone: "success", body: "Payment for your trade-in has been sent. Thanks for trading in with UpCell." },
+  New: { body: "We've logged your request and will review it shortly." },
+  Contacted: { body: "Our team has reviewed your trade-in request and will be in touch shortly with next steps." },
+  Received: { body: "Your device has arrived and is now being inspected." },
+  Quoted: { body: "Your final trade-in offer is ready — see the amount below." },
+  Paid: { body: "Payment for your trade-in has been sent. Thanks for trading in with UpCell." },
 };
 
-function tradeInStatusEmail({ name, status, estimate, requestId }) {
+function tradeInStatusEmail({ name, modelTitle, status, estimate, requestId }) {
   const copy = TRADE_IN_STATUS_COPY[status] || TRADE_IN_STATUS_COPY.Contacted;
-  const amountLine = status === "Quoted" || status === "Paid"
-    ? ` Amount: <strong style="color:#FFFFFF;">${money(estimate)}</strong>.`
-    : "";
+  const rows =
+    detailRow("Device", modelTitle ? escapeHtml(modelTitle) : "&mdash;") +
+    detailRow("Request ID", `#${escapeHtml(requestId)}`) +
+    detailRow("Estimated Value", money(estimate)) +
+    detailRow("Status", escapeHtml(status), { bordered: false, valueColor: RED, valueWeight: 700 });
 
   return {
     subject: `Your UpCell trade-in request — update (#${String(requestId).slice(-6)})`,
     html: emailShell({
       preheader: `Your trade-in status is now ${status}.`,
-      badgeGlyph: status === "Paid" ? "✓" : "↻",
-      headline: `Your trade-in status: <span style="color:#FF6B6E;">${escapeHtml(status)}</span>`,
-      pill: { label: status, tone: copy.pillTone },
-      bodyHtml: `Hi ${escapeHtml(name)}, ${copy.body}${amountLine} (Request ID: ${escapeHtml(requestId)})`,
-      ctaLabel: "Contact Support",
+      badgeGlyph: status === "Paid" ? "&#10003;" : "&#128260;",
+      headline: `Your trade-in status: <span style="color:${RED};">${escapeHtml(status)}</span>`,
+      subtext: `Hi ${escapeHtml(name)}, ${copy.body}`,
+      detailRowsHtml: rows,
+      ctaLabel: "Track Your Trade-In",
       ctaHref: SUPPORT_URL,
+      footerNote: "You're receiving this because you submitted a trade-in request.",
     }),
   };
 }
 
-const ORDER_STATUS_COPY = {
-  Processing: { pillTone: "progress", body: "we're getting your order ready." },
-  Shipped: { pillTone: "progress", body: "your order is on its way." },
-  Delivered: { pillTone: "success", body: "your order has been delivered." },
-  Returned: { pillTone: "neutral", body: "your return has been received." },
-  Refunded: { pillTone: "neutral", body: "your refund has been processed." },
-  "payment failed": { pillTone: "progress", body: "we couldn't confirm payment for this order yet." },
+const ORDER_STATUS_BADGE = {
+  Delivered: "&#10003;",
+  Shipped: "&#128230;",
+  Processing: "&#128260;",
 };
 
 function orderStatusEmail({ orderId, status }) {
-  const copy = ORDER_STATUS_COPY[status] || { pillTone: "neutral", body: "your order status has changed." };
+  const rows =
+    detailRow("Order ID", `#${escapeHtml(orderId)}`) +
+    detailRow("Status", escapeHtml(status), { bordered: false, valueColor: RED, valueWeight: 700 });
 
   return {
     subject: `Order status changed to ${status}`,
     html: emailShell({
       preheader: `Order ${orderId} is now ${status}.`,
-      badgeGlyph: status === "Delivered" ? "✓" : "□",
-      headline: `Your order status: <span style="color:#FF6B6E;">${escapeHtml(status)}</span>`,
-      pill: { label: status, tone: copy.pillTone },
-      bodyHtml: `Hi there, ${copy.body} Order ID: <strong style="color:#FFFFFF;">${escapeHtml(orderId)}</strong>. Thank you for staying with UpCell.`,
-      ctaLabel: "View My Orders",
+      badgeGlyph: ORDER_STATUS_BADGE[status] || "&#128230;",
+      headline: `Your order status: <span style="color:${RED};">${escapeHtml(status)}</span>`,
+      subtext: "We&rsquo;ll let you know as soon as there&rsquo;s another update.",
+      detailRowsHtml: rows,
+      ctaLabel: "View Order",
       ctaHref: ACCOUNT_URL,
+      footerNote: "You're receiving this because you placed an order with UpCell.",
     }),
   };
 }
 
-function lineItemsTable(lineItems, total) {
-  const font = "'Roboto',Helvetica,Arial,sans-serif";
-  const rows = lineItems.map((item, index) => {
-    const rowBg = index % 2 === 0 ? "#1A1A1D" : "#161618";
-    return `
-    <tr>
-      <td bgcolor="${rowBg}" style="background-color:${rowBg};padding:11px 14px;font-family:${font};font-size:13px;color:#E4E4E7;border-top:1px solid #262629;">${escapeHtml(item.name)}</td>
-      <td bgcolor="${rowBg}" align="center" style="background-color:${rowBg};padding:11px 14px;font-family:${font};font-size:13px;color:#B4B4BA;border-top:1px solid #262629;">${escapeHtml(item.qty)}</td>
-      <td bgcolor="${rowBg}" align="right" style="background-color:${rowBg};padding:11px 14px;font-family:${font};font-size:13px;color:#E4E4E7;border-top:1px solid #262629;">${money(item.price)}</td>
-    </tr>`;
-  }).join("");
-
-  return `<tr><td class="email-pad" style="padding:10px 40px 0;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #2A2A2E;border-radius:10px;">
-      <tr>
-        <td bgcolor="#202023" style="background-color:#202023;padding:10px 14px;font-family:${font};font-size:10.5px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#83838A;border-top-left-radius:9px;">Item</td>
-        <td bgcolor="#202023" align="center" style="background-color:#202023;padding:10px 14px;font-family:${font};font-size:10.5px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#83838A;">Qty</td>
-        <td bgcolor="#202023" align="right" style="background-color:#202023;padding:10px 14px;font-family:${font};font-size:10.5px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#83838A;border-top-right-radius:9px;">Price</td>
-      </tr>
-      ${rows}
-      <tr>
-        <td bgcolor="#202023" colspan="2" style="background-color:#202023;padding:13px 14px;font-family:${font};font-size:13.5px;font-weight:700;color:#FFFFFF;border-top:1px solid #2A2A2E;border-bottom-left-radius:9px;">Total</td>
-        <td bgcolor="#202023" align="right" style="background-color:#202023;padding:13px 14px;font-family:${font};font-size:13.5px;font-weight:700;color:#FFFFFF;border-top:1px solid #2A2A2E;border-bottom-right-radius:9px;">${money(total)}</td>
-      </tr>
-    </table>
-  </td></tr>`;
-}
-
 function paymentReceiptEmail({ orderId, paidWith, lineItems, total }) {
+  const itemRows = (lineItems || [])
+    .map(
+      (item) =>
+        `<tr>
+          <td style="padding:6px 0;font-family:${FONT};font-size:13px;color:#C7C7C7;">${escapeHtml(item.name)} &times;${escapeHtml(item.qty)}</td>
+          <td align="right" style="padding:6px 0;font-family:${FONT};font-weight:500;font-size:13px;color:#E4E4E4;">${money(item.price)}</td>
+        </tr>`
+    )
+    .join("");
+
+  const rows =
+    detailRow("Order ID", `#${escapeHtml(orderId)}`) +
+    `<tr><td colspan="2" style="padding:12px 0 4px 0;font-family:${FONT};font-size:14px;color:#9A9A9A;">Items</td></tr>` +
+    itemRows +
+    detailRow("Paid With", escapeHtml(paidWith)) +
+    detailRow("Total", money(total), { bordered: false, valueColor: "#FFFFFF", valueWeight: 800 });
+
   return {
     subject: "Payment received — thank you!",
     html: emailShell({
       preheader: `We've received your payment of ${money(total)}. Order ${orderId}.`,
-      badgeGlyph: "✓",
-      headline: "Payment received — thank you!",
-      pill: { label: "Paid", tone: "success" },
-      bodyHtml: `Your payment via <strong style="color:#FFFFFF;">${escapeHtml(paidWith)}</strong> was successful. Order ID: <strong style="color:#FFFFFF;">${escapeHtml(orderId)}</strong>.`,
-      extraRowsHtml: lineItemsTable(lineItems, total),
+      badgeGlyph: "&#10003;",
+      headline: "Payment received &mdash; thank you!",
+      subtext: `Here&rsquo;s your receipt for order #${escapeHtml(orderId)}.`,
+      detailRowsHtml: rows,
       ctaLabel: "View Order Details",
       ctaHref: ACCOUNT_URL,
+      footerNote: "You're receiving this because you placed an order with UpCell.",
     }),
   };
 }
