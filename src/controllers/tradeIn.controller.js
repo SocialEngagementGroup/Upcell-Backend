@@ -137,10 +137,32 @@ async function notifyNewTradeIn(request) {
   });
 }
 
+async function sendAdminStatusChangeEmail(request, config) {
+  if (!config.enableAdminEmails || !config.tradeInAdminEmail) return;
+
+  const result = await sendMail({
+    from: tradeInEmailFrom,
+    to: config.tradeInAdminEmail,
+    subject: `Trade-in status updated: ${request.status}`,
+    html: `<strong>Trade-in status updated</strong></br>
+      <p>Device: ${escapeHtml(request.modelTitle)} (${escapeHtml(request.storage)})</p></br>
+      <p>New Status: ${escapeHtml(request.status)}</p></br>
+      <p>Customer: ${escapeHtml(request.name)} — ${escapeHtml(request.email)} — ${escapeHtml(request.phone)}</p></br>
+      <p>Request ID: ${request._id}</p>`,
+  });
+
+  if (result.sent) {
+    await EmailConfig.updateOne({ _id: config._id }, { $inc: { sentCount: 1 } });
+  }
+}
+
 async function notifyTradeInStatusChange(request) {
   const config = await fetchEmailConfig();
 
-  await sendCustomerStatusEmail(request, config);
+  await Promise.all([
+    sendCustomerStatusEmail(request, config),
+    sendAdminStatusChangeEmail(request, config),
+  ]);
 
   await Notification.create({
     type: "trade-in",
