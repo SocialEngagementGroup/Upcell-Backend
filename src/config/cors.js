@@ -28,7 +28,12 @@ const corsOptions = {
       callback(null, true);
     } else {
       console.error(`CORS rejected origin: ${origin}`);
-      callback(new Error("Not allowed by CORS"));
+      const corsError = new Error("Not allowed by CORS");
+      // A rejected origin is a client/config problem, not a server failure —
+      // without this the global error handler defaults to 500 and pages the
+      // admin as if the site were broken.
+      corsError.status = 403;
+      callback(corsError);
     }
   },
   credentials: true,
