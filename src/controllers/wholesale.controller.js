@@ -4,8 +4,19 @@ const {
   getAdminListPagination,
   sendPaginatedResults,
 } = require("../utils/pagination");
+const { escapeRegex } = require("../utils/regex");
 
 const { Resend } = require("resend");
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[char]));
+}
 
 const resend = new Resend(process.env.RESEND_KEY);
 const adminNotificationEmail = process.env.ADMIN_NOTIFICATION_EMAIL;
@@ -19,20 +30,18 @@ const wholesaleFormSubmit = async (req, res, next) => {
 
     await newAddForm.save();
 
-    // sending emails to globaltradersww2@gmail.com to confirm order
-
     await resend.emails.send({
       from: wholesaleEmailFrom,
       to: [adminNotificationEmail],
       subject: "Whole-sale form submitted !!",
       html: `<strong>Whole-sale customer query from!</strong>
       </br>
-       <h2>Wholesale query form submitted by <strong>${addForm?.name} </strong></h2>
+       <h2>Wholesale query form submitted by <strong>${escapeHtml(addForm?.name)} </strong></h2>
        </br>
-       <p><strong>Name: </strong> ${addForm?.name}</p> </br>
-       <p><strong>Email: </strong> ${addForm?.email}</p> </br>
-       <p><strong>Phone number: </strong> ${addForm?.phone}</p> </br>
-       <p><strong>Devices: </strong> ${addForm?.devices}</p> </br>
+       <p><strong>Name: </strong> ${escapeHtml(addForm?.name)}</p> </br>
+       <p><strong>Email: </strong> ${escapeHtml(addForm?.email)}</p> </br>
+       <p><strong>Phone number: </strong> ${escapeHtml(addForm?.phone)}</p> </br>
+       <p><strong>Devices: </strong> ${escapeHtml(addForm?.devices)}</p> </br>
 
     </br> `,
     });
@@ -53,7 +62,7 @@ async function getAdminAddForms(req, res, next) {
       return sendPaginatedResults({
         res,
         model: AddForm,
-        query: { email: { $regex: new RegExp(email, "i") } },
+        query: { email: { $regex: new RegExp(escapeRegex(email), "i") } },
         sort: { createdAt: -1 },
         page,
         limit,

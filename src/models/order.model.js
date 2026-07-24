@@ -31,8 +31,12 @@ const OrderSchema = new Schema(
   { timestamps: true }
 );
 
-OrderSchema.index({ paypalId: 1 });
-OrderSchema.index({ stripeSessionId: 1 });
+// sparse: true — Manual/other-gateway orders don't have these fields at all,
+// and a plain unique index would treat every one of those missing values as
+// the same null and collide. sparse skips indexing docs where the field is
+// absent, so uniqueness only applies to orders that actually have an ID.
+OrderSchema.index({ paypalId: 1 }, { unique: true, sparse: true });
+OrderSchema.index({ stripeSessionId: 1 }, { unique: true, sparse: true });
 OrderSchema.index({ email: 1, paid: 1 });
 OrderSchema.index({ status: 1, updatedAt: -1 });
 OrderSchema.index({ createdAt: 1 });

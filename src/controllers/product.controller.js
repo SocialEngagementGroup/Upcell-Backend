@@ -189,8 +189,10 @@ async function getProductSuggestions(req, res, next) {
 
 async function getFilteredProducts(req, res, next) {
   try {
-    const n = req.params.n;
-    const skip = req.params.skip;
+    // Route params, not schema-validated — clamp here so a crafted URL
+    // (e.g. /products/999999999/0) can't force an unbounded collection scan.
+    const n = Math.min(Math.max(Number.parseInt(req.params.n, 10) || 20, 1), 100);
+    const skip = Math.max(Number.parseInt(req.params.skip, 10) || 0, 0);
 
     const { productName, storage, color, price, condition } = req.body;
 
