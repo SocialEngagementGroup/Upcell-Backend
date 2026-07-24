@@ -264,6 +264,22 @@ function paymentReceiptEmail({ orderId, paidWith, lineItems, total }) {
   };
 }
 
+function adminErrorAlertEmail() {
+  return {
+    subject: "A little hiccup on the UpCell site",
+    html: emailShell({
+      preheader: "Nothing urgent — our system flagged something for a developer to look at.",
+      badgeGlyph: "&#128295;",
+      headline: "A little hiccup on the site",
+      subtext: "Nothing to worry about &mdash; something on the site needs a developer&rsquo;s eye. They&rsquo;ve already been notified and will take a look soon. No action needed from you right now.",
+      detailRowsHtml: "",
+      ctaLabel: "Open Admin Dashboard",
+      ctaHref: `${FRONTEND_URL}/admin-secret`,
+      footerNote: "You're receiving this because you're listed as an UpCell site admin.",
+    }),
+  };
+}
+
 module.exports = {
   emailShell,
   tradeInRequestEmail,
@@ -271,4 +287,5 @@ module.exports = {
   orderPlacedEmail,
   orderStatusEmail,
   paymentReceiptEmail,
+  adminErrorAlertEmail,
 };
