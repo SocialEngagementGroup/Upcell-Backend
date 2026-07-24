@@ -183,6 +183,28 @@ function tradeInStatusEmail({ name, modelTitle, status, estimate, requestId }) {
   };
 }
 
+function orderPlacedEmail({ orderId, name }) {
+  const rows = detailRow("Order ID", `#${escapeHtml(orderId)}`, {
+    bordered: false,
+    valueColor: RED,
+    valueWeight: 700,
+  });
+
+  return {
+    subject: "Your order has been placed",
+    html: emailShell({
+      preheader: `We've received your order #${orderId}. We'll be in touch shortly.`,
+      badgeGlyph: "&#10003;",
+      headline: `Thanks${name ? `, ${escapeHtml(name)}` : ""}! Your order has been placed.`,
+      subtext: "We&rsquo;ve received your order and our team will follow up shortly with next steps.",
+      detailRowsHtml: rows,
+      ctaLabel: "View Order",
+      ctaHref: ACCOUNT_URL,
+      footerNote: "You're receiving this because you placed an order with UpCell.",
+    }),
+  };
+}
+
 const ORDER_STATUS_BADGE = {
   Delivered: "&#10003;",
   Shipped: "&#128230;",
@@ -246,6 +268,7 @@ module.exports = {
   emailShell,
   tradeInRequestEmail,
   tradeInStatusEmail,
+  orderPlacedEmail,
   orderStatusEmail,
   paymentReceiptEmail,
 };

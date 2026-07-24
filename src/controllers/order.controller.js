@@ -3,7 +3,7 @@ const { Resend } = require("resend");
 const Order = require("../models/order.model");
 const AuditLog = require("../models/auditLog.model");
 const { makeOrderObjAndTotal } = require("./checkout.controller");
-const { orderStatusEmail } = require("../services/emailTemplates");
+const { orderStatusEmail, orderPlacedEmail } = require("../services/emailTemplates");
 const {
   getAdminListPagination,
   emptyPaginatedResponse,
@@ -12,6 +12,17 @@ const {
 
 const resend = new Resend(process.env.RESEND_KEY);
 const orderEmailFrom = process.env.EMAIL_FROM;
+const adminNotificationEmail = process.env.ADMIN_NOTIFICATION_EMAIL;
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[char]));
+}
 
 async function getOrder(req, res, next) {
   try {
@@ -146,6 +157,22 @@ async function updateOrderStatus(req, res, next) {
       html,
     });
 
+    if (adminNotificationEmail) {
+      resend.emails
+        .send({
+          from: orderEmailFrom,
+          to: [adminNotificationEmail],
+          subject: `Order status updated: ${status}`,
+          html: `<strong>Order status updated</strong></br>
+            <p>Order ID: ${order._id}</p></br>
+            <p>New Status: ${escapeHtml(status)}</p></br>
+            <p>Customer: ${escapeHtml(order.name)} — ${escapeHtml(clientEmail)}</p>`,
+        })
+        .catch((error) => {
+          console.error("[order] admin status-update notification failed:", error);
+        });
+    }
+
     res.send("success");
   } catch (error) {
     next(error);
@@ -186,9 +213,43 @@ async function createOrder(req, res, next) {
 
     const newOrder = await Order.create(order);
     res.status(201).json(newOrder);
+
+    notifyOrderPlaced(newOrder).catch((error) => {
+      console.error("[order] order-placed notification failed:", error);
+    });
   } catch (error) {
     next(error);
   }
+}
+
+// Fire-and-forget, mirroring the pattern used for trade-in/payment-receipt
+// notifications elsewhere — an email failure shouldn't fail order creation,
+// which already responded to the customer above.
+async function notifyOrderPlaced(order) {
+  const sends = [];
+
+  if (order.email) {
+    const { subject, html } = orderPlacedEmail({ orderId: order._id, name: order.name });
+    sends.push(resend.emails.send({ from: orderEmailFrom, to: [order.email], subject, html }));
+  }
+
+  if (adminNotificationEmail) {
+    sends.push(
+      resend.emails.send({
+        from: orderEmailFrom,
+        to: [adminNotificationEmail],
+        subject: "New order on UpCell",
+        html: `<strong>New Order!</strong> </br>
+          <p>Order Id: ${order._id}</p></br>
+          <p>Paid With: ${escapeHtml(order.paidWith)}</p></br>
+          <p>Customer: ${escapeHtml(order.name)} — ${escapeHtml(order.email)}</p></br>
+          <h2>Go to the UpCell Admin page to see all orders</h2></br>
+          Link: ${process.env.FRONTEND_URL}/admin-secret/orders`,
+      })
+    );
+  }
+
+  await Promise.all(sends);
 }
 
 module.exports = {
