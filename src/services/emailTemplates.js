@@ -3,6 +3,8 @@ const FRONTEND_URL = process.env.FRONTEND_URL || "";
 const LOGO_URL = `${FRONTEND_URL}/staticImages/upcellLogo.png`;
 const SUPPORT_URL = `${FRONTEND_URL}/support`;
 const ACCOUNT_URL = `${FRONTEND_URL}/myaccount`;
+const ADMIN_ORDERS_URL = `${FRONTEND_URL}/admin-secret/orders`;
+const adminTradeInUrl = (requestId) => `${FRONTEND_URL}/admin-secret/trade-in/${requestId}`;
 
 const FONT = "'Roboto',Helvetica,Arial,sans-serif";
 const RED = "#D90B0F";
@@ -264,6 +266,99 @@ function paymentReceiptEmail({ orderId, paidWith, lineItems, total }) {
   };
 }
 
+function adminNewTradeInEmail({ name, email, phone, modelTitle, storage, estimate, requestId }) {
+  const rows =
+    detailRow("Device", escapeHtml(modelTitle)) +
+    detailRow("Storage", escapeHtml(storage)) +
+    detailRow("Estimate", money(estimate)) +
+    detailRow("Customer", escapeHtml(name)) +
+    detailRow("Email", escapeHtml(email)) +
+    detailRow("Phone", escapeHtml(phone), { bordered: false });
+
+  return {
+    subject: "New trade-in request received",
+    html: emailShell({
+      preheader: `${name} submitted a trade-in request for ${modelTitle} — ${money(estimate)}.`,
+      badgeGlyph: "&#128241;",
+      headline: "New trade-in request",
+      subtext: "A customer just submitted a trade-in request. Here are the details.",
+      detailRowsHtml: rows,
+      ctaLabel: "View Request",
+      ctaHref: adminTradeInUrl(requestId),
+      footerNote: "You're receiving this because you're listed as an UpCell trade-in admin.",
+    }),
+  };
+}
+
+function adminTradeInStatusEmail({ name, email, phone, modelTitle, storage, status, estimate, requestId }) {
+  const rows =
+    detailRow("Device", escapeHtml(modelTitle)) +
+    detailRow("Storage", escapeHtml(storage)) +
+    detailRow("Estimate", money(estimate)) +
+    detailRow("Customer", escapeHtml(name)) +
+    detailRow("Email", escapeHtml(email)) +
+    detailRow("Phone", escapeHtml(phone)) +
+    detailRow("New Status", escapeHtml(status), { bordered: false, valueColor: RED, valueWeight: 700 });
+
+  return {
+    subject: `Trade-in status updated: ${status}`,
+    html: emailShell({
+      preheader: `Request ${requestId} for ${name} moved to "${status}".`,
+      badgeGlyph: status === "Paid" ? "&#10003;" : "&#128260;",
+      headline: `Trade-in status updated: <span style="color:${RED};">${escapeHtml(status)}</span>`,
+      subtext: "A trade-in request you're tracking just changed status.",
+      detailRowsHtml: rows,
+      ctaLabel: "View Request",
+      ctaHref: adminTradeInUrl(requestId),
+      footerNote: "You're receiving this because you're listed as an UpCell trade-in admin.",
+    }),
+  };
+}
+
+function adminNewOrderEmail({ orderId, paidWith, name, email }) {
+  const rows =
+    detailRow("Order ID", `#${escapeHtml(orderId)}`) +
+    detailRow("Paid With", escapeHtml(paidWith)) +
+    detailRow("Customer", escapeHtml(name)) +
+    detailRow("Email", escapeHtml(email), { bordered: false });
+
+  return {
+    subject: "New order on UpCell",
+    html: emailShell({
+      preheader: `New order from ${name} — paid with ${paidWith}.`,
+      badgeGlyph: "&#128722;",
+      headline: "New order on UpCell",
+      subtext: "A new order just came in. Here are the details.",
+      detailRowsHtml: rows,
+      ctaLabel: "View All Orders",
+      ctaHref: ADMIN_ORDERS_URL,
+      footerNote: "You're receiving this because you're listed as an UpCell order admin.",
+    }),
+  };
+}
+
+function adminOrderStatusEmail({ orderId, status, name, email }) {
+  const rows =
+    detailRow("Order ID", `#${escapeHtml(orderId)}`) +
+    detailRow("Customer", escapeHtml(name)) +
+    detailRow("Email", escapeHtml(email)) +
+    detailRow("New Status", escapeHtml(status), { bordered: false, valueColor: RED, valueWeight: 700 });
+
+  return {
+    subject: `Order status updated: ${status}`,
+    html: emailShell({
+      preheader: `Order #${orderId} is now ${status}.`,
+      badgeGlyph: ORDER_STATUS_BADGE[status] || "&#128230;",
+      headline: `Order status updated: <span style="color:${RED};">${escapeHtml(status)}</span>`,
+      subtext: "An order you're tracking just changed status.",
+      detailRowsHtml: rows,
+      ctaLabel: "View All Orders",
+      ctaHref: ADMIN_ORDERS_URL,
+      footerNote: "You're receiving this because you're listed as an UpCell order admin.",
+    }),
+  };
+}
+
 function adminErrorAlertEmail() {
   return {
     subject: "A little hiccup on the UpCell site",
@@ -288,4 +383,8 @@ module.exports = {
   orderStatusEmail,
   paymentReceiptEmail,
   adminErrorAlertEmail,
+  adminNewTradeInEmail,
+  adminTradeInStatusEmail,
+  adminNewOrderEmail,
+  adminOrderStatusEmail,
 };
