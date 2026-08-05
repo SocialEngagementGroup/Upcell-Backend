@@ -20,7 +20,7 @@ async function getEmailConfig(req, res, next) {
 async function updateEmailConfig(req, res, next) {
   try {
     const config = await fetchOrCreateConfig();
-    const { tradeInAdminEmail, enableCustomerEmails, enableAdminEmails } = req.body;
+    const { tradeInAdminEmail, enableCustomerEmails, enableAdminEmails, enableErrorAlerts } = req.body;
 
     if (typeof tradeInAdminEmail === "string" && tradeInAdminEmail.trim()) {
       config.tradeInAdminEmail = tradeInAdminEmail.trim();
@@ -30,6 +30,9 @@ async function updateEmailConfig(req, res, next) {
     }
     if (typeof enableAdminEmails === "boolean") {
       config.enableAdminEmails = enableAdminEmails;
+    }
+    if (typeof enableErrorAlerts === "boolean") {
+      config.enableErrorAlerts = enableErrorAlerts;
     }
 
     await config.save();
