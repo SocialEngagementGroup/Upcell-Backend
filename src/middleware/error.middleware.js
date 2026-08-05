@@ -1,5 +1,6 @@
 const { Resend } = require("resend");
 const { adminErrorAlertEmail } = require("../services/emailTemplates");
+const { EmailConfig } = require("../models/emailConfig.model");
 
 const resend = new Resend(process.env.RESEND_KEY);
 const adminNotificationEmail = process.env.ADMIN_NOTIFICATION_EMAIL;
@@ -54,9 +55,16 @@ function sendGoogleChatAlert() {
     });
 }
 
-function sendErrorAlert() {
+async function sendErrorAlert() {
   const now = Date.now();
   if (now - lastAlertSentAt < ALERT_THROTTLE_MS) return;
+
+  // Admin-controlled mute (Admin > Email Settings) — lets a developer turn
+  // off both the alert email and the Google Chat ping while intentionally
+  // testing something expected to 5xx, without touching code or .env.
+  const config = await EmailConfig.findOne().catch(() => null);
+  if (config && config.enableErrorAlerts === false) return;
+
   lastAlertSentAt = now;
 
   sendEmailAlert();

@@ -4,7 +4,7 @@ const Order = require("../models/order.model");
 const SingleVariation = require("../models/singleVariation.model");
 const PaymentEventLog = require("../models/paymentEventLog.model");
 const { Resend } = require("resend");
-const { paymentReceiptEmail } = require("../services/emailTemplates");
+const { paymentReceiptEmail, adminNewOrderEmail } = require("../services/emailTemplates");
 
 // Order.line_items are stored in a Stripe price_data-shaped structure
 // (checkout.controller.js models both gateways after Stripe's shape) —
@@ -16,6 +16,27 @@ exports.orderLineItemsForReceipt = (order) =>
     qty: item?.quantity || item?.price_data?.product_data?.metadata?.quantity || 1,
     price: item?.price_data?.product_data?.metadata?.totalPaid || 0,
   }));
+
+// Shared by every payment gateway's "order just got marked paid" path
+// (PayPal capture/webhook and Stripe webhook) so they can't drift out of
+// sync the way Stripe previously did — it called sendPaymentReceiptEmail
+// but never this, so paid Stripe orders never notified the admin at all.
+exports.sendAdminNewOrderEmail = (order) => {
+  if (!adminNotificationEmail) return;
+
+  const { subject, html } = adminNewOrderEmail({
+    orderId: order._id,
+    paidWith: order.paidWith,
+    name: order.name,
+    email: order.email,
+  });
+
+  resend.emails
+    .send({ from: orderEmailFrom, to: [adminNotificationEmail], subject, html })
+    .catch((error) => {
+      console.error("Failed to send admin new-order email:", error);
+    });
+};
 
 // Fire-and-forget on purpose — a failed receipt email shouldn't fail the
 // whole webhook/capture response (which is what tells PayPal/Stripe whether
@@ -404,12 +425,7 @@ exports.updateOrderPaid = async (paypalId) => {
   );
 
   if (updatedOrder) {
-    await resend.emails.send({
-      from: orderEmailFrom,
-      to: [adminNotificationEmail],
-      subject: "New order on UpCell",
-      html: `<strong>New Order!</strong> </br> <p>Order Id:  ${updatedOrder._id}</p> </br> <h2>Go to the UpCell Admin page to see all orders</h2> </br> Link: ${process.env.FRONTEND_URL}/admin-secret/orders`,
-    });
+    exports.sendAdminNewOrderEmail(updatedOrder);
     exports.sendPaymentReceiptEmail(updatedOrder);
     return updatedOrder;
   }

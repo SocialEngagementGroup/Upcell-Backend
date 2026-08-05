@@ -4,7 +4,12 @@ const { EmailConfig } = require("../models/emailConfig.model");
 const { Notification } = require("../models/notification.model");
 const AuditLog = require("../models/auditLog.model");
 const { sendMail, getMessageId } = require("../services/mailService");
-const { tradeInRequestEmail, tradeInStatusEmail } = require("../services/emailTemplates");
+const {
+  tradeInRequestEmail,
+  tradeInStatusEmail,
+  adminNewTradeInEmail,
+  adminTradeInStatusEmail,
+} = require("../services/emailTemplates");
 const {
   getAdminListPagination,
   emptyPaginatedResponse,
@@ -12,16 +17,6 @@ const {
 } = require("../utils/pagination");
 
 const tradeInEmailFrom = process.env.EMAIL_FROM;
-
-function escapeHtml(value) {
-  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  }[char]));
-}
 
 // Statuses that should notify the customer at all — "Closed" (a rejected/
 // withdrawn request) intentionally has no customer-facing copy, same as
@@ -104,15 +99,21 @@ async function sendCustomerStatusEmail(request, config) {
 async function sendAdminNewRequestEmail(request, config) {
   if (!config.enableAdminEmails || !config.tradeInAdminEmail) return;
 
+  const { subject, html } = adminNewTradeInEmail({
+    name: request.name,
+    email: request.email,
+    phone: request.phone,
+    modelTitle: request.modelTitle,
+    storage: request.storage,
+    estimate: request.estimate,
+    requestId: request._id,
+  });
+
   const result = await sendMail({
     from: tradeInEmailFrom,
     to: config.tradeInAdminEmail,
-    subject: "New trade-in request received",
-    html: `<strong>New trade-in request</strong></br>
-      <p>Device: ${escapeHtml(request.modelTitle)} (${escapeHtml(request.storage)})</p></br>
-      <p>Estimate: $${request.estimate}</p></br>
-      <p>Customer: ${escapeHtml(request.name)} — ${escapeHtml(request.email)} — ${escapeHtml(request.phone)}</p></br>
-      <p>Request ID: ${request._id}</p>`,
+    subject,
+    html,
   });
 
   if (result.sent) {
@@ -140,15 +141,22 @@ async function notifyNewTradeIn(request) {
 async function sendAdminStatusChangeEmail(request, config) {
   if (!config.enableAdminEmails || !config.tradeInAdminEmail) return;
 
+  const { subject, html } = adminTradeInStatusEmail({
+    name: request.name,
+    email: request.email,
+    phone: request.phone,
+    modelTitle: request.modelTitle,
+    storage: request.storage,
+    status: request.status,
+    estimate: request.estimate,
+    requestId: request._id,
+  });
+
   const result = await sendMail({
     from: tradeInEmailFrom,
     to: config.tradeInAdminEmail,
-    subject: `Trade-in status updated: ${request.status}`,
-    html: `<strong>Trade-in status updated</strong></br>
-      <p>Device: ${escapeHtml(request.modelTitle)} (${escapeHtml(request.storage)})</p></br>
-      <p>New Status: ${escapeHtml(request.status)}</p></br>
-      <p>Customer: ${escapeHtml(request.name)} — ${escapeHtml(request.email)} — ${escapeHtml(request.phone)}</p></br>
-      <p>Request ID: ${request._id}</p>`,
+    subject,
+    html,
   });
 
   if (result.sent) {
