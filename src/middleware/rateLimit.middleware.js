@@ -51,4 +51,15 @@ const webhookLimiter = rateLimit({
   message: { error: "Too many requests. Please try again later." },
 });
 
-module.exports = { publicFormLimiter, checkoutLimiter, analyticsLimiter, cartLimiter, webhookLimiter };
+// Chat is a back-and-forth conversation, not a one-shot form — needs enough
+// headroom for a real back-and-forth session, but still capped so one visitor
+// can't hammer the AI provider (and its per-token cost) in a tight loop.
+const chatLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many messages. Please wait a moment and try again." },
+});
+
+module.exports = { publicFormLimiter, checkoutLimiter, analyticsLimiter, cartLimiter, webhookLimiter, chatLimiter };

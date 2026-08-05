@@ -150,6 +150,11 @@ const contactSubmissionSchema = z.object({
   message: trimmedString("Message", 10, 3000),
 });
 
+const chatMessageSchema = z.object({
+  message: trimmedString("Message", 1, 2000),
+  sessionId: z.string().trim().max(160, "Session ID must be 160 characters or fewer"),
+});
+
 const analyticsEventSchema = z.object({
   category: z.enum(["form_submit", "form_dropoff", "form_engagement", "admin_api_error"]),
   name: trimmedString("Event name", 1, 120),
@@ -173,4 +178,5 @@ module.exports = {
   newsletterSubscriberSchema,
   contactSubmissionSchema,
   analyticsEventSchema,
+  chatMessageSchema,
 };

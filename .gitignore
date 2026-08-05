@@ -4,10 +4,3 @@ node_modules
 !.env.example
 coverage
 *.log
-
-# Chatbot — kept local-only for now, not pushed to GitHub (see Documentation/Upcell-Chatbot-Plan.md)
-src/controllers/chat.controller.js
-src/models/chatConversation.model.js
-src/routes/chat.routes.js
-src/services/aiProvider/
-src/services/chat/
