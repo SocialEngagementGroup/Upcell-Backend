@@ -1,4 +1,18 @@
-const { clerkClient } = require("@clerk/clerk-sdk-node");
+// @clerk/express replaces @clerk/clerk-sdk-node, which reached end of support
+// on 2025-01-10 and no longer receives security patches.
+// Aliased on import because this module exports its own verifyToken middleware.
+const { clerkClient, verifyToken: verifyClerkToken } = require("@clerk/express");
+
+// clerkClient picks CLERK_SECRET_KEY up from the environment on its own, but
+// verifyToken() does NOT — called without an explicit secretKey it throws a
+// TypeError, which the catch blocks below would quietly turn into a 401 on
+// every single request. So the key is passed explicitly on every call.
+// Read per-call rather than at import time so the value is whatever dotenv has
+// loaded by the time a request actually arrives, not whatever was set when this
+// module happened to be required.
+function getVerifyOptions() {
+  return { secretKey: process.env.CLERK_SECRET_KEY };
+}
 
 function getBearerToken(req) {
   const authHeader = req.headers.authorization || "";
@@ -35,7 +49,7 @@ const verifyToken = async (req, res, next) => {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    const claims = await clerkClient.verifyToken(token);
+    const claims = await verifyClerkToken(token, getVerifyOptions());
     const userId = claims.sub;
 
     if (!userId) {
@@ -73,7 +87,7 @@ const optionalAuth = async (req, res, next) => {
   }
 
   try {
-    const claims = await clerkClient.verifyToken(token);
+    const claims = await verifyClerkToken(token, getVerifyOptions());
     const userId = claims.sub;
 
     if (userId) {
