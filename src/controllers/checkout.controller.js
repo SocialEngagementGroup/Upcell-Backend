@@ -268,8 +268,6 @@ exports.capturePayment = async (req, res, next) => {
 
     const responseData = await response.json();
 
-    // console.log("capture  payment response : *** ", responseData);
-
     // update order status to paid
     let dbOrderId;
     if (responseData?.status === "COMPLETED") {
@@ -398,7 +396,7 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
     country,
     shipping,
     paid: false,
-    status: "payment failed",
+    status: "pending_payment",
     paidWith,
   };
 

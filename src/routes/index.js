@@ -24,8 +24,10 @@ router.use("/", tradeInRoutes);
 router.use("/", newsletterRoutes);
 router.use("/", contactRoutes);
 router.use("/", analyticsRoutes);
-router.use("/", stripeRoutes);
-router.use("/checkout-customer", checkoutCustomerRoutes);
+// Disabled per client decision 2026-08-06 — bank gateway replaces these.
+// Kept as backup: controllers/routes are untouched, only unmounted here.
+// router.use("/", stripeRoutes);
+// router.use("/checkout-customer", checkoutCustomerRoutes);
 router.use("/add-run-form-submit", wholesaleRoutes);
 router.use("/this-month-sold-items", monthlySellRoutes);
 router.use("/", emailConfigRoutes);

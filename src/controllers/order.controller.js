@@ -111,7 +111,13 @@ async function getAdminOrdersByDate(req, res, next) {
   }
 }
 
-const ORDER_STATUS_VALUES = ["Processing", "Shipped", "Delivered", "Returned", "Refunded", "payment failed"];
+const ORDER_STATUS_VALUES = ["pending_payment", "Processing", "Shipped", "Delivered", "Returned", "Refunded", "payment failed"];
+
+// Statuses that mean no money has been received. Everything else implies a
+// confirmed payment — including Returned and Refunded, where the payment did
+// happen and was reversed afterwards, so those orders must stay visible to the
+// customer rather than dropping off their order list.
+const UNPAID_STATUSES = ["pending_payment", "payment failed"];
 
 async function updateOrderStatus(req, res, next) {
   const { orderId, status } = req.body;
@@ -127,7 +133,16 @@ async function updateOrderStatus(req, res, next) {
     }
 
     const previousStatus = order.status;
+    const previousPaid = order.paid;
     order.status = status;
+
+    // This is the only path that can confirm a payment now: the bank-hosted
+    // gateway settles out-of-band and capturePayment's route is unmounted
+    // (see routes/index.js), so createOrder always writes pending_payment.
+    // Keeping `paid` in step with status here is what puts the order on the
+    // customer's own order list, which filters on paid:true in
+    // getClientOrders below.
+    order.paid = !UNPAID_STATUSES.includes(status);
 
     await order.save();
 
@@ -137,7 +152,7 @@ async function updateOrderStatus(req, res, next) {
       action: "order.status_update",
       targetType: "Order",
       targetId: order._id,
-      metadata: { from: previousStatus, to: status },
+      metadata: { from: previousStatus, to: status, paidFrom: previousPaid, paidTo: order.paid },
     }).catch((error) => {
       console.error("[audit] order.status_update log failed:", error);
     });
@@ -195,16 +210,10 @@ async function createOrder(req, res, next) {
     const paidWith = req.body.paidWith || "Card";
     const { order } = await makeOrderObjAndTotal({ req, paidWith });
 
-    // Manual/"Contact to order" submissions haven't actually been paid —
-    // no payment was collected, admin still needs to reach out. Only
-    // auto-mark paid+Processing for paths where payment is confirmed by
-    // this point. (makeOrderObjAndTotal already defaults paid:false,
-    // status:"payment failed" — that default is correct for Manual.)
-    if (paidWith !== "Manual") {
-      order.paid = true;
-      order.status = "Processing";
-    }
-
+    // No paidWith value auto-marks paid/Processing here — the bank-hosted
+    // gateway confirms payment out-of-band after this request completes,
+    // so paid stays false and status stays makeOrderObjAndTotal's
+    // "pending_payment" default until that confirmation happens.
     const newOrder = await Order.create(order);
     res.status(201).json(newOrder);
 

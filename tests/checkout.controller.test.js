@@ -569,7 +569,7 @@ describe("makeOrderObjAndTotal — server-side pricing (the core anti-tampering 
     expect(totalPrice).toBe(999); // from dbProduct.price, not req.body
     expect(order.line_items[0].price_data.unit_amount).toBe(99900); // cents
     expect(order.paid).toBe(false);
-    expect(order.status).toBe("payment failed");
+    expect(order.status).toBe("pending_payment");
   });
 
   it("aggregates quantity when the same product id appears more than once in orders[]", async () => {

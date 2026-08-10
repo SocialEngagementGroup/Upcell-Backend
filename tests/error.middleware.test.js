@@ -1,7 +1,19 @@
 const mockSend = jest.fn();
+const mockFindOne = jest.fn();
 
 jest.mock("resend", () => ({
   Resend: jest.fn().mockImplementation(() => ({ emails: { send: mockSend } })),
+}));
+// Without this, EmailConfig.findOne() in sendErrorAlert() hits the real
+// (unconnected) Mongoose model and hangs instead of resolving, so the
+// alert never fires within the test — it fires later, after teardown has
+// already deleted global.fetch, crashing the process asynchronously.
+// Uses a factory closing over mockFindOne (like the resend mock above) —
+// loadMiddleware() calls jest.resetModules() and re-requires this module,
+// and a plain jest.mock() automock would hand back a fresh, unconfigured
+// mock on each re-require instead of the one this file configures below.
+jest.mock("../src/models/emailConfig.model", () => ({
+  EmailConfig: { findOne: mockFindOne },
 }));
 
 const WEBHOOK_URL = "https://chat.googleapis.com/v1/spaces/test/messages?key=k&token=t";
@@ -36,6 +48,7 @@ function loadMiddleware(env = {}) {
 
 beforeEach(() => {
   mockSend.mockReset().mockResolvedValue({});
+  mockFindOne.mockReset().mockResolvedValue(null);
   global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200, text: async () => "" });
   consoleErrorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
   loadMiddleware();
