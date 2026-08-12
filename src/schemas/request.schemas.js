@@ -150,9 +150,12 @@ const contactSubmissionSchema = z.object({
   message: trimmedString("Message", 10, 3000),
 });
 
+// sessionId intentionally NOT in this schema (SEG F-01) — identity comes
+// only from chatSession.middleware.js (server-issued cookie or logged-in
+// user), never from the request body. If a client sends a sessionId field
+// anyway, it's silently ignored (zod strips unknown keys by default).
 const chatMessageSchema = z.object({
   message: trimmedString("Message", 1, 2000),
-  sessionId: z.string().trim().max(160, "Session ID must be 160 characters or fewer"),
 });
 
 const analyticsEventSchema = z.object({

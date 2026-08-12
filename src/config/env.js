@@ -7,6 +7,9 @@ const requiredEnvVars = [
   "FRONTEND_ORIGINS",
   "ADMIN_NOTIFICATION_EMAIL",
   "EMAIL_FROM",
+  // Signs the guest chat-session cookie (SEG F-01) — without a real secret
+  // here, guest identity cookies would be forgeable.
+  "CHAT_SESSION_SECRET",
 ];
 
 function hasEnvValue(name) {

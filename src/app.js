@@ -2,6 +2,7 @@
 
 const express = require("express");
 const cors = require("cors");
+const cookieParser = require("cookie-parser");
 const routes = require("./routes");
 const { corsOptions } = require("./config/cors");
 const { errorHandler } = require("./middleware/error.middleware");
@@ -15,6 +16,9 @@ const app = express();
 app.set("trust proxy", 1);
 
 app.use(cors(corsOptions));
+// Signs/verifies the guest chat-session cookie (SEG F-01) — chatSession
+// middleware reads req.signedCookies, never a client-supplied identifier.
+app.use(cookieParser(process.env.CHAT_SESSION_SECRET));
 
 // Product/category images are sent as base64 data URLs in the JSON body
 // (see AddProduct/ProductBatchForm) — those specific admin write routes need
