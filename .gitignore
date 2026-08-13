@@ -11,3 +11,6 @@ src/models/chatConversation.model.js
 src/routes/chat.routes.js
 src/services/aiProvider/
 src/services/chat/
+
+# Point-in-time DB backups taken before destructive syncs — local only
+scripts/backups/
