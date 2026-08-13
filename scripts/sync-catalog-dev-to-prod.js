@@ -1,47 +1,51 @@
 require("dotenv").config();
 const mongoose = require("mongoose");
 
-// Copies image fields from the development database to production.
+// Copies catalogue presentation fields from development to production.
 //
-// Why this exists: the Cloudinary backfill was only ever run against
-// upcell_development. It added a `publicId` alongside the original `url` on
-// every image reference rather than replacing it, and the frontend's
-// resolveImageRef() prefers publicId and falls back to url. Production never
-// got the backfill, so its documents still carry url only — and because the
+// Why this exists: two migrations — the Cloudinary image backfill and the
+// category-management refactor — were only ever run against
+// upcell_development. Production was left on the pre-migration shape, which
+// shows up as broken images and missing category data on the live site.
+//
+// The image half: the backfill added a `publicId` alongside the original `url`
+// rather than replacing it, and the frontend's resolveImageRef() prefers
+// publicId with url as fallback. Production carried url only — and since the
 // real PNGs were deleted from Frontend/public/staticImages when the catalogue
-// moved to Cloudinary, those urls now 404. That is the broken-image symptom:
-// dev resolves through Cloudinary, prod falls back to files that no longer ship.
+// moved to Cloudinary, those urls now 404.
 //
-// Scope is deliberately narrow. Only these fields are written:
+// Fields written:
 //
-//   parentproducts.images     (array of { url, publicId, ... })
-//   singlevariations.image, .imagePublicId, .imageWidth, .imageHeight
-//   shopcategories.images     (array of { url, publicId, ... })
+//   parentproducts    images, categoryId, categoryName
+//   singlevariations  image, imagePublicId, imageWidth, imageHeight,
+//                     categoryId, categoryName
+//   shopcategories    images
 //
-// The three extra variation fields matter as much as `image` does. Variations
-// store the image as a bare string, so there is no object to carry a publicId
-// the way parentproducts.images does — the backfill put it in a sibling
-// `imagePublicId` field instead. resolveProductImage() falls back to that field
-// whenever the manifest cannot match a product, which is the common path for
-// models whose Cloudinary files are not colour-named (iPhone 17 Pro is stored
-// as iphone-17-pro-1/2/3, so colour matching finds no candidate). Syncing
-// `image` alone leaves those cards pointing at a deleted local PNG.
+// imagePublicId matters as much as image does. Variations store the image as a
+// bare string, so unlike parentproducts.images there is no object to carry a
+// publicId — the backfill put it in a sibling field. resolveProductImage()
+// falls back to it whenever the manifest cannot match a product, which is the
+// common path for models whose Cloudinary files are not colour-named (iPhone
+// 17 Pro is stored as iphone-17-pro-1/2/3, so colour matching finds no
+// candidate). Syncing image alone leaves those cards on a deleted local PNG.
 //
 // Orders, trade-in requests, users, analytics, notifications and payment logs
 // are never read or written. Production holds real customer records that do not
 // exist in dev (10 orders vs 5, 8 trade-ins vs 7), so a wholesale database copy
-// would destroy them. This syncs images and nothing else.
+// would destroy them. This syncs catalogue presentation and nothing else.
 //
 // Matching: by _id first. 27 variations were created independently in each
 // database and share no _id, so those fall back to
 // productName + storage + colour. Categories present in dev but not in prod are
 // reported and skipped, never created — that keeps the test category out of prod.
+// Every distinct dev categoryId was verified to exist as a prod shopcategory
+// before this was widened to carry category references across.
 //
 // Dry run by default; pass --apply to write. Safe to re-run: documents already
 // holding the target value are skipped.
 //
-//   node scripts/sync-images-dev-to-prod.js            # preview
-//   node scripts/sync-images-dev-to-prod.js --apply    # write
+//   node scripts/sync-catalog-dev-to-prod.js            # preview
+//   node scripts/sync-catalog-dev-to-prod.js --apply    # write
 
 const colourOf = (doc) => {
   const c = doc.color;
@@ -83,8 +87,9 @@ async function main() {
 
   const summary = [];
 
-  // --- parentproducts.images -------------------------------------------------
+  // --- parentproducts --------------------------------------------------------
   {
+    const FIELDS = ["images", "categoryId", "categoryName"];
     const devDocs = await dev.db.collection("parentproducts").find({}).toArray();
     const prodCol = prod.db.collection("parentproducts");
     let changed = 0;
@@ -92,28 +97,44 @@ async function main() {
     const missing = [];
 
     for (const d of devDocs) {
-      const p = await prodCol.findOne({ _id: d._id }, { projection: { images: 1 } });
+      const p = await prodCol.findOne(
+        { _id: d._id },
+        { projection: { images: 1, categoryId: 1, categoryName: 1 } }
+      );
       if (!p) {
         missing.push(d.modelName);
         continue;
       }
-      if (same(p.images, d.images)) {
+      const patch = {};
+      for (const f of FIELDS) {
+        if (d[f] !== undefined && !same(p[f], d[f])) patch[f] = d[f];
+      }
+      if (!Object.keys(patch).length) {
         current += 1;
         continue;
       }
       changed += 1;
-      if (apply) await prodCol.updateOne({ _id: d._id }, { $set: { images: d.images || [] } });
+      if (apply) await prodCol.updateOne({ _id: d._id }, { $set: patch });
     }
-    summary.push({ what: "parentproducts.images", changed, current, missing });
+    summary.push({ what: "parentproducts (images + category)", changed, current, missing });
   }
 
-  // --- singlevariations.image ------------------------------------------------
+  // --- singlevariations ------------------------------------------------------
   {
-    const IMAGE_FIELDS = ["image", "imagePublicId", "imageWidth", "imageHeight"];
+    const IMAGE_FIELDS = ["image", "imagePublicId", "imageWidth", "imageHeight", "categoryId", "categoryName"];
     const devDocs = await dev.db.collection("singlevariations").find({}).toArray();
     const prodCol = prod.db.collection("singlevariations");
     const prodDocs = await prodCol
-      .find({}, { projection: { productName: 1, storage: 1, color: 1, image: 1, imagePublicId: 1, imageWidth: 1, imageHeight: 1 } })
+      .find(
+        {},
+        {
+          projection: {
+            productName: 1, storage: 1, color: 1,
+            image: 1, imagePublicId: 1, imageWidth: 1, imageHeight: 1,
+            categoryId: 1, categoryName: 1,
+          },
+        }
+      )
       .toArray();
 
     const byId = new Map(prodDocs.map((d) => [String(d._id), d]));
@@ -154,7 +175,7 @@ async function main() {
       changed += 1;
       if (apply) await prodCol.updateOne({ _id: target._id }, { $set: patch });
     }
-    summary.push({ what: "singlevariations (image + imagePublicId/Width/Height)", changed, current, missing, note: `${viaKey} matched by name/storage/colour` });
+    summary.push({ what: "singlevariations (image fields + category)", changed, current, missing, note: `${viaKey} matched by name/storage/colour` });
   }
 
   // --- shopcategories.images -------------------------------------------------
