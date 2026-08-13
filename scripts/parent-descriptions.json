@@ -1,0 +1,583 @@
+[
+  {
+    "_id": "6a271d1472b1c0791a38dfb5",
+    "modelName": "iPhone 13 mini",
+    "categoryName": "iPhone",
+    "currentDescription": "Compact iPhone configurations for customers who prefer a smaller form factor.",
+    "description": "For anyone who has been holding onto a smaller phone and doesn't want to give it up. The 13 mini fits comfortably in one hand and slips into pockets that larger models simply don't, without asking you to compromise on camera quality. Every unit is inspected and graded before listing, and covered by a 12-month warranty."
+  },
+  {
+    "_id": "6a271d1672b1c0791a38dfde",
+    "modelName": "iPhone 13",
+    "categoryName": "iPhone",
+    "currentDescription": "Well-rounded iPhone models that remain a strong entry point into the lineup.",
+    "description": "A dependable everyday iPhone and one of the smartest entry points into the lineup. Strong battery life, a camera system that still holds up well, and the kind of reliability that makes it an easy first choice or a straightforward upgrade from an older model. Fully inspected, honestly graded, warranty included for 12 months."
+  },
+  {
+    "_id": "6a271d1772b1c0791a38e006",
+    "modelName": "iPhone 13 Pro",
+    "categoryName": "iPhone Pro",
+    "currentDescription": "Compact iPhone Pro options with triple-camera flexibility and strong performance.",
+    "description": "Triple-camera flexibility in a size that still works one-handed. The 13 Pro brought ProMotion and the full Pro camera system, and it remains capable years on. A strong value pick if you want Pro features without current-generation pricing. Inspected, graded, and warranted for 12 months."
+  },
+  {
+    "_id": "6a271d1972b1c0791a38e032",
+    "modelName": "iPhone 13 Pro Max",
+    "categoryName": "iPhone Pro Max",
+    "currentDescription": "Large iPhone Pro configurations with extended battery life and premium features.",
+    "description": "The endurance option. A large display, the full Pro camera system, and battery life that comfortably clears a long day. Still one of the better value flagships in the range. Every unit is inspected and graded, and arrives with 12 months of warranty cover."
+  },
+  {
+    "_id": "6a271d1b72b1c0791a38e05e",
+    "modelName": "iPhone 14",
+    "categoryName": "iPhone",
+    "currentDescription": "Reliable iPhone models with proven camera performance and smooth daily use.",
+    "description": "The safe pick for people who want a phone that just works. Proven camera performance, comfortable battery life, and enough headroom to stay current for years. A strong choice if you're moving up from an iPhone 11 or 12. Backed by our 12-month warranty and a full condition check before it ships."
+  },
+  {
+    "_id": "6a271d1c72b1c0791a38e086",
+    "modelName": "iPhone 14 Plus",
+    "categoryName": "iPhone Plus",
+    "currentDescription": "Spacious iPhone options with a larger screen and all-day battery life.",
+    "description": "Big-screen iPhone without Pro pricing. The Plus pairs a generous display with some of the best battery life in its generation, making it a natural fit for reading, streaming, and long days away from a charger. Inspected, graded, and covered by our 12-month warranty."
+  },
+  {
+    "_id": "6a271d1d72b1c0791a38e0ae",
+    "modelName": "iPhone 14 Pro",
+    "categoryName": "iPhone Pro",
+    "currentDescription": "Refined iPhone Pro options with standout camera and display quality.",
+    "description": "The generation that introduced the always-on display and Dynamic Island, paired with a camera system that genuinely changed what the phone could do in low light. Still a serious performer. Each unit passes a full functional check, and 12 months of warranty cover comes as standard."
+  },
+  {
+    "_id": "6a271d1f72b1c0791a38e0d2",
+    "modelName": "iPhone 14 Pro Max",
+    "categoryName": "iPhone Pro Max",
+    "currentDescription": "Large-screen iPhone Pro options with premium imaging and battery endurance.",
+    "description": "Premium imaging in the largest body Apple offered that year, with battery endurance to match. Well suited to heavy users who watch, shoot, and work on their phone all day. Fully inspected before listing, honestly graded, and warranty-backed for 12 months."
+  },
+  {
+    "_id": "6a271d2072b1c0791a38e0f6",
+    "modelName": "iPhone 15",
+    "categoryName": "iPhone",
+    "currentDescription": "Refined iPhone configurations that still deliver strong everyday value.",
+    "description": "USB-C charging, a refined design, and a camera that punches above its price. The 15 hits the sweet spot for buyers who want recent hardware without paying flagship money. Each one passes a full functional inspection before listing, and comes with 12 months of warranty cover."
+  },
+  {
+    "_id": "6a271d2172b1c0791a38e118",
+    "modelName": "iPhone 15 Plus",
+    "categoryName": "iPhone Plus",
+    "currentDescription": "Large-format iPhone options with dependable battery life and bright displays.",
+    "description": "A large, bright display and dependable all-day battery, plus USB-C charging. Ideal if screen size and endurance matter more to you than a telephoto lens. Every device is checked and condition-graded before listing, with 12 months of warranty behind it."
+  },
+  {
+    "_id": "6a271d2272b1c0791a38e13a",
+    "modelName": "iPhone 15 Pro",
+    "categoryName": "iPhone Pro",
+    "currentDescription": "Premium titanium iPhone configurations built for power users and creators.",
+    "description": "Titanium build, USB-C, and a noticeably lighter feel than the stainless models before it. Built for people who shoot a lot, edit on the phone, or simply want the best hardware in a manageable size. Every device is inspected and graded before it goes on sale, with a 12-month warranty included."
+  },
+  {
+    "_id": "6a271d2572b1c0791a38e17a",
+    "modelName": "iPhone 16",
+    "categoryName": "iPhone",
+    "currentDescription": "Current iPhone lineup with balanced performance, camera quality, and battery life.",
+    "description": "Well balanced across everything that matters day to day - speed, camera, battery. If you want a current-generation iPhone without stepping into Pro pricing, this is the one to look at. Inspected, graded, and protected by a 12-month warranty from the day it arrives."
+  },
+  {
+    "_id": "6a271d2472b1c0791a38e15e",
+    "modelName": "iPhone 15 Pro Max",
+    "categoryName": "iPhone Pro Max",
+    "currentDescription": "Flagship titanium iPhone configurations with premium finish options.",
+    "description": "Titanium construction, the longest optical reach in the lineup at launch, and a display that makes everything else feel small. The flagship for buyers who don't want to compromise anywhere. Condition-graded and protected by our 12-month warranty."
+  },
+  {
+    "_id": "6a271d2672b1c0791a38e19c",
+    "modelName": "iPhone 16 Plus",
+    "categoryName": "iPhone Plus",
+    "currentDescription": "Large-screen iPhone options with strong battery life and everyday versatility.",
+    "description": "Everyday versatility on a larger canvas. Current-generation performance, strong battery life, and a display that makes video and multitasking comfortable. Comes fully inspected and honestly graded, with a 12-month warranty as standard."
+  },
+  {
+    "_id": "6a271d2772b1c0791a38e1be",
+    "modelName": "iPhone 16 Pro",
+    "categoryName": "iPhone Pro",
+    "currentDescription": "Professional-grade iPhone configurations with flagship camera and display features.",
+    "description": "Flagship camera and display in the compact Pro body. If photography and video are the reason you buy a phone, this is where the range gets serious. Comes with a full condition report, honest grading, and 12 months of warranty protection."
+  },
+  {
+    "_id": "6a271d2872b1c0791a38e1e2",
+    "modelName": "iPhone 16 Pro Max",
+    "categoryName": "iPhone Pro Max",
+    "currentDescription": "Top-tier iPhone lineup with the largest display and premium feature set.",
+    "description": "The largest display and the most complete feature set in the 16 range. Built for people who use their phone as a primary camera and primary screen. Each unit passes a full inspection, and 12 months of warranty cover is included as standard."
+  },
+  {
+    "_id": "6a271d2d72b1c0791a38e25e",
+    "modelName": "iPhone 17 Pro Max",
+    "categoryName": "iPhone Pro Max",
+    "currentDescription": "Largest next-generation iPhone Pro lineup with premium storage tiers and flagship positioning.",
+    "description": "The flagship of the newest generation - biggest display, highest storage tiers, and the most capable hardware in the range. For buyers who want the best available and intend to keep it for years. Inspected, graded, and warranted for a full 12 months."
+  },
+  {
+    "_id": "6a271d2a72b1c0791a38e214",
+    "modelName": "iPhone 17",
+    "categoryName": "iPhone",
+    "currentDescription": "Next-generation iPhone configurations with a refreshed palette and larger default storage tiers.",
+    "description": "The latest standard iPhone, with a refreshed colour range and more storage at the entry tier than previous generations offered. A strong pick if you want current hardware and room to grow into it. Every unit is checked and graded in-house, with 12 months of warranty behind it."
+  },
+  {
+    "_id": "6a271d2972b1c0791a38e1fe",
+    "modelName": "iPhone 16e",
+    "categoryName": "iPhone",
+    "currentDescription": "Value-focused current-generation iPhone configurations with modern performance.",
+    "description": "Current-generation performance at the most accessible point in the range. The 16e keeps the essentials - speed, camera quality, battery life - and trims the extras you may never have used. Ideal for a first iPhone or a reliable second line. Inspected, graded, and warranted for a full year."
+  },
+  {
+    "_id": "6a271d2b72b1c0791a38e22c",
+    "modelName": "iPhone Air",
+    "categoryName": "iPhone",
+    "currentDescription": "Thin-and-light premium iPhone configurations designed around portability and modern finishes.",
+    "description": "Built around portability. Noticeably thin and light, with finishes that feel premium in the hand, for buyers who carry their phone everywhere and notice every gram. Comes inspected, condition-graded, and covered by our 12-month warranty."
+  },
+  {
+    "_id": "6a271d2c72b1c0791a38e248",
+    "modelName": "iPhone 17 Pro",
+    "categoryName": "iPhone Pro",
+    "currentDescription": "Pro-level next-generation iPhone options with higher baseline storage and standout finishes.",
+    "description": "Pro-tier hardware from the newest generation, with higher baseline storage and standout finish options. Aimed at creators and power users who want the current best without moving to the larger Max body. Inspected, graded, and covered for a full year."
+  },
+  {
+    "_id": "6a271d2e72b1c0791a38e27a",
+    "modelName": "iPhone 17e",
+    "categoryName": "iPhone",
+    "currentDescription": "Entry-focused next-generation iPhone configurations with simplified finish and storage options.",
+    "description": "The most straightforward way into the latest generation. Simplified finish and storage options keep the price down while the core experience stays current. A sensible choice for students, first-time iPhone buyers, or anyone replacing an ageing handset. Full inspection and 12-month warranty included."
+  },
+  {
+    "_id": "6a271d2f72b1c0791a38e28a",
+    "modelName": "iPad 7th Gen",
+    "categoryName": "iPad",
+    "currentDescription": "Seventh-generation iPad configurations that remain a budget-friendly option for everyday browsing and learning.",
+    "description": "A budget-friendly way into iPadOS. Well suited to browsing, streaming, video calls, and schoolwork, with support for a keyboard and first-generation Apple Pencil. A sensible first tablet or a spare for the house. Inspected, graded, and warranty-covered for 12 months."
+  },
+  {
+    "_id": "6a271d3072b1c0791a38e2aa",
+    "modelName": "iPad 9th Gen",
+    "categoryName": "iPad",
+    "currentDescription": "Affordable classic-design iPad configurations for browsing, school, and light productivity.",
+    "description": "The classic iPad design at its most accessible. Home button, headphone jack, and a battery that holds up through a full school day. Popular with students and anyone who wants a straightforward tablet. Inspected, graded, and backed for 12 months."
+  },
+  {
+    "_id": "6a271d3172b1c0791a38e2ca",
+    "modelName": "iPad 11th Gen",
+    "categoryName": "iPad",
+    "currentDescription": "Latest standard iPad lineup for school, browsing, and everyday productivity.",
+    "description": "The current standard iPad and the best all-rounder in the range for most people. Comfortable for school, browsing, note-taking, and everyday productivity, with plenty of accessory support. Fully inspected before listing, with a 12-month warranty included."
+  },
+  {
+    "_id": "6a271d3372b1c0791a38e2f6",
+    "modelName": "iPad mini 6th Gen",
+    "categoryName": "iPad mini",
+    "currentDescription": "Compact iPad mini models with modern design and strong everyday portability.",
+    "description": "The modern mini - all-screen design, USB-C, and second-generation Apple Pencil support in a body you can hold in one hand. A favourite with readers, travellers, and anyone who takes handwritten notes. Condition-graded and warranty-covered for 12 months."
+  },
+  {
+    "_id": "6a271d2f72b1c0791a38e29a",
+    "modelName": "iPad 8th Gen",
+    "categoryName": "iPad",
+    "currentDescription": "Reliable eighth-generation iPad models for school, streaming, and light productivity.",
+    "description": "Reliable and affordable, with enough performance for school, streaming, and light productivity. A dependable choice for family use or a second screen that doesn't need to do everything. Every unit is functionally checked and graded before sale, with 12 months of warranty cover."
+  },
+  {
+    "_id": "6a271d3072b1c0791a38e2b6",
+    "modelName": "iPad 10th Gen",
+    "categoryName": "iPad",
+    "currentDescription": "Colorful tenth-generation iPad options that remain a popular everyday choice.",
+    "description": "The redesign - all-screen front, USB-C, and a landscape camera that makes video calls feel natural. Available in colours the standard range hadn't seen before. A strong everyday pick. Each unit is inspected, condition-graded, and covered by our 12-month warranty."
+  },
+  {
+    "_id": "6a271d3272b1c0791a38e2e6",
+    "modelName": "iPad mini 5th Gen",
+    "categoryName": "iPad mini",
+    "currentDescription": "Compact fifth-generation iPad mini models built for portability and light creative work.",
+    "description": "Small enough to hold for hours, capable enough for real work. Apple Pencil support makes it a genuinely good notebook, and the size suits reading, travel, and one-handed use. Inspected, graded, and protected by a 12-month warranty."
+  },
+  {
+    "_id": "6a271d3372b1c0791a38e30a",
+    "modelName": "iPad mini 7th Gen",
+    "categoryName": "iPad mini",
+    "currentDescription": "Newest iPad mini lineup with upgraded storage and a portable premium form factor.",
+    "description": "The newest mini, with more storage at the base tier and the same genuinely portable footprint. Ideal if you want a full iPad experience that fits in a jacket pocket. Every unit is inspected and graded, with 12 months of warranty cover included."
+  },
+  {
+    "_id": "6a271d3472b1c0791a38e31e",
+    "modelName": "iPad Air 3rd Gen (10.5-inch)",
+    "categoryName": "iPad Air",
+    "currentDescription": "Third-generation iPad Air models that balance portability with dependable everyday performance.",
+    "description": "A well-judged balance of screen size and portability, with Apple Pencil and Smart Keyboard support for note-taking and light work. A solid, affordable step up from the standard iPad. Each unit is inspected and graded, with 12 months of cover included."
+  },
+  {
+    "_id": "6a271d3572b1c0791a38e332",
+    "modelName": "iPad Air 4th Gen (10.9-inch)",
+    "categoryName": "iPad Air",
+    "currentDescription": "Fourth-generation iPad Air configurations with a modern all-screen design and colorful finishes.",
+    "description": "The generation that brought the all-screen design and USB-C to the Air, in a range of colours the lineup hadn't offered before. Comfortable for study, drawing, and everyday productivity. Fully checked and condition-graded, with 12 months of warranty cover."
+  },
+  {
+    "_id": "6a271d3672b1c0791a38e34a",
+    "modelName": "iPad Air 5th Gen (10.9-inch)",
+    "categoryName": "iPad Air",
+    "currentDescription": "Fifth-generation iPad Air options with strong everyday value for study, work, and drawing.",
+    "description": "Apple silicon performance in the lightweight Air body, with second-generation Apple Pencil support. Genuinely capable for illustration, editing, and multitasking without stepping up to Pro pricing. Each unit is inspected before listing and backed for a full year."
+  },
+  {
+    "_id": "6a271d3772b1c0791a38e362",
+    "modelName": "iPad Air 11-inch (M2)",
+    "categoryName": "iPad Air",
+    "currentDescription": "11-inch iPad Air models with Apple silicon performance and flexible accessory support.",
+    "description": "The 11-inch Air with M2 - quick, light, and flexible enough for real creative work. Pairs well with a keyboard for study or a Pencil for drawing. Inspected, honestly graded, and covered by our 12-month warranty."
+  },
+  {
+    "_id": "6a271d3872b1c0791a38e386",
+    "modelName": "iPad Air 13-inch (M2)",
+    "categoryName": "iPad Air",
+    "currentDescription": "13-inch iPad Air configurations that add more screen space for notes, art, and multitasking.",
+    "description": "More room for notes, art, and side-by-side apps, while keeping the Air's weight advantage over the Pro. A strong pick if you split time between writing and drawing. Condition-graded, with 12 months of warranty protection included."
+  },
+  {
+    "_id": "6a271d3972b1c0791a38e3aa",
+    "modelName": "iPad Air 11-inch (M3)",
+    "categoryName": "iPad Air",
+    "currentDescription": "11-inch iPad Air models with M3 performance for study, design, and creative work.",
+    "description": "M3 performance in the compact Air body - enough headroom for design work, editing, and heavy multitasking, in something you'll actually carry all day. Every unit passes a full inspection, with a 12-month warranty as standard."
+  },
+  {
+    "_id": "6a271d3a72b1c0791a38e3ce",
+    "modelName": "iPad Air 13-inch (M3)",
+    "categoryName": "iPad Air",
+    "currentDescription": "13-inch iPad Air configurations with M3 and added room for multitasking and drawing.",
+    "description": "The larger Air with M3, for people who want workspace without Pro weight or Pro pricing. Comfortable for drawing, note-taking, and running two apps side by side. Checked, graded, and warranty-protected for a full 12 months."
+  },
+  {
+    "_id": "6a271d3c72b1c0791a38e3f2",
+    "modelName": "iPad Air 11-inch (M4)",
+    "categoryName": "iPad Air",
+    "currentDescription": "Latest 11-inch iPad Air options with upgraded Apple silicon and lightweight versatility.",
+    "description": "The latest 11-inch Air, with upgraded Apple silicon and the same lightweight versatility the range is known for. A strong all-rounder for study, creative work, and everyday use. Fully inspected and covered by a 12-month warranty."
+  },
+  {
+    "_id": "6a271d3d72b1c0791a38e416",
+    "modelName": "iPad Air 13-inch (M4)",
+    "categoryName": "iPad Air",
+    "currentDescription": "Latest 13-inch iPad Air lineup for users who want more display space with Air portability.",
+    "description": "The newest large-format Air, for buyers who want more display space without moving to the Pro. Well suited to illustration, document work, and multitasking. Each device is checked and condition-graded, with 12 months of warranty cover."
+  },
+  {
+    "_id": "6a271d3e72b1c0791a38e43a",
+    "modelName": "iPad Pro 11-inch (2nd Gen)",
+    "categoryName": "iPad Pro",
+    "currentDescription": "Second-generation 11-inch iPad Pro models with strong performance for creative and professional work.",
+    "description": "Pro-level performance in the compact body, with ProMotion, Face ID, and full accessory support. Still a capable machine for drawing, editing, and note-heavy workflows. Inspected, graded, and warranty-backed for 12 months."
+  },
+  {
+    "_id": "6a271d4172b1c0791a38e47a",
+    "modelName": "iPad Pro 12.9-inch (5th Gen)",
+    "categoryName": "iPad Pro",
+    "currentDescription": "Fifth-generation 12.9-inch iPad Pro configurations with premium display quality and pro-level performance.",
+    "description": "The generation that brought a mini-LED display to the large Pro - a genuine step up for anyone working with photo, video, or HDR content. Pro-level performance throughout. Inspected, graded, and covered for 12 months."
+  },
+  {
+    "_id": "6a271d3f72b1c0791a38e44e",
+    "modelName": "iPad Pro 12.9-inch (4th Gen)",
+    "categoryName": "iPad Pro",
+    "currentDescription": "Fourth-generation 12.9-inch iPad Pro configurations with a large display and pro-level flexibility.",
+    "description": "The large-format Pro, with a display that gives illustration and layout work genuine room to breathe. A strong value option for creative professionals. Every unit is functionally inspected and honestly graded, with 12 months of warranty cover."
+  },
+  {
+    "_id": "6a271d4072b1c0791a38e462",
+    "modelName": "iPad Pro 11-inch (3rd Gen)",
+    "categoryName": "iPad Pro",
+    "currentDescription": "Third-generation 11-inch iPad Pro models that remain strong options for creative and professional use.",
+    "description": "Apple silicon in the 11-inch Pro, with Thunderbolt and Centre Stage. A capable, portable machine for creative and professional work that still holds its own. Condition-graded before listing, with a full 12-month warranty."
+  },
+  {
+    "_id": "6a271d4272b1c0791a38e492",
+    "modelName": "iPad Pro 11-inch (4th Gen)",
+    "categoryName": "iPad Pro",
+    "currentDescription": "Fourth-generation 11-inch iPad Pro models with ProMotion, Face ID, and strong creative performance.",
+    "description": "ProMotion, Face ID, and strong creative performance in the portable Pro size. Well suited to illustrators and editors who work on the move. Each unit passes a full condition check, with 12 months of warranty protection."
+  },
+  {
+    "_id": "6a271d4272b1c0791a38e4aa",
+    "modelName": "iPad Pro 12.9-inch (6th Gen)",
+    "categoryName": "iPad Pro",
+    "currentDescription": "Sixth-generation 12.9-inch iPad Pro configurations with mini-LED display and workstation-class power.",
+    "description": "Mini-LED display and workstation-class power in the largest Pro body. Built for serious video, design, and photography work where screen quality is not negotiable. Graded, fully inspected, and protected by a 12-month warranty."
+  },
+  {
+    "_id": "6a271d4372b1c0791a38e4c2",
+    "modelName": "iPad Pro 11-inch (M4)",
+    "categoryName": "iPad Pro",
+    "currentDescription": "Ultra-thin 11-inch iPad Pro options built for creators, editing, and advanced multitasking.",
+    "description": "Remarkably thin, with an OLED display and M4 performance - a genuine step change for the compact Pro. Built for creators who edit, draw, and multitask heavily. Fully inspected before listing, with 12 months of warranty cover."
+  },
+  {
+    "_id": "6a271d4472b1c0791a38e4d6",
+    "modelName": "iPad Pro 13-inch (M4)",
+    "categoryName": "iPad Pro",
+    "currentDescription": "13-inch tandem OLED iPad Pro models with exceptional display quality and portability.",
+    "description": "Tandem OLED in the large Pro body, with display quality that stands up to professional colour work. Exceptionally thin for its size. Every unit is condition-graded and comes with our 12-month warranty."
+  },
+  {
+    "_id": "6a271d4572b1c0791a38e4ea",
+    "modelName": "iPad Pro 11-inch (M5)",
+    "categoryName": "iPad Pro",
+    "currentDescription": "Compact iPad Pro configurations built for demanding creative and professional work.",
+    "description": "The newest compact Pro, built for demanding creative and professional workflows in a body you can carry anywhere. A strong choice if you want current hardware in the smaller size. Every unit is graded and inspected, with 12 months of warranty behind it."
+  },
+  {
+    "_id": "6a271d4772b1c0791a38e52e",
+    "modelName": "MacBook Air 13-inch (M2)",
+    "categoryName": "MacBook Air",
+    "currentDescription": "Redesigned 13-inch MacBook Air options with improved display, webcam, and battery life.",
+    "description": "The redesign - flat-edged body, better display, improved webcam, and MagSafe charging. A significant step up from the M1 while keeping the same silent, lightweight character. Fully inspected and condition-graded, with 12 months of warranty cover."
+  },
+  {
+    "_id": "6a271d4672b1c0791a38e4fe",
+    "modelName": "iPad Pro 13-inch (M5)",
+    "categoryName": "iPad Pro",
+    "currentDescription": "Large-format iPad Pro lineup designed for creators, editors, and multitaskers.",
+    "description": "The flagship iPad - largest display, latest silicon, and the range's most capable hardware. Aimed squarely at editors, designers, and heavy multitaskers. Each device is fully inspected, with a 12-month warranty included."
+  },
+  {
+    "_id": "6a271d4672b1c0791a38e512",
+    "modelName": "MacBook Air 13-inch (M1)",
+    "categoryName": "MacBook Air",
+    "currentDescription": "Original Apple silicon MacBook Air models that remain a strong lightweight everyday pick.",
+    "description": "The machine that changed what a fanless laptop could do. Silent, quick, and capable of a genuinely long day on battery. Still one of the best value laptops available for writing, browsing, and study. Every unit is inspected and graded, with a year of warranty cover."
+  },
+  {
+    "_id": "6a271d4972b1c0791a38e552",
+    "modelName": "MacBook Air 15-inch (M2)",
+    "categoryName": "MacBook Air",
+    "currentDescription": "15-inch MacBook Air models that balance a larger display with quiet, fanless portability.",
+    "description": "A larger display without giving up the Air's fanless, featherweight design. Ideal if you work in multiple windows but don't want to carry a Pro. Every unit is checked and graded before sale, with a 12-month warranty as standard."
+  },
+  {
+    "_id": "6a271d4a72b1c0791a38e576",
+    "modelName": "MacBook Air 13-inch (M3)",
+    "categoryName": "MacBook Air",
+    "currentDescription": "13-inch MacBook Air configurations with faster Apple silicon and excellent all-day efficiency.",
+    "description": "Faster Apple silicon in the familiar 13-inch Air body, with all-day efficiency and support for two external displays with the lid closed. A dependable everyday machine. Inspected and graded before listing, with a year of warranty cover."
+  },
+  {
+    "_id": "6a271d4b72b1c0791a38e59a",
+    "modelName": "MacBook Air 15-inch (M3)",
+    "categoryName": "MacBook Air",
+    "currentDescription": "15-inch MacBook Air models for customers who want more screen without stepping into Pro territory.",
+    "description": "More screen without stepping into Pro territory or Pro weight. Well suited to spreadsheets, writing, and anyone who lives in side-by-side windows. Comes fully inspected, honestly graded, and warranty-backed for 12 months."
+  },
+  {
+    "_id": "6a271d4d72b1c0791a38e5be",
+    "modelName": "MacBook Air 13-inch (M4)",
+    "categoryName": "MacBook Air",
+    "currentDescription": "13-inch MacBook Air models with M4 for fast everyday work, study, and creative tasks.",
+    "description": "M4 performance in the most portable Mac. Quick enough for real creative work, quiet because there's no fan at all, and light enough that you'll actually carry it. Inspected, condition-graded, and protected for 12 months."
+  },
+  {
+    "_id": "6a271d4e72b1c0791a38e5e2",
+    "modelName": "MacBook Air 15-inch (M4)",
+    "categoryName": "MacBook Air",
+    "currentDescription": "15-inch MacBook Air configurations with M4 for customers who want more display space without extra bulk.",
+    "description": "The larger Air with M4 - more display space without the extra bulk of a Pro chassis. A strong pick for students and professionals who want one machine for everything. Each unit is inspected before listing, with a 12-month warranty."
+  },
+  {
+    "_id": "6a271d4f72b1c0791a38e606",
+    "modelName": "MacBook Air 13-inch (M5)",
+    "categoryName": "MacBook Air",
+    "currentDescription": "Thin-and-light MacBook Air configurations with quiet performance and long battery life.",
+    "description": "The newest compact Air, with quiet performance and the long battery life the range is built around. A straightforward choice if you want current hardware in the most portable form. Checked, condition-graded, and backed by a 12-month warranty."
+  },
+  {
+    "_id": "6a271d5072b1c0791a38e62a",
+    "modelName": "MacBook Air 15-inch (M5)",
+    "categoryName": "MacBook Air",
+    "currentDescription": "Large-screen MacBook Air options that balance portability with workspace comfort.",
+    "description": "The latest large-screen Air, balancing a comfortable workspace against real portability. Well suited to daily professional work that doesn't need Pro-level sustained power. Fully inspected, with 12 months of warranty cover included."
+  },
+  {
+    "_id": "6a271d5272b1c0791a38e64e",
+    "modelName": "MacBook Pro 13-inch (M1)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "Compact Touch Bar MacBook Pro models powered by first-generation Apple silicon.",
+    "description": "The compact Pro with a Touch Bar and active cooling, meaning it holds performance longer than a fanless Air under sustained load. A capable, affordable entry into the Pro range. Comes graded, functionally checked, and warranted for 12 months."
+  },
+  {
+    "_id": "6a271d5372b1c0791a38e662",
+    "modelName": "MacBook Pro 13-inch (M2)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "13-inch MacBook Pro models with M2 for customers who prefer the classic compact Pro format.",
+    "description": "The classic compact Pro format with M2 - small footprint, active cooling, and strong battery life. A good fit if you want Pro sustained performance in the smallest possible body. Condition-graded, with 12 months of warranty cover."
+  },
+  {
+    "_id": "6a271d5372b1c0791a38e676",
+    "modelName": "MacBook Pro 14-inch (M1 Pro)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "14-inch MacBook Pro models with M1 Pro for serious editing, coding, and production workflows.",
+    "description": "The generation that brought back MagSafe, HDMI, and the SD card slot, paired with a mini-LED display and serious sustained performance. Built for editing, coding, and production work. Every unit is inspected and covered for 12 months."
+  },
+  {
+    "_id": "6a271d5472b1c0791a38e68e",
+    "modelName": "MacBook Pro 14-inch (M1 Max)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "High-end 14-inch MacBook Pro configurations built for advanced creative and technical work.",
+    "description": "Maximum M1-generation performance in the 14-inch body, with the memory bandwidth that heavy graphics and rendering work demand. A capable machine for advanced creative and technical workflows. Inspected, graded, and warranty-backed for a year."
+  },
+  {
+    "_id": "6a271d5572b1c0791a38e6a6",
+    "modelName": "MacBook Pro 16-inch (M1 Pro)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "Large-screen M1 Pro MacBook Pro models with strong battery life and sustained performance.",
+    "description": "The large-screen Pro with M1 Pro - a bigger display, a bigger battery, and thermal headroom for long sustained workloads. Well suited to editors and developers who work from one machine. Fully inspected, with 12 months of warranty cover."
+  },
+  {
+    "_id": "6a271d5672b1c0791a38e6be",
+    "modelName": "MacBook Pro 16-inch (M1 Max)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "16-inch MacBook Pro options with M1 Max for heavy graphics, rendering, and studio workloads.",
+    "description": "Built for heavy graphics, rendering, and studio workloads where the machine runs hard for hours. The 16-inch chassis gives M1 Max the cooling to sustain it. Each unit is condition-graded and covered for 12 months."
+  },
+  {
+    "_id": "6a271d5772b1c0791a38e6d6",
+    "modelName": "MacBook Pro 14-inch (M2 Pro)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "14-inch MacBook Pro models with M2 Pro for upgraded speed and dependable professional workflows.",
+    "description": "Upgraded speed and efficiency over the M1 Pro generation, in the same well-judged 14-inch body. A dependable machine for professional workflows that need to run all day. Inspected and honestly graded, with a full 12 months of cover."
+  },
+  {
+    "_id": "6a271d5872b1c0791a38e6ee",
+    "modelName": "MacBook Pro 14-inch (M2 Max)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "14-inch M2 Max MacBook Pro configurations tuned for advanced creative and compute-heavy tasks.",
+    "description": "M2 Max performance in the portable Pro size - tuned for compute-heavy tasks, large timelines, and demanding creative applications. Every unit passes a full inspection, with 12 months of warranty protection included."
+  },
+  {
+    "_id": "6a271d5a72b1c0791a38e71e",
+    "modelName": "MacBook Pro 16-inch (M2 Max)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "Top-tier 16-inch M2 Max MacBook Pro options for design, video, 3D, and development workloads.",
+    "description": "Top-tier M2-generation performance in the largest Pro body - built for design, video, 3D, and development workloads that don't leave much headroom. Condition-graded, with a 12-month warranty as standard."
+  },
+  {
+    "_id": "6a271d5972b1c0791a38e706",
+    "modelName": "MacBook Pro 16-inch (M2 Pro)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "16-inch MacBook Pro models with M2 Pro for users who need more room and stronger sustained throughput.",
+    "description": "More room and stronger sustained throughput, for professionals who need both screen space and endurance. A strong all-round choice for development and post-production. Inspected, honestly graded, and covered for a full year."
+  },
+  {
+    "_id": "6a271d5a72b1c0791a38e736",
+    "modelName": "MacBook Pro 14-inch (M3)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "Entry 14-inch MacBook Pro models with M3 for users who want active cooling and premium displays.",
+    "description": "The entry point into the modern Pro lineup, with a mini-LED display and active cooling that a fanless machine can't match. A sensible upgrade for people outgrowing an Air. Fully checked and graded, and warranted for 12 months."
+  },
+  {
+    "_id": "6a271d5c72b1c0791a38e75e",
+    "modelName": "MacBook Pro 14-inch (M3 Max)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "14-inch M3 Max MacBook Pro options designed for intensive rendering, VFX, and AI workflows.",
+    "description": "Designed for intensive rendering, VFX, and machine learning work, in a body that still travels well. Serious performance for people whose deadlines depend on it. Each unit is inspected and graded, with a 12-month warranty."
+  },
+  {
+    "_id": "6a271d5b72b1c0791a38e746",
+    "modelName": "MacBook Pro 14-inch (M3 Pro)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "14-inch MacBook Pro configurations with M3 Pro for advanced multitasking and pro applications.",
+    "description": "Advanced multitasking and professional application performance in the compact Pro chassis. Well suited to developers, editors, and anyone running heavy tools alongside each other. Fully inspected, with 12 months of cover."
+  },
+  {
+    "_id": "6a271d5d72b1c0791a38e776",
+    "modelName": "MacBook Pro 16-inch (M3 Pro)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "16-inch MacBook Pro models with M3 Pro for demanding professional work with more thermal headroom.",
+    "description": "Demanding professional work with more thermal headroom and a larger display to work across. A dependable primary machine for studio and production environments. Inspected, condition-graded, and covered for 12 months."
+  },
+  {
+    "_id": "6a271d5e72b1c0791a38e78e",
+    "modelName": "MacBook Pro 16-inch (M3 Max)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "High-end 16-inch MacBook Pro configurations for studio-grade video, 3D, and technical workloads.",
+    "description": "Studio-grade performance for video, 3D, and technical workloads that push hardware for hours at a time. The 16-inch chassis keeps it sustained. Each machine is inspected and graded, with a 12-month warranty."
+  },
+  {
+    "_id": "6a271d5f72b1c0791a38e7a6",
+    "modelName": "MacBook Pro 14-inch (M4)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "14-inch MacBook Pro models with M4 that deliver a balanced entry point into the modern Pro lineup.",
+    "description": "A balanced entry into the current Pro lineup - active cooling, a premium display, and enough performance for serious daily work. A strong choice for most professional users. Every unit is condition-checked, with 12 months of warranty included."
+  },
+  {
+    "_id": "6a271d6072b1c0791a38e7ce",
+    "modelName": "MacBook Pro 14-inch (M4 Max)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "Top-tier 14-inch MacBook Pro configurations with M4 Max for intensive pro workloads.",
+    "description": "Top-tier performance in the compact chassis, for intensive pro workloads where portability still matters. Aimed at people who render, compile, and edit for a living. Condition-graded, with 12 months of warranty protection."
+  },
+  {
+    "_id": "6a271d5f72b1c0791a38e7b6",
+    "modelName": "MacBook Pro 14-inch (M4 Pro)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "14-inch M4 Pro MacBook Pro options for advanced editing, development, and demanding multitasking.",
+    "description": "Built for advanced editing, development, and heavy multitasking in the portable Pro size. A capable primary machine that still fits in a normal bag. Every unit is inspected and covered by our 12-month warranty."
+  },
+  {
+    "_id": "6a271d6172b1c0791a38e7e6",
+    "modelName": "MacBook Pro 16-inch (M4 Pro)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "16-inch MacBook Pro models with M4 Pro for users who need more screen space and sustained performance.",
+    "description": "More screen space and sustained performance for professionals running demanding tools all day. A well-judged balance of capability and cost within the current range. Inspected end to end and graded honestly, with a year of cover."
+  },
+  {
+    "_id": "6a271d6372b1c0791a38e816",
+    "modelName": "MacBook Pro 14-inch (M5)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "Entry MacBook Pro configurations with active cooling and strong sustained performance.",
+    "description": "The newest compact Pro, with active cooling and strong sustained performance for professional work on the move. A current-generation choice for people upgrading from an older Pro. Graded on arrival, checked end to end, and warranted for 12 months."
+  },
+  {
+    "_id": "6a271d6272b1c0791a38e7fe",
+    "modelName": "MacBook Pro 16-inch (M4 Max)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "Highest-end 16-inch M4 Max MacBook Pro options for studio, engineering, and compute-heavy workflows.",
+    "description": "The highest-end M4 configuration - built for studio, engineering, and compute-heavy workflows where the machine is the bottleneck. Fully inspected before sale, with a 12-month warranty included."
+  },
+  {
+    "_id": "6a271d6372b1c0791a38e826",
+    "modelName": "MacBook Pro 14-inch (M5 Pro)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "High-performance 14-inch MacBook Pro configurations for demanding professional workflows.",
+    "description": "High-performance current-generation hardware in the portable Pro body, aimed at demanding professional workflows. Each unit is functionally inspected and condition-graded, with 12 months of warranty cover."
+  },
+  {
+    "_id": "6a271d6572b1c0791a38e84e",
+    "modelName": "MacBook Pro 16-inch (M5 Pro)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "Large-screen MacBook Pro configurations with excellent thermal headroom and endurance.",
+    "description": "Large-screen current-generation Pro with excellent thermal headroom and endurance for long working days. A strong primary machine for production and development. Fully inspected, with a 12-month warranty as standard."
+  },
+  {
+    "_id": "6a271d6472b1c0791a38e83a",
+    "modelName": "MacBook Pro 14-inch (M5 Max)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "Top-tier 14-inch MacBook Pro options for advanced creative and compute-heavy tasks.",
+    "description": "The most capable 14-inch configuration in the current range, built for advanced creative and compute-heavy tasks without moving to the larger body. Inspected, graded, and protected for a full year."
+  },
+  {
+    "_id": "6a271d6572b1c0791a38e862",
+    "modelName": "MacBook Pro 16-inch (M5 Max)",
+    "categoryName": "MacBook Pro",
+    "currentDescription": "Highest-end MacBook Pro lineup for studio-grade editing, design, and development workloads.",
+    "description": "The top of the range - the most capable hardware UpCell stocks, for studio-grade editing, design, and development. For people who buy once and keep it for years. Graded honestly, inspected thoroughly, and warranted for 12 months."
+  }
+]
