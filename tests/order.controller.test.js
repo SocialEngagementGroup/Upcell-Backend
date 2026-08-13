@@ -38,36 +38,35 @@ beforeEach(() => {
   AuditLog.create.mockResolvedValue({});
 });
 
-describe("createOrder — the Manual-order paid:true bug fix", () => {
-  it("does NOT mark a Manual/'Contact to order' submission as paid", async () => {
-    makeOrderObjAndTotal.mockResolvedValue({
-      order: { paid: false, status: "payment failed", paidWith: "Manual" },
-      totalPrice: 500,
-    });
-    Order.create.mockImplementation((doc) => Promise.resolve({ _id: "order1", ...doc }));
+describe("createOrder — always unpaid until the bank gateway confirms payment", () => {
+  it.each(["Manual", "Card", "Stripe", "Paypal"])(
+    "never marks a paidWith:'%s' order as paid, regardless of what makeOrderObjAndTotal returns",
+    async (paidWith) => {
+      makeOrderObjAndTotal.mockResolvedValue({
+        order: { paid: false, status: "pending_payment", paidWith },
+        totalPrice: 500,
+      });
+      Order.create.mockImplementation((doc) => Promise.resolve({ _id: "order1", ...doc }));
 
-    const { req, res } = makeReqRes({ paidWith: "Manual" });
-    await orderController.createOrder(req, res, jest.fn());
+      const { req, res } = makeReqRes({ paidWith });
+      await orderController.createOrder(req, res, jest.fn());
 
-    const createdDoc = Order.create.mock.calls[0][0];
-    expect(createdDoc.paid).toBe(false);
-    expect(createdDoc.status).toBe("payment failed");
-    expect(res.statusCode).toBe(201);
-  });
+      const createdDoc = Order.create.mock.calls[0][0];
+      expect(createdDoc.paid).toBe(false);
+      expect(createdDoc.status).toBe("pending_payment");
+      expect(res.statusCode).toBe(201);
+    }
+  );
 
-  it("still marks a non-Manual order (e.g. paidWith:'Card') as paid+Processing", async () => {
-    makeOrderObjAndTotal.mockResolvedValue({
-      order: { paid: false, status: "payment failed", paidWith: "Card" },
-      totalPrice: 500,
-    });
+  it("passes makeOrderObjAndTotal's order object through to Order.create untouched", async () => {
+    const order = { paid: false, status: "pending_payment", paidWith: "Card" };
+    makeOrderObjAndTotal.mockResolvedValue({ order, totalPrice: 500 });
     Order.create.mockImplementation((doc) => Promise.resolve({ _id: "order2", ...doc }));
 
-    const { req } = makeReqRes({ paidWith: "Card" });
-    await orderController.createOrder(req, makeReqRes().res, jest.fn());
+    const { req, res } = makeReqRes({ paidWith: "Card" });
+    await orderController.createOrder(req, res, jest.fn());
 
-    const createdDoc = Order.create.mock.calls[0][0];
-    expect(createdDoc.paid).toBe(true);
-    expect(createdDoc.status).toBe("Processing");
+    expect(Order.create).toHaveBeenCalledWith(order);
   });
 });
 
@@ -90,7 +89,7 @@ describe("updateOrderStatus — status allowlist + not-found handling", () => {
   });
 
   it("updates status and writes an audit log entry for a valid request", async () => {
-    const mockOrder = { _id: "order1", status: "Processing", email: "buyer@example.com", save: jest.fn().mockResolvedValue(true) };
+    const mockOrder = { _id: "order1", status: "Processing", paid: true, email: "buyer@example.com", save: jest.fn().mockResolvedValue(true) };
     Order.findById.mockResolvedValue(mockOrder);
 
     const { req, res } = makeReqRes({ orderId: "order1", status: "Shipped" });
@@ -99,8 +98,90 @@ describe("updateOrderStatus — status allowlist + not-found handling", () => {
     expect(mockOrder.status).toBe("Shipped");
     expect(mockOrder.save).toHaveBeenCalled();
     expect(AuditLog.create).toHaveBeenCalledWith(
-      expect.objectContaining({ action: "order.status_update", metadata: { from: "Processing", to: "Shipped" } })
+      expect.objectContaining({
+        action: "order.status_update",
+        metadata: { from: "Processing", to: "Shipped", paidFrom: true, paidTo: true },
+      })
     );
+  });
+});
+
+// The bank gateway settles out-of-band and capturePayment's route is
+// unmounted, so this endpoint is the only thing that can mark an order paid.
+// If `paid` doesn't follow `status`, a confirmed order stays paid:false and
+// never appears on the customer's order list (getClientOrders filters on
+// paid:true) — the order is fulfilled but the customer can't see it.
+describe("updateOrderStatus — keeps the paid flag in step with status", () => {
+  const runStatusChange = async (from, to, { paid = false } = {}) => {
+    const mockOrder = { _id: "order1", status: from, paid, email: "buyer@example.com", save: jest.fn().mockResolvedValue(true) };
+    Order.findById.mockResolvedValue(mockOrder);
+
+    const { req, res } = makeReqRes({ orderId: "order1", status: to });
+    await orderController.updateOrderStatus(req, res, jest.fn());
+    return { mockOrder, res };
+  };
+
+  it.each(["Processing", "Shipped", "Delivered", "Returned", "Refunded"])(
+    "marks the order paid when moving to '%s'",
+    async (status) => {
+      const { mockOrder } = await runStatusChange("pending_payment", status);
+
+      expect(mockOrder.paid).toBe(true);
+      expect(mockOrder.status).toBe(status);
+      expect(mockOrder.save).toHaveBeenCalled();
+    }
+  );
+
+  it.each(["pending_payment", "payment failed"])(
+    "leaves the order unpaid when moving to '%s'",
+    async (status) => {
+      const { mockOrder } = await runStatusChange("Processing", status, { paid: true });
+
+      expect(mockOrder.paid).toBe(false);
+      expect(mockOrder.status).toBe(status);
+    }
+  );
+
+  it("confirming a pending order flips paid false -> true, making it visible to the customer", async () => {
+    const { mockOrder } = await runStatusChange("pending_payment", "Processing");
+
+    expect(mockOrder.paid).toBe(true);
+  });
+
+  it("rejecting a pending order keeps paid false", async () => {
+    const { mockOrder } = await runStatusChange("pending_payment", "payment failed");
+
+    expect(mockOrder.paid).toBe(false);
+  });
+
+  // Refunded money was received and then returned — the order stays on the
+  // customer's list rather than vanishing at the moment they get refunded.
+  it("keeps a refunded order paid so it does not disappear from the customer's orders", async () => {
+    const { mockOrder } = await runStatusChange("Delivered", "Refunded", { paid: true });
+
+    expect(mockOrder.paid).toBe(true);
+  });
+
+  it("records the paid transition in the audit log, not just the status change", async () => {
+    await runStatusChange("pending_payment", "Processing");
+
+    expect(AuditLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: { from: "pending_payment", to: "Processing", paidFrom: false, paidTo: true },
+      })
+    );
+  });
+
+  it("does not touch paid when the status is rejected by the allowlist", async () => {
+    const mockOrder = { _id: "order1", status: "pending_payment", paid: false, email: "buyer@example.com", save: jest.fn() };
+    Order.findById.mockResolvedValue(mockOrder);
+
+    const { req, res } = makeReqRes({ orderId: "order1", status: "NOPE" });
+    await orderController.updateOrderStatus(req, res, jest.fn());
+
+    expect(res.statusCode).toBe(400);
+    expect(mockOrder.paid).toBe(false);
+    expect(mockOrder.save).not.toHaveBeenCalled();
   });
 });
 

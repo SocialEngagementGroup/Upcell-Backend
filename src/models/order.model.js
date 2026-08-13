@@ -1,6 +1,7 @@
 const { Schema, model, models } = require("mongoose");
 
 const statusEnum = [
+  "pending_payment",
   "Processing",
   "Shipped",
   "Delivered",

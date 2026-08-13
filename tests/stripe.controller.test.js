@@ -23,6 +23,7 @@ jest.mock("../src/controllers/checkout.controller", () => ({
   hasPendingCheckout: jest.fn(),
   logPaymentEvent: jest.fn(),
   sendPaymentReceiptEmail: jest.fn(),
+  sendAdminNewOrderEmail: jest.fn(),
 }));
 
 const Order = require("../src/models/order.model");
