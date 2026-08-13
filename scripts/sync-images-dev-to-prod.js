@@ -15,8 +15,17 @@ const mongoose = require("mongoose");
 // Scope is deliberately narrow. Only these fields are written:
 //
 //   parentproducts.images     (array of { url, publicId, ... })
-//   singlevariations.image    (bare string path)
+//   singlevariations.image, .imagePublicId, .imageWidth, .imageHeight
 //   shopcategories.images     (array of { url, publicId, ... })
+//
+// The three extra variation fields matter as much as `image` does. Variations
+// store the image as a bare string, so there is no object to carry a publicId
+// the way parentproducts.images does — the backfill put it in a sibling
+// `imagePublicId` field instead. resolveProductImage() falls back to that field
+// whenever the manifest cannot match a product, which is the common path for
+// models whose Cloudinary files are not colour-named (iPhone 17 Pro is stored
+// as iphone-17-pro-1/2/3, so colour matching finds no candidate). Syncing
+// `image` alone leaves those cards pointing at a deleted local PNG.
 //
 // Orders, trade-in requests, users, analytics, notifications and payment logs
 // are never read or written. Production holds real customer records that do not
@@ -100,9 +109,12 @@ async function main() {
 
   // --- singlevariations.image ------------------------------------------------
   {
+    const IMAGE_FIELDS = ["image", "imagePublicId", "imageWidth", "imageHeight"];
     const devDocs = await dev.db.collection("singlevariations").find({}).toArray();
     const prodCol = prod.db.collection("singlevariations");
-    const prodDocs = await prodCol.find({}, { projection: { image: 1, productName: 1, storage: 1, color: 1 } }).toArray();
+    const prodDocs = await prodCol
+      .find({}, { projection: { productName: 1, storage: 1, color: 1, image: 1, imagePublicId: 1, imageWidth: 1, imageHeight: 1 } })
+      .toArray();
 
     const byId = new Map(prodDocs.map((d) => [String(d._id), d]));
     const byKey = new Map();
@@ -131,14 +143,18 @@ async function main() {
       }
       usedIds.add(String(target._id));
 
-      if (target.image === d.image) {
+      const patch = {};
+      for (const f of IMAGE_FIELDS) {
+        if (d[f] !== undefined && !same(target[f], d[f])) patch[f] = d[f];
+      }
+      if (!Object.keys(patch).length) {
         current += 1;
         continue;
       }
       changed += 1;
-      if (apply) await prodCol.updateOne({ _id: target._id }, { $set: { image: d.image } });
+      if (apply) await prodCol.updateOne({ _id: target._id }, { $set: patch });
     }
-    summary.push({ what: "singlevariations.image", changed, current, missing, note: `${viaKey} matched by name/storage/colour` });
+    summary.push({ what: "singlevariations (image + imagePublicId/Width/Height)", changed, current, missing, note: `${viaKey} matched by name/storage/colour` });
   }
 
   // --- shopcategories.images -------------------------------------------------
