@@ -92,6 +92,29 @@ const productFilterSchema = z.object({
     .default([0, Number.MAX_SAFE_INTEGER]),
 });
 
+// We ship to US addresses only (see Delivery Policy §2 "Shipping Destinations
+// and Export"). The checkout form sends a fixed "United States", but the
+// schema is the actual gate — it's shared by all three order-creation routes
+// (POST /orders, /checkout-stripe, /checkoutcustomer), so a request crafted
+// outside the form can't slip a foreign destination past it either. Accepts
+// the handful of spellings a customer or an autofill might supply and
+// normalises them, so downstream code and the admin view see one value.
+const US_COUNTRY_FORMS = new Set([
+  "us",
+  "usa",
+  "u.s.",
+  "u.s.a.",
+  "united states",
+  "united states of america",
+]);
+
+const usOnlyCountryField = trimmedString("Country", 2, 120)
+  .refine(
+    (value) => US_COUNTRY_FORMS.has(value.toLowerCase().replace(/\s+/g, " ")),
+    "We ship within the United States only."
+  )
+  .transform(() => "United States");
+
 const orderSchema = z.object({
   name: trimmedString("Name", 2, 120),
   email: emailField,
@@ -99,7 +122,7 @@ const orderSchema = z.object({
   city: trimmedString("City", 2, 120),
   postal: trimmedString("Postal code", 3, 20),
   street: trimmedString("Street", 5, 200),
-  country: trimmedString("Country", 2, 120),
+  country: usOnlyCountryField,
   orders: z.array(z.string().regex(/^[0-9a-fA-F]{24}$/)).min(1, "At least one product is required"),
   shipping: z.enum(["standard", "priority", "express"]).default("standard"),
   paidWith: z.enum(["Stripe", "Paypal", "Card", "Manual"]).optional(),

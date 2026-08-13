@@ -143,6 +143,46 @@ describe("orderSchema.idempotencyKey", () => {
   });
 });
 
+describe("orderSchema.country — US-only shipping", () => {
+  const base = {
+    name: "Jane Doe",
+    email: "jane@example.com",
+    phone: "1234567890",
+    city: "City",
+    postal: "12345",
+    street: "123 Some Street",
+    country: "US",
+    orders: ["507f1f77bcf86cd799439011"],
+  };
+
+  it.each([
+    "US",
+    "us",
+    "USA",
+    "U.S.",
+    "U.S.A.",
+    "United States",
+    "united states of america",
+    "  United   States  ",
+  ])("accepts %j and normalises it to 'United States'", (country) => {
+    expect(orderSchema.parse({ ...base, country }).country).toBe("United States");
+  });
+
+  it.each(["Canada", "United Kingdom", "Mexico", "Germany", "United Statesx"])(
+    "rejects %j — we do not ship internationally",
+    (country) => {
+      expect(() => orderSchema.parse({ ...base, country })).toThrow(
+        /United States only/
+      );
+    }
+  );
+
+  it("still rejects a missing country", () => {
+    const { country, ...rest } = base;
+    expect(() => orderSchema.parse(rest)).toThrow();
+  });
+});
+
 describe("productFilterSchema — partial input (mix of provided and omitted fields)", () => {
   it("accepts productName provided with everything else defaulted", () => {
     const result = productFilterSchema.parse({ productName: ["iPhone 15"] });
