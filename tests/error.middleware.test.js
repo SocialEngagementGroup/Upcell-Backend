@@ -1,7 +1,16 @@
 const mockSend = jest.fn();
+const mockEmailConfigFindOne = jest.fn();
 
 jest.mock("resend", () => ({
   Resend: jest.fn().mockImplementation(() => ({ emails: { send: mockSend } })),
+}));
+
+// sendErrorAlert() awaits this before fanning out, so an unmocked model leaves
+// the alert chain pending forever against a database nothing connected to —
+// and every alert assertion below fails for a reason that has nothing to do
+// with alerting. Default: no config row, which means alerts are on.
+jest.mock("../src/models/emailConfig.model", () => ({
+  EmailConfig: { findOne: (...args) => mockEmailConfigFindOne(...args) },
 }));
 
 const WEBHOOK_URL = "https://chat.googleapis.com/v1/spaces/test/messages?key=k&token=t";
@@ -36,6 +45,7 @@ function loadMiddleware(env = {}) {
 
 beforeEach(() => {
   mockSend.mockReset().mockResolvedValue({});
+  mockEmailConfigFindOne.mockReset().mockResolvedValue(null);
   global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200, text: async () => "" });
   consoleErrorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
   loadMiddleware();
@@ -184,6 +194,40 @@ describe("errorHandler — missing config is a silent no-op per channel", () => 
 
     expect(mockSend).not.toHaveBeenCalled();
     expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The mute (Admin > Email Settings) had no coverage, which is exactly why its
+// arrival broke every alert test here without anyone noticing what had changed.
+describe("errorHandler — the admin mute", () => {
+  it("sends nothing on either channel when error alerts are switched off", async () => {
+    mockEmailConfigFindOne.mockResolvedValue({ enableErrorAlerts: false });
+    const { req, res } = makeReqRes();
+    errorHandler(new Error("boom"), req, res, jest.fn());
+    await flush();
+
+    expect(mockSend).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(500);
+  });
+
+  it("still alerts when the config row exists with alerts left on", async () => {
+    mockEmailConfigFindOne.mockResolvedValue({ enableErrorAlerts: true });
+    const { req, res } = makeReqRes();
+    errorHandler(new Error("boom"), req, res, jest.fn());
+    await flush();
+
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("still alerts when the config lookup itself fails — a broken mute must not silence alerts", async () => {
+    mockEmailConfigFindOne.mockRejectedValue(new Error("mongo down"));
+    const { req, res } = makeReqRes();
+    errorHandler(new Error("boom"), req, res, jest.fn());
+    await flush();
+
+    expect(mockSend).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -18,11 +18,17 @@ jest.mock("../src/models/order.model");
 // internals (Resend/axios/etc.), which are covered separately in
 // checkout.controller.test.js. That's what makes this an actual *unit*
 // test of stripe.controller.js rather than an integration test of both.
+// Every function stripe.controller.js destructures from this module must appear
+// here. A missing one is not a quiet no-op: the destructured name is undefined,
+// calling it throws inside the webhook's try/catch, and the failure surfaces as
+// "the receipt email was never sent" — which is what happened when
+// sendAdminNewOrderEmail was added to the controller and not to this mock.
 jest.mock("../src/controllers/checkout.controller", () => ({
   makeOrderObjAndTotal: jest.fn(),
   hasPendingCheckout: jest.fn(),
   logPaymentEvent: jest.fn(),
   sendPaymentReceiptEmail: jest.fn(),
+  sendAdminNewOrderEmail: jest.fn(),
 }));
 
 const Order = require("../src/models/order.model");
@@ -74,6 +80,9 @@ describe("stripeWebhook — checkout.session.completed (atomic paid-marking)", (
       { new: true }
     );
     expect(checkoutController.sendPaymentReceiptEmail).toHaveBeenCalledWith(paidOrder);
+    // Both mails go out on a paid order — the customer's receipt and the
+    // admin's new-order notification.
+    expect(checkoutController.sendAdminNewOrderEmail).toHaveBeenCalledWith(paidOrder);
     expect(res.json).toHaveBeenCalledWith({ received: true });
   });
 
