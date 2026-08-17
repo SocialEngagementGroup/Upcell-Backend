@@ -33,6 +33,18 @@ const chatConversationSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+  // SEG F-11 / §08 ("network drops after send"): a user message is written
+  // before the model is called, so a failed or timed-out call would otherwise
+  // leave a permanently unanswered turn that skews every later request. It is
+  // written as "pending" and only promoted to "complete" once its reply has
+  // been stored — history is built from completed turns only, so a failure
+  // stops distorting the conversation while the message itself is still on
+  // record for support/audit purposes.
+  status: {
+    type: String,
+    enum: ["pending", "complete"],
+    default: "complete",
+  },
 }, {
   timestamps: true,
 });
@@ -49,8 +61,10 @@ chatConversationSchema.pre("validate", function enforceSingleIdentity(next) {
 
 // Auto-expire chat logs after 90 days, same retention window as AnalyticsEvent.
 chatConversationSchema.index({ createdAt: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 90 });
-chatConversationSchema.index({ sessionId: 1, createdAt: 1 });
-chatConversationSchema.index({ userId: 1, createdAt: 1 });
+// status is part of every history read (completed turns only), so it belongs in
+// the index rather than being filtered in memory after the fact.
+chatConversationSchema.index({ sessionId: 1, status: 1, createdAt: -1 });
+chatConversationSchema.index({ userId: 1, status: 1, createdAt: -1 });
 
 const ChatConversation = mongoose.model("chat_conversation", chatConversationSchema);
 

@@ -154,8 +154,11 @@ const contactSubmissionSchema = z.object({
 // only from chatSession.middleware.js (server-issued cookie or logged-in
 // user), never from the request body. If a client sends a sessionId field
 // anyway, it's silently ignored (zod strips unknown keys by default).
+// SEG §06 ("reduce the input ceiling"): 2,000 characters is far more prompt
+// than a support question needs, and the length multiplies every cost ceiling
+// above it. 1,000 still covers a customer pasting an order confirmation.
 const chatMessageSchema = z.object({
-  message: trimmedString("Message", 1, 2000),
+  message: trimmedString("Message", 1, 1000),
 });
 
 const analyticsEventSchema = z.object({

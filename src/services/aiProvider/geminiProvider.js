@@ -1,15 +1,45 @@
 const { GoogleGenAI, createUserContent, createModelContent } = require("@google/genai");
 
-// SEG F-09: pinned via env instead of hardcoded, so a version bump is a
-// config change, not a code deploy. Still defaults to the floating alias
-// because pinning "gemini-2.5-flash" 404'd "no longer available to new
-// users" on this account — confirm a currently-valid pinned model ID in the
-// Cloud Console before setting GEMINI_MODEL in production. That
-// verification step can't be done from code alone (Task #9).
-const MODEL = process.env.GEMINI_MODEL || "gemini-flash-latest";
+// SEG F-09: an explicit, pinned model ID — never a floating "*-latest" alias,
+// which lets Google change this chatbot's behavior (tone, verbosity,
+// instruction-following, and eventually rejected request parameters) with no
+// deploy and no signal on our side.
+//
+// The default below is verified against this project's key on 2026-08-14 by
+// timing three real support questions per candidate:
+//   gemini-3.5-flash-lite  ~1.0s, consistent, no reasoning tokens  ← chosen
+//   gemini-3.5-flash       8–24s, one outright failure, ~300–400 reasoning tokens
+//   gemini-3.7-flash       503 on realistic prompts
+//   gemini-2.5-flash       404 on this account
+// The lite model is the right tool here precisely because this assistant does
+// no reasoning: every fact it may state arrives in the request as a curated
+// knowledge block (services/chat/siteKnowledge.js), so the work is phrasing,
+// not thinking — and a support widget that answers in one second instead of
+// fifteen is a different product. Override per environment with GEMINI_MODEL,
+// and re-time it the same way before moving it.
+const DEFAULT_MODEL = "gemini-3.5-flash-lite";
+const MODEL = process.env.GEMINI_MODEL || DEFAULT_MODEL;
+
+// A pinned ID is the whole point of F-09, so an alias sneaking back in via
+// config should be loud rather than silent.
+if (/-latest$/.test(MODEL)) {
+  console.warn(
+    JSON.stringify({
+      event: "chat_config_warning",
+      detail: "GEMINI_MODEL is a floating alias; pin an explicit model ID (SEG F-09)",
+      model: MODEL,
+    })
+  );
+}
 
 const REQUEST_TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS) || 12000;
 const MAX_RETRIES_ON_TRANSIENT_ERROR = 1;
+
+// SEG §06 "cap output": every ceiling in that section is multiplied by how many
+// tokens one request can spend, and the system prompt already asks for 1–3
+// sentences. 1024 leaves room for the model's internal reasoning tokens (which
+// count against this budget on 3.x) without letting a single reply run away.
+const MAX_OUTPUT_TOKENS = Number(process.env.GEMINI_MAX_OUTPUT_TOKENS) || 1024;
 
 // SEG F-10: explicit safety settings instead of Google's defaults — "you are
 // responsible for determining the necessary and appropriate safety settings
@@ -71,6 +101,7 @@ async function callModel({ systemPrompt, history }) {
     config: {
       systemInstruction: systemPrompt,
       safetySettings: SAFETY_SETTINGS,
+      maxOutputTokens: MAX_OUTPUT_TOKENS,
     },
   });
 }
@@ -93,6 +124,9 @@ async function complete({ systemPrompt, history }) {
         text: blockedBySafety ? null : response.text,
         blockedBySafety,
         finishReason,
+        // SEG §11 requires logging the exact model ID that answered, not the
+        // one we think is configured.
+        model: MODEL,
         usage: {
           inputTokens: response.usageMetadata?.promptTokenCount || 0,
           outputTokens: response.usageMetadata?.candidatesTokenCount || 0,

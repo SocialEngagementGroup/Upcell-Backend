@@ -35,7 +35,9 @@ router.get("/chat/admin/settings", verifyToken, requireAdmin, async (req, res, n
 
 router.patch("/chat/admin/settings", verifyToken, requireAdmin, async (req, res, next) => {
   try {
-    const settings = await setKillSwitch(Boolean(req.body.killSwitchEnabled));
+    // The actor is recorded in the alert so a flip is attributable, not
+    // anonymous (SEG §06 / §11).
+    const settings = await setKillSwitch(Boolean(req.body.killSwitchEnabled), req.user?.id);
     res.json({ killSwitchEnabled: settings.killSwitchEnabled });
   } catch (error) {
     next(error);
