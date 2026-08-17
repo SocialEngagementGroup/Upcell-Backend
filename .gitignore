@@ -4,3 +4,8 @@ node_modules
 !.env.example
 coverage
 *.log
+
+# Database snapshots taken by scripts/. They are data, not source: committing
+# one puts a megabyte in the history permanently, and it is stale the next day.
+# Keep them locally or in cloud storage.
+scripts/backups/
