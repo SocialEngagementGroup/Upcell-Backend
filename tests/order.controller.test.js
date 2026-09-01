@@ -202,7 +202,7 @@ describe("getOrder — PII exposure guard", () => {
   it("returns the full order (including PII) to its owner", async () => {
     Order.findById.mockResolvedValue({ ...fullOrder, toObject: () => fullOrder });
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "buyer@example.com" } });
+    const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" }, user: { email: "buyer@example.com" } });
     await orderController.getOrder(req, res, jest.fn());
 
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ email: "buyer@example.com", name: "Jane Doe" }));
@@ -211,7 +211,7 @@ describe("getOrder — PII exposure guard", () => {
   it("returns the full order to an admin regardless of email match", async () => {
     Order.findById.mockResolvedValue({ ...fullOrder, toObject: () => fullOrder });
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { role: "admin", email: "admin@upcell.com" } });
+    const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" }, user: { role: "admin", email: "admin@upcell.com" } });
     await orderController.getOrder(req, res, jest.fn());
 
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ email: "buyer@example.com" }));
@@ -220,7 +220,7 @@ describe("getOrder — PII exposure guard", () => {
   it("strips name/email/phone/address for a non-owner (or anonymous) viewer", async () => {
     Order.findById.mockResolvedValue({ ...fullOrder, toObject: () => fullOrder });
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" } }); // no req.user at all — anonymous viewer
+    const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" } }); // no req.user at all — anonymous viewer
     await orderController.getOrder(req, res, jest.fn());
 
     const returned = res.json.mock.calls[0][0];
@@ -236,7 +236,7 @@ describe("getOrder — PII exposure guard", () => {
   it("strips PII for a logged-in user who owns a different order", async () => {
     Order.findById.mockResolvedValue({ ...fullOrder, toObject: () => fullOrder });
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "someone-else@example.com" } });
+    const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" }, user: { email: "someone-else@example.com" } });
     await orderController.getOrder(req, res, jest.fn());
 
     expect(res.json.mock.calls[0][0].email).toBeUndefined();
@@ -245,7 +245,7 @@ describe("getOrder — PII exposure guard", () => {
   it("returns 404 for a non-existent order", async () => {
     Order.findById.mockResolvedValue(null);
 
-    const { req, res } = makeReqRes({}, { params: { id: "does-not-exist" } });
+    const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0ff" } });
     await orderController.getOrder(req, res, jest.fn());
 
     expect(res.statusCode).toBe(404);
@@ -359,5 +359,19 @@ describe("getClientOrders — email ownership check", () => {
     await orderController.getClientOrders(req, res, jest.fn());
 
     expect(res.statusCode).toBe(200);
+  });
+});
+
+describe("getOrder — malformed id handling", () => {
+  it("returns 404 rather than throwing when the id is not an ObjectId", async () => {
+    const { req, res, next } = makeReqRes({}, { params: { id: "undefined" } });
+
+    await orderController.getOrder(req, res, next);
+
+    expect(res.statusCode).toBe(404);
+    expect(next).not.toHaveBeenCalled();
+    // Never reaches the database — a CastError there becomes a 500 and pages
+    // the admin over what is really just a bad URL.
+    expect(Order.findById).not.toHaveBeenCalled();
   });
 });

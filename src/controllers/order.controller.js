@@ -19,8 +19,18 @@ const resend = new Resend(process.env.RESEND_KEY);
 const orderEmailFrom = process.env.EMAIL_FROM;
 const adminNotificationEmail = process.env.ADMIN_NOTIFICATION_EMAIL;
 
+// Mongo ObjectId as it appears in a URL. Checking the shape before querying
+// keeps a malformed id (a "/order/undefined" from a page loaded without its
+// query string, a crawler, a probe) a plain 404 instead of a CastError — which
+// the global handler would turn into a 500 and page the admin over.
+const OBJECT_ID_PATTERN = /^[0-9a-fA-F]{24}$/;
+
 async function getOrder(req, res, next) {
   try {
+    if (!OBJECT_ID_PATTERN.test(req.params.id || "")) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ error: "Order not found" });
 

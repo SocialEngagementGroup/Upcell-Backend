@@ -220,9 +220,15 @@ exports.merchantPost = async (req, res, next) => {
 exports.paymentResponse = async (req, res) => {
   const body = req.body || {};
   const valid = exports.verifySignature(body);
-  const orderId = valid ? body.reference_number : "";
+  // Guard the shape as well as the signature. Redirecting with a missing
+  // reference_number would send the customer to /succeed?order_id=undefined,
+  // and the thank-you page would then ask the API for an order called
+  // "undefined".
+  const orderId = valid && /^[0-9a-fA-F]{24}$/.test(body.reference_number || "")
+    ? body.reference_number
+    : "";
 
-  if (!valid) {
+  if (!valid || !orderId) {
     logPaymentEvent({
       gateway: GATEWAY,
       eventType: "signature_rejected",
