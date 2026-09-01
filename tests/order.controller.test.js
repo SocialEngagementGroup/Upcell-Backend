@@ -346,7 +346,30 @@ describe("getClientOrders — email ownership check", () => {
     );
     await orderController.getClientOrders(req, res, jest.fn());
 
-    expect(Order.find).toHaveBeenCalledWith({ email: "buyer@example.com", paid: true });
+    expect(Order.find).toHaveBeenCalledWith({
+      $or: [{ email: "buyer@example.com" }],
+      paid: true,
+    });
+  });
+
+  it("also matches orders placed under a different email by the same account", async () => {
+    Order.find.mockReturnValue({ sort: jest.fn().mockResolvedValue([]) });
+
+    const { req, res } = makeReqRes(
+      {},
+      {
+        params: { email: "buyer@example.com" },
+        user: { id: "user_abc", email: "buyer@example.com", role: "customer" },
+      }
+    );
+    await orderController.getClientOrders(req, res, jest.fn());
+
+    // The email arm keeps pre-userId orders visible; the userId arm is what
+    // finds an order the customer placed while typing another address.
+    expect(Order.find).toHaveBeenCalledWith({
+      $or: [{ email: "buyer@example.com" }, { userId: "user_abc" }],
+      paid: true,
+    });
   });
 
   it("allows an admin to view any customer's orders", async () => {

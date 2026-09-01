@@ -15,7 +15,17 @@ const shippingEnum = ["standard", "priority", "express"];
 const OrderSchema = new Schema(
   {
     line_items: Object,
+    // Clerk user id of the account that placed the order. This — not `email` —
+    // is what ties an order to a person. `email` is free text from the checkout
+    // form, so a logged-in customer who types a different address files the
+    // order under that address and can never see it again; it is also useless
+    // as evidence in a chargeback, since it only proves someone typed it.
+    // Absent on orders predating this field and on admin-created Manual orders.
+    userId: { type: String, index: true },
     name: String,
+    // Contact address for this order's receipt. Deliberately still the form
+    // value: customers legitimately send a receipt somewhere other than their
+    // account address. Ownership is userId's job, not this field's.
     email: String,
     phone: String,
     city: String,

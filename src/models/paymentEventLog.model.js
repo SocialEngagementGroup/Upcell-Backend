@@ -5,12 +5,24 @@ const { Schema, model, models } = require("mongoose");
 // triggered by a logged-in admin, so forcing them through that schema would
 // mean faking an "actor" that doesn't exist. This is the payment-specific
 // trail: what did we receive from Stripe/PayPal, and what did we do with it.
+// eventType is a required enum, and logPaymentEvent is fire-and-forget — a
+// value missing from this list fails validation and is swallowed by that
+// catch, so the event that most needed recording is the one that vanishes.
+// Add the value here in the same change that starts emitting it.
 const eventTypeEnum = [
   "webhook_received",
   "signature_rejected",
   "marked_paid",
   "refunded",
   "config_error",
+  // The bank confirmed a payment we cannot tie to an order. Money has moved
+  // and nothing in the shop records it — the highest-priority alert here.
+  "unmatched_confirmation",
+  // Authorised amount differs from what the order is worth. Not marked paid.
+  "amount_mismatch",
+  // A retried confirmation that lost the race to claim an already-settled
+  // order. Expected and harmless; recorded so retry storms stay visible.
+  "duplicate_confirmation",
 ];
 const gatewayEnum = ["Stripe", "Paypal", "BankOfAmerica"];
 

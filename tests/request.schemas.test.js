@@ -134,6 +134,17 @@ describe("orderSchema.idempotencyKey", () => {
     expect(() => orderSchema.parse({ ...base, shipping: "overnight-drone" })).toThrow();
   });
 
+  it("rejects an orders array longer than a real cart could be", () => {
+    // One entry per unit on a public endpoint that drives a Mongo $in and a
+    // per-id scan — without a ceiling a single request can carry hundreds of
+    // thousands of ids.
+    const tooMany = Array(101).fill("507f1f77bcf86cd799439011");
+    expect(() => orderSchema.parse({ ...base, orders: tooMany })).toThrow();
+    expect(() =>
+      orderSchema.parse({ ...base, orders: tooMany.slice(0, 100) })
+    ).not.toThrow();
+  });
+
   it("rejects an empty orders array — a checkout needs at least one item", () => {
     expect(() => orderSchema.parse({ ...base, orders: [] })).toThrow();
   });

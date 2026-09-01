@@ -644,4 +644,67 @@ describe("makeOrderObjAndTotal — server-side pricing (the core anti-tampering 
 
     expect(totalPrice).toBe(999 + expectedShippingCost);
   });
+
+  it("stamps the authenticated account onto the order", async () => {
+    SingleVariation.find.mockResolvedValue([dbProduct]);
+    const req = {
+      body: { orders: ["prod1"], shipping: "standard", email: "typed@example.com" },
+      user: { id: "user_abc", email: "account@example.com" },
+    };
+
+    const { order } = await checkout.makeOrderObjAndTotal({ req, paidWith: "BankOfAmerica" });
+
+    // Ownership follows the session; the typed address stays the contact.
+    expect(order.userId).toBe("user_abc");
+    expect(order.email).toBe("typed@example.com");
+  });
+
+  it("refuses the checkout when a product id no longer exists", async () => {
+    // The old guard tested `productsInfo` (always a truthy array) rather than
+    // the item, so a missing product produced unit_amount: NaN and the order
+    // total reached the bank as the string "NaN".
+    SingleVariation.find.mockResolvedValue([]);
+    const req = { body: { orders: ["prod1"], shipping: "standard" } };
+
+    await expect(
+      checkout.makeOrderObjAndTotal({ req, paidWith: "BankOfAmerica" })
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("refuses the checkout when an item has sold out", async () => {
+    SingleVariation.find.mockResolvedValue([{ ...dbProduct, outOfStock: true }]);
+    const req = { body: { orders: ["prod1"], shipping: "standard" } };
+
+    await expect(
+      checkout.makeOrderObjAndTotal({ req, paidWith: "BankOfAmerica" })
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("gives every rejected item a message the checkout page can render", async () => {
+    SingleVariation.find.mockResolvedValue([{ ...dbProduct, outOfStock: true }]);
+    const req = { body: { orders: ["prod1"], shipping: "standard" } };
+
+    const error = await checkout
+      .makeOrderObjAndTotal({ req, paidWith: "BankOfAmerica" })
+      .catch((e) => e);
+
+    // extractApiError renders details as details.map(d => d.message) — an
+    // entry without one shows the customer the word "undefined".
+    expect(error.details).toHaveLength(1);
+    expect(error.details[0].message).toContain("iPhone 15");
+    expect(error.details.every((d) => typeof d.message === "string")).toBe(true);
+  });
+
+  it("does not let one sold-out item silently reduce the order", async () => {
+    SingleVariation.find.mockResolvedValue([
+      dbProduct,
+      { ...dbProduct, _id: "prod2", productName: "iPhone 14", outOfStock: true },
+    ]);
+    const req = { body: { orders: ["prod1", "prod2"], shipping: "standard" } };
+
+    // Partial fulfilment would charge for a cart the customer never agreed to.
+    await expect(
+      checkout.makeOrderObjAndTotal({ req, paidWith: "BankOfAmerica" })
+    ).rejects.toMatchObject({ status: 409 });
+  });
 });

@@ -129,7 +129,14 @@ const orderSchema = z.object({
   postal: trimmedString("Postal code", 3, 20),
   street: trimmedString("Street", 5, 200),
   country: usOnlyCountryField,
-  orders: z.array(z.string().regex(/^[0-9a-fA-F]{24}$/)).min(1, "At least one product is required"),
+  // The max matters as much as the min: this array is one entry per unit, it
+  // reaches an unauthenticated-until-now endpoint, and it drives both a Mongo
+  // $in and a per-id scan. Without a ceiling a single request could carry
+  // hundreds of thousands of ids. 100 units is far above any real cart.
+  orders: z
+    .array(z.string().regex(/^[0-9a-fA-F]{24}$/))
+    .min(1, "At least one product is required")
+    .max(100, "Too many items in one order"),
   shipping: z.enum(["standard", "priority", "express"]).default("standard"),
   paidWith: z.enum(["Stripe", "Paypal", "Card", "Manual", "BankOfAmerica"]).optional(),
   // Client-generated, once per checkout attempt — forwarded as the

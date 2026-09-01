@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 
 const { checkoutLimiter } = require("../middleware/rateLimit.middleware");
+const { verifyToken } = require("../middleware/auth.middleware");
 const { validateRequest } = require("../middleware/validate.middleware");
 const { orderSchema } = require("../schemas/request.schemas");
 const {
@@ -16,9 +17,20 @@ const {
 // globally so no existing route changes behaviour.
 const form = express.urlencoded({ extended: false });
 
+// verifyToken, not optionalAuth. The checkout page is already behind
+// PrivateRoute in the frontend, but that is a client-side guard only — this
+// endpoint accepted an anonymous POST and created a real order, and the Clerk
+// token the browser was already sending was never read. Without it an order
+// carries no record of who placed it, which is both an ownership problem (the
+// customer cannot see their own order if they typed a different email) and an
+// evidence problem in a chargeback.
+// Limiter before verifyToken on purpose: verifyToken calls out to Clerk to
+// resolve the user, so putting it first would let an unauthenticated flood
+// drive one outbound Clerk request per attempt.
 router.post(
   "/prepare-payment",
   checkoutLimiter,
+  verifyToken,
   validateRequest(orderSchema),
   preparePayment
 );

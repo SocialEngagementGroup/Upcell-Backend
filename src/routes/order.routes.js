@@ -17,6 +17,9 @@ router.get("/admin-orders/:status", verifyToken, requireAdmin, getAdminOrders);
 router.get("/admin-orders-by-data", verifyToken, requireAdmin, getAdminOrdersByDate);
 router.post("/update-order-status", verifyToken, requireAdmin, updateOrderStatus);
 router.get("/client-orders/:email", verifyToken, getClientOrders);
-router.post("/orders", checkoutLimiter, validateRequest(orderSchema), createOrder);
+// Same reasoning as /boa/prepare-payment: this created a real order for an
+// anonymous caller. No frontend code calls it, which made it an unauthenticated
+// write nobody was watching.
+router.post("/orders", checkoutLimiter, verifyToken, validateRequest(orderSchema), createOrder);
 
 module.exports = router;

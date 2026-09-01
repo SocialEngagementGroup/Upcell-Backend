@@ -206,7 +206,15 @@ async function getClientOrders(req, res, next) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    const orders = await Order.find({ email, paid: true }).sort({
+    // Match on the Clerk user id first, falling back to the email. Email alone
+    // was the only link before userId existed, so the fallback keeps historical
+    // orders visible; the userId arm is what makes an order findable when the
+    // customer typed a different address into the checkout form than the one
+    // on their account.
+    const ownership = [{ email }];
+    if (req.user?.id) ownership.push({ userId: req.user.id });
+
+    const orders = await Order.find({ $or: ownership, paid: true }).sort({
       updatedAt: -1,
     });
     res.json(orders);

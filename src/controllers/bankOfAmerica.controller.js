@@ -4,6 +4,7 @@ const {
   makeOrderObjAndTotal,
   hasPendingCheckout,
   logPaymentEvent,
+  orderTotal,
   sendPaymentReceiptEmail,
   sendAdminNewOrderEmail,
 } = require("./checkout.controller");
@@ -69,6 +70,27 @@ const splitName = (fullName) => {
   if (parts.length < 2) return { forename: parts[0] || "Customer", surname: "-" };
   return { forename: parts[0], surname: parts.slice(1).join(" ") };
 };
+
+const OBJECT_ID_PATTERN = /^[0-9a-fA-F]{24}$/;
+
+// Secure Acceptance echoes every field we sent back with a "req_" prefix:
+// req_reference_number, req_amount, req_transaction_uuid. Only values the
+// gateway itself produces (decision, transaction_id, auth_amount) come back
+// unprefixed.
+//
+// Reading the unprefixed name for an echoed field silently yields undefined,
+// which is exactly how two ACCEPTed payments on 2026-09-01 were verified,
+// logged, and then dropped: findById(undefined) returned null and the handler
+// answered 200. The unprefixed fallback is kept only so a replayed older
+// payload still resolves.
+const echoed = (body, name) => body[`req_${name}`] ?? body[name];
+
+// The amount is inside the signed field set, so a mismatch is not tampering —
+// it means the bank authorised a different figure than the order is worth
+// (a partial authorisation, or a bug on our side re-pricing between hand-off
+// and confirmation). Either way that is not a payment we should mark complete
+// without a human looking at it.
+const AMOUNT_TOLERANCE = 0.01;
 
 // Step 1 of the flow. The order is written before signing so its _id can be
 // the reference_number — that _id is the only thing tying the bank's later
@@ -164,7 +186,7 @@ exports.merchantPost = async (req, res, next) => {
         gateway: GATEWAY,
         eventType: "signature_rejected",
         gatewayReference: body.transaction_id,
-        metadata: { reference_number: body.reference_number },
+        metadata: { reference_number: echoed(body, "reference_number") ?? null },
       });
       // 200 on purpose. A 4xx tells the bank "delivery failed, retry", and
       // retrying a forged request achieves nothing. Repeated rejections are a
@@ -172,41 +194,114 @@ exports.merchantPost = async (req, res, next) => {
       return res.sendStatus(200);
     }
 
+    const referenceNumber = echoed(body, "reference_number");
+
     logPaymentEvent({
       gateway: GATEWAY,
       eventType: "webhook_received",
       gatewayReference: body.transaction_id,
-      metadata: { decision: body.decision, reference_number: body.reference_number },
+      metadata: { decision: body.decision, reference_number: referenceNumber },
     });
 
-    const order = await Order.findById(body.reference_number);
-    if (!order) return res.sendStatus(200);
-
-    // The bank retries when it doesn't get a clean response, so the same
-    // confirmation can arrive more than once. Anything past this point runs
-    // exactly once per transaction.
-    if (order.boaTransactionId) return res.sendStatus(200);
-
-    const status = DECISION_STATUS[body.decision] || "pending_payment";
-
-    order.status = status;
-    order.paid = status === "Processing";
-    order.boaTransactionId = body.transaction_id;
-    // Brand and last four only — enough to answer a customer's question,
-    // useless to anyone who breaches the database.
-    order.cardBrand = body.card_type_name || body.req_card_type;
-    order.cardLast4 = String(body.req_card_number || "").slice(-4) || undefined;
-    await order.save();
-
-    if (order.paid) {
+    // A confirmation whose reference we can't resolve means the bank believes
+    // money moved against an order we cannot find. Never silently 200 that
+    // away — it is the one event worth waking someone for.
+    if (!OBJECT_ID_PATTERN.test(referenceNumber || "")) {
       logPaymentEvent({
         gateway: GATEWAY,
-        eventType: "marked_paid",
+        eventType: "unmatched_confirmation",
+        gatewayReference: body.transaction_id,
+        metadata: {
+          reason: "missing_or_malformed_reference",
+          reference_number: referenceNumber ?? null,
+          decision: body.decision,
+        },
+      });
+      return res.sendStatus(200);
+    }
+
+    const order = await Order.findById(referenceNumber);
+    if (!order) {
+      logPaymentEvent({
+        gateway: GATEWAY,
+        eventType: "unmatched_confirmation",
+        gatewayReference: body.transaction_id,
+        metadata: {
+          reason: "no_such_order",
+          reference_number: referenceNumber,
+          decision: body.decision,
+        },
+      });
+      return res.sendStatus(200);
+    }
+
+    let status = DECISION_STATUS[body.decision] || "pending_payment";
+    let paid = status === "Processing";
+
+    // Confirm the bank authorised what the order is actually worth before
+    // treating it as settled. auth_amount is the gateway's own figure; the
+    // echoed req_amount is what we asked for.
+    if (paid) {
+      const expected = orderTotal(order);
+      const authorised = Number(body.auth_amount ?? echoed(body, "amount"));
+      const currency = String(echoed(body, "currency") || "").toLowerCase();
+      const amountOk =
+        Number.isFinite(authorised) &&
+        Math.abs(authorised - expected) < AMOUNT_TOLERANCE;
+
+      if (!amountOk || (currency && currency !== "usd")) {
+        paid = false;
+        status = "pending_payment";
+        logPaymentEvent({
+          gateway: GATEWAY,
+          eventType: "amount_mismatch",
+          orderId: order._id,
+          gatewayReference: body.transaction_id,
+          metadata: { expected, authorised, currency: currency || null },
+        });
+      }
+    }
+
+    // Claim the order atomically. The previous read-then-save left a window
+    // where two retried confirmations both passed the "already handled?" check
+    // and both sent the customer a receipt. The filter only matches an order
+    // that has not been claimed yet, so exactly one writer wins — and in Mongo
+    // `field: null` also matches documents where the field is absent.
+    const claimed = await Order.findOneAndUpdate(
+      { _id: order._id, boaTransactionId: { $in: [null, ""] } },
+      {
+        $set: {
+          status,
+          paid,
+          boaTransactionId: body.transaction_id,
+          // Brand and last four only — enough to answer a customer's question,
+          // useless to anyone who breaches the database.
+          cardBrand: body.card_type_name || body.req_card_type,
+          cardLast4: String(body.req_card_number || "").slice(-4) || undefined,
+        },
+      },
+      { new: true }
+    );
+
+    if (!claimed) {
+      logPaymentEvent({
+        gateway: GATEWAY,
+        eventType: "duplicate_confirmation",
         orderId: order._id,
         gatewayReference: body.transaction_id,
       });
-      sendPaymentReceiptEmail(order);
-      sendAdminNewOrderEmail(order);
+      return res.sendStatus(200);
+    }
+
+    if (claimed.paid) {
+      logPaymentEvent({
+        gateway: GATEWAY,
+        eventType: "marked_paid",
+        orderId: claimed._id,
+        gatewayReference: body.transaction_id,
+      });
+      sendPaymentReceiptEmail(claimed);
+      sendAdminNewOrderEmail(claimed);
     }
 
     res.sendStatus(200);
@@ -220,22 +315,39 @@ exports.merchantPost = async (req, res, next) => {
 exports.paymentResponse = async (req, res) => {
   const body = req.body || {};
   const valid = exports.verifySignature(body);
+  const referenceNumber = echoed(body, "reference_number");
+
+  // A forged response and a valid one we can't read are different problems —
+  // the first is someone probing us, the second is a bug on our side. Logging
+  // both as "signature_rejected" is what hid the req_ prefix mismatch: the
+  // signature was fine every time, only the reference was unreadable.
+  if (!valid) {
+    logPaymentEvent({
+      gateway: GATEWAY,
+      eventType: "signature_rejected",
+      metadata: { source: "customer_response", reference_number: referenceNumber ?? null },
+    });
+    return res.redirect(`${frontendUrl}/cart`);
+  }
+
   // Guard the shape as well as the signature. Redirecting with a missing
   // reference_number would send the customer to /succeed?order_id=undefined,
   // and the thank-you page would then ask the API for an order called
   // "undefined".
-  const orderId = valid && /^[0-9a-fA-F]{24}$/.test(body.reference_number || "")
-    ? body.reference_number
-    : "";
-
-  if (!valid || !orderId) {
+  if (!OBJECT_ID_PATTERN.test(referenceNumber || "")) {
     logPaymentEvent({
       gateway: GATEWAY,
-      eventType: "signature_rejected",
-      metadata: { source: "customer_response", reference_number: body.reference_number },
+      eventType: "unmatched_confirmation",
+      metadata: {
+        source: "customer_response",
+        reason: "missing_or_malformed_reference",
+        reference_number: referenceNumber ?? null,
+      },
     });
     return res.redirect(`${frontendUrl}/cart`);
   }
+
+  const orderId = referenceNumber;
 
   if (DECISION_STATUS[body.decision] === "payment failed") {
     return res.redirect(`${frontendUrl}/cart?payment=failed`);

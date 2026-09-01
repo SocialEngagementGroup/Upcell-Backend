@@ -32,6 +32,15 @@ exports.orderLineItemsForReceipt = (order) =>
     price: item?.price_data?.product_data?.metadata?.totalPaid || 0,
   }));
 
+// One definition of "what is this order worth". The receipt total and the
+// check that the bank authorised the right figure must agree by construction —
+// if they were computed separately, a drift between them would show up as a
+// customer being charged one amount and emailed another.
+exports.orderTotal = (order) =>
+  exports
+    .orderLineItemsForReceipt(order)
+    .reduce((sum, item) => sum + item.price, 0);
+
 // Shared by every payment gateway's "order just got marked paid" path
 // (PayPal capture/webhook and Stripe webhook) so they can't drift out of
 // sync the way Stripe previously did — it called sendPaymentReceiptEmail
@@ -70,7 +79,7 @@ exports.sendPaymentReceiptEmail = async (order) => {
     if (!(await customerEmailsEnabled())) return;
 
     const lineItems = exports.orderLineItemsForReceipt(order);
-    const total = lineItems.reduce((sum, item) => sum + item.price, 0);
+    const total = exports.orderTotal(order);
     const { subject, html } = paymentReceiptEmail({
       orderId: order._id,
       paidWith: order.paidWith,
@@ -345,33 +354,83 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
   } = req.body;
 
   const uniqueOrders = [...new Set(orders)];
-  const productsInfo = await SingleVariation.find({ _id: uniqueOrders });
+  const productsInfo = await SingleVariation.find({ _id: { $in: uniqueOrders } });
 
-  let line_items = [];
+  // Count each id once up front. The previous orders.filter() inside the loop
+  // made this O(n²) on a caller-supplied array with no length cap.
+  const quantities = orders.reduce(
+    (counts, id) => counts.set(id, (counts.get(id) || 0) + 1),
+    new Map()
+  );
+
+  const line_items = [];
+  const unavailable = [];
 
   for (const id of uniqueOrders) {
     const info = productsInfo.find((p) => p._id.toString() === id);
-    const quantity = orders.filter((i) => i === id)?.length || 0;
+    const quantity = quantities.get(id) || 0;
 
-    if (quantity > 0 && productsInfo) {
-      line_items.push({
-        quantity,
-        price_data: {
-          currency: "USD",
-          unit_amount: info?.price * 100,
-          product_data: {
-            name: info?.productName,
-            description: `${info?.color?.name} ${info?.condition} ${info?.storage}`,
-            images: [info?.image],
-            metadata: {
-              productId: info?._id,
-              quantity,
-              totalPaid: info?.price * quantity,
-            },
+    if (quantity < 1) continue;
+
+    // `productsInfo` is always an array, so the previous `quantity > 0 &&
+    // productsInfo` guard was always true. A deleted or simply non-existent id
+    // fell straight through with `info` undefined, and `info?.price * 100`
+    // evaluated to NaN — which propagated into totalPrice and was handed to
+    // the bank as amount="NaN".
+    if (!info || !Number.isFinite(info.price)) {
+      // `message` is not decoration — extractApiError on the frontend renders
+      // `details` by mapping each entry to `item.message`, so an entry without
+      // one reaches the customer as the literal text "undefined".
+      unavailable.push({
+        id,
+        reason: "not_found",
+        message: "An item in your cart is no longer listed.",
+      });
+      continue;
+    }
+
+    // outOfStock exists on the model but was only ever read for sorting and
+    // display — nothing stopped a checkout for a unit already sold. These are
+    // individual refurbished devices, so that is two customers paying for one
+    // physical phone, and the second one has to be refunded by hand.
+    if (info.outOfStock) {
+      unavailable.push({
+        id,
+        reason: "out_of_stock",
+        name: info.productName,
+        message: `${info.productName || "An item"} has just sold out.`,
+      });
+      continue;
+    }
+
+    line_items.push({
+      quantity,
+      price_data: {
+        currency: "USD",
+        unit_amount: info.price * 100,
+        product_data: {
+          name: info.productName,
+          description: `${info?.color?.name} ${info.condition} ${info.storage}`,
+          images: [info.image],
+          metadata: {
+            productId: info._id,
+            quantity,
+            totalPaid: info.price * quantity,
           },
         },
-      });
-    }
+      },
+    });
+  }
+
+  // Fail the whole checkout rather than quietly dropping the bad lines. Partial
+  // fulfilment would charge the customer for a cart they never agreed to.
+  if (unavailable.length) {
+    const error = new Error(
+      "Some items in your cart are no longer available. Please review your cart and try again."
+    );
+    error.status = 409;
+    error.details = unavailable;
+    throw error;
   }
 
   // adding price for shipping
@@ -421,6 +480,9 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
 
   const order = {
     line_items,
+    // Set by verifyToken on the authenticated checkout routes. Undefined on
+    // the admin-created Manual path, which has no customer session.
+    userId: req.user?.id,
     name,
     email,
     phone,
