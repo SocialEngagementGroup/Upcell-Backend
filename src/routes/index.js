@@ -16,6 +16,7 @@ const emailConfigRoutes = require("./emailConfig.routes");
 const notificationRoutes = require("./notification.routes");
 const auditLogRoutes = require("./auditLog.routes");
 const uploadRoutes = require("./upload.routes");
+const bankOfAmericaRoutes = require("./bankOfAmerica.routes");
 
 router.use("/", categoryRoutes);
 router.use("/", productRoutes);
@@ -29,6 +30,7 @@ router.use("/", analyticsRoutes);
 // Kept as backup: controllers/routes are untouched, only unmounted here.
 // router.use("/", stripeRoutes);
 // router.use("/checkout-customer", checkoutCustomerRoutes);
+router.use("/boa", bankOfAmericaRoutes);
 router.use("/add-run-form-submit", wholesaleRoutes);
 router.use("/this-month-sold-items", monthlySellRoutes);
 router.use("/", emailConfigRoutes);

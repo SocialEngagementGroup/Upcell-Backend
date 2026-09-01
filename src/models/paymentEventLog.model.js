@@ -12,7 +12,7 @@ const eventTypeEnum = [
   "refunded",
   "config_error",
 ];
-const gatewayEnum = ["Stripe", "Paypal"];
+const gatewayEnum = ["Stripe", "Paypal", "BankOfAmerica"];
 
 const PaymentEventLogSchema = new Schema(
   {

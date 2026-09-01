@@ -21,10 +21,12 @@ jest.mock("axios", () => ({ default: mockAxios, __esModule: true }));
 jest.mock("../src/models/order.model");
 jest.mock("../src/models/paymentEventLog.model");
 jest.mock("../src/models/singleVariation.model");
+jest.mock("../src/models/emailConfig.model");
 
 const Order = require("../src/models/order.model");
 const PaymentEventLog = require("../src/models/paymentEventLog.model");
 const SingleVariation = require("../src/models/singleVariation.model");
+const { EmailConfig } = require("../src/models/emailConfig.model");
 const checkout = require("../src/controllers/checkout.controller");
 
 const flushMicrotasks = () => new Promise((resolve) => setImmediate(resolve));
@@ -40,6 +42,11 @@ let verifySignatureResult = { verification_status: "SUCCESS" };
 beforeEach(() => {
   jest.clearAllMocks();
   PaymentEventLog.create.mockResolvedValue({});
+  // Customer emails on by default — individual tests can flip this to assert
+  // the Admin > Email Settings switch actually suppresses the receipt.
+  EmailConfig.findOne.mockReturnValue({
+    lean: () => Promise.resolve({ enableCustomerEmails: true }),
+  });
   verifySignatureResult = { verification_status: "SUCCESS" };
   mockAxios.mockImplementation((config) => {
     if (config.url.includes("/oauth2/token")) {
@@ -243,8 +250,42 @@ describe("paypalCheckout — pending-checkout guard, happy path, and error branc
   });
 });
 
+describe("sendPaymentReceiptEmail — customer email switch", () => {
+  it("does not send when customer emails are turned off in Email Settings", async () => {
+    EmailConfig.findOne.mockReturnValue({
+      lean: () => Promise.resolve({ enableCustomerEmails: false }),
+    });
+
+    await checkout.sendPaymentReceiptEmail({
+      _id: "order1",
+      email: "buyer@example.com",
+      paidWith: "BankOfAmerica",
+      line_items: [
+        { quantity: 1, price_data: { product_data: { name: "iPhone", metadata: { totalPaid: 649 } } } },
+      ],
+    });
+
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it("still sends when the config row does not exist yet", async () => {
+    EmailConfig.findOne.mockReturnValue({ lean: () => Promise.resolve(null) });
+
+    await checkout.sendPaymentReceiptEmail({
+      _id: "order1",
+      email: "buyer@example.com",
+      paidWith: "BankOfAmerica",
+      line_items: [
+        { quantity: 1, price_data: { product_data: { name: "iPhone", metadata: { totalPaid: 649 } } } },
+      ],
+    });
+
+    expect(mockSend).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("hasPendingCheckout — multi-tab duplicate-checkout guard", () => {
-  it("returns true when a recent unpaid Stripe/PayPal order exists for the email", async () => {
+  it("returns true when a recent unpaid gateway order exists for the email", async () => {
     Order.findOne.mockReturnValue({ lean: () => Promise.resolve({ _id: "existing" }) });
 
     const result = await checkout.hasPendingCheckout("buyer@example.com");
@@ -253,7 +294,7 @@ describe("hasPendingCheckout — multi-tab duplicate-checkout guard", () => {
     const query = Order.findOne.mock.calls[0][0];
     expect(query.email).toBe("buyer@example.com");
     expect(query.paid).toBe(false);
-    expect(query.paidWith).toEqual({ $in: ["Stripe", "Paypal"] });
+    expect(query.paidWith).toEqual({ $in: ["Stripe", "Paypal", "BankOfAmerica"] });
   });
 
   it("returns false when no pending order exists", async () => {
@@ -262,6 +303,15 @@ describe("hasPendingCheckout — multi-tab duplicate-checkout guard", () => {
     const result = await checkout.hasPendingCheckout("buyer@example.com");
 
     expect(result).toBe(false);
+  });
+
+  it("excludes confirmed declines so the customer can retry with another card", async () => {
+    Order.findOne.mockReturnValue({ lean: () => Promise.resolve(null) });
+
+    await checkout.hasPendingCheckout("buyer@example.com");
+
+    const query = Order.findOne.mock.calls[0][0];
+    expect(query.status).toEqual({ $ne: "payment failed" });
   });
 });
 

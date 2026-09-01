@@ -5,6 +5,21 @@ const SingleVariation = require("../models/singleVariation.model");
 const PaymentEventLog = require("../models/paymentEventLog.model");
 const { Resend } = require("resend");
 const { paymentReceiptEmail, adminNewOrderEmail } = require("../services/emailTemplates");
+const { EmailConfig } = require("../models/emailConfig.model");
+
+// Reads the "Customer emails" switch from Admin > Email Settings. Defaults to
+// sending if the row is missing or the lookup fails — a receipt is worth more
+// to the customer than the switch is to us, and silently swallowing every
+// receipt because of a database blip would be the worse failure.
+const customerEmailsEnabled = async () => {
+  try {
+    const config = await EmailConfig.findOne().lean();
+    return config ? config.enableCustomerEmails !== false : true;
+  } catch (error) {
+    console.error("[email-config] lookup failed, sending anyway:", error);
+    return true;
+  }
+};
 
 // Order.line_items are stored in a Stripe price_data-shaped structure
 // (checkout.controller.js models both gateways after Stripe's shape) —
@@ -41,22 +56,37 @@ exports.sendAdminNewOrderEmail = (order) => {
 // Fire-and-forget on purpose — a failed receipt email shouldn't fail the
 // whole webhook/capture response (which is what tells PayPal/Stripe whether
 // to retry), the way an admin-notification failure currently does.
-exports.sendPaymentReceiptEmail = (order) => {
-  if (!order?.email) return;
-  const lineItems = exports.orderLineItemsForReceipt(order);
-  const total = lineItems.reduce((sum, item) => sum + item.price, 0);
-  const { subject, html } = paymentReceiptEmail({
-    orderId: order._id,
-    paidWith: order.paidWith,
-    lineItems,
-    total,
-  });
+// Callers invoke this without awaiting, so it must never reject — an unhandled
+// rejection here would take the process down instead of losing one email.
+exports.sendPaymentReceiptEmail = async (order) => {
+  try {
+    if (!order?.email) return;
 
-  resend.emails
-    .send({ from: orderEmailFrom, to: [order.email], subject, html })
-    .catch((error) => {
-      console.error("Failed to send payment receipt email:", error);
+    // Honours the same "Customer emails" switch in Admin > Email Settings that
+    // already gates trade-in mail. Previously only trade-in respected it, so
+    // turning customer emails off still let payment receipts through — which
+    // is the wrong behaviour when the switch is used to keep test orders from
+    // reaching real inboxes.
+    if (!(await customerEmailsEnabled())) return;
+
+    const lineItems = exports.orderLineItemsForReceipt(order);
+    const total = lineItems.reduce((sum, item) => sum + item.price, 0);
+    const { subject, html } = paymentReceiptEmail({
+      orderId: order._id,
+      paidWith: order.paidWith,
+      lineItems,
+      total,
     });
+
+    await resend.emails.send({
+      from: orderEmailFrom,
+      to: [order.email],
+      subject,
+      html,
+    });
+  } catch (error) {
+    console.error("Failed to send payment receipt email:", error);
+  }
 };
 
 // Fire-and-forget on purpose, same pattern as AuditLog.create() calls
@@ -108,19 +138,22 @@ const paypalWebhookId =
 // different orders, not a retry of one. Block a second checkout attempt for
 // the same email while an earlier one is still unpaid and recent.
 //
-// Deliberately short (not the 15min checkoutLimiter window): an order also
-// sits at paid:false after a genuinely declined card, and we can't yet tell
-// "declined, wants to retry with a different card" apart from "still being
-// paid in another tab" from status alone (no webhook coverage for declines
-// yet). A short window catches the multi-tab race, which happens within
-// seconds, without also blocking a normal decline-and-retry for minutes.
+// Deliberately short (not the 15min checkoutLimiter window). It only needs to
+// cover the multi-tab race, which happens within seconds — a longer window
+// would start blocking legitimate retries.
 const PENDING_CHECKOUT_WINDOW_MS = 2 * 60 * 1000;
 
 exports.hasPendingCheckout = async (email) => {
   const pending = await Order.findOne({
     email,
     paid: false,
-    paidWith: { $in: ["Stripe", "Paypal"] },
+    paidWith: { $in: ["Stripe", "Paypal", "BankOfAmerica"] },
+    // A confirmed decline is not a checkout in progress — the bank told us no
+    // money moved, so the customer should be free to retry with another card
+    // immediately rather than waiting out the window. Everything else that is
+    // still unpaid stays blocked, including orders whose outcome we never
+    // heard: not knowing whether money moved is exactly when to be cautious.
+    status: { $ne: "payment failed" },
     createdAt: { $gte: new Date(Date.now() - PENDING_CHECKOUT_WINDOW_MS) },
   }).lean();
   return Boolean(pending);
@@ -303,6 +336,7 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
     email,
     phone,
     city,
+    state,
     postal,
     street,
     country,
@@ -391,6 +425,7 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
     email,
     phone,
     city,
+    state,
     postal,
     street,
     country,

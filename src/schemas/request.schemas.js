@@ -120,12 +120,18 @@ const orderSchema = z.object({
   email: emailField,
   phone: phoneField,
   city: trimmedString("City", 2, 120),
+  // Two-letter US state code. The bank compares this against the card issuer's
+  // records (AVS) and the profile is set to reverse the authorisation when that
+  // check fails — so a missing or malformed state silently costs a sale.
+  // Optional here because the manual-order path predates it and older clients
+  // still post without it.
+  state: z.string().trim().toUpperCase().length(2, "State must be a 2-letter code").optional(),
   postal: trimmedString("Postal code", 3, 20),
   street: trimmedString("Street", 5, 200),
   country: usOnlyCountryField,
   orders: z.array(z.string().regex(/^[0-9a-fA-F]{24}$/)).min(1, "At least one product is required"),
   shipping: z.enum(["standard", "priority", "express"]).default("standard"),
-  paidWith: z.enum(["Stripe", "Paypal", "Card", "Manual"]).optional(),
+  paidWith: z.enum(["Stripe", "Paypal", "Card", "Manual", "BankOfAmerica"]).optional(),
   // Client-generated, once per checkout attempt — forwarded as the
   // PayPal-Request-Id / Stripe idempotencyKey on the outbound gateway call
   // so a retried request lands on the original transaction. Optional since
