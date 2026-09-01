@@ -90,6 +90,83 @@ describe("signature round trip", () => {
   });
 });
 
+describe("fields sent to the gateway — reason code 102 causes", () => {
+  const prepare = async (overrides) => {
+    Order.create.mockImplementation(async (doc) => ({
+      _id: ORDER_ID,
+      toString: () => ORDER_ID,
+      ...doc,
+      _idString: ORDER_ID,
+    }));
+    Order.findOne.mockReturnValue({ lean: jest.fn().mockResolvedValue(null) });
+
+    let captured = null;
+    const res = {
+      json: (payload) => { captured = payload.fields; return res; },
+      status() { return this; },
+    };
+    await boa.preparePayment(
+      {
+        user: { id: "user_abc" },
+        body: {
+          name: "Communications",
+          email: "communications@socialengagementgroup.com",
+          phone: "(313) 288-8312",
+          city: "Astoria",
+          state: "NY",
+          postal: "11105",
+          street: "20-25 Shore Blvd apt 16a",
+          country: "United States",
+          orders: ["68b59c07d4a1e2b8c3f10a51"],
+          shipping: "standard",
+          ...overrides,
+        },
+      },
+      res,
+      (e) => { throw e; }
+    );
+    return captured;
+  };
+
+  beforeEach(() => {
+    const SingleVariation = require("../src/models/singleVariation.model");
+    SingleVariation.find.mockResolvedValue([
+      { _id: "68b59c07d4a1e2b8c3f10a51", price: 100, productName: "iPhone",
+        color: { name: "Black" }, condition: "Good", storage: "128GB", image: "/x.png" },
+    ]);
+  });
+
+  it("never sends a bare hyphen as the surname for a one-word name", async () => {
+    // surname "-" is invalid field data to Secure Acceptance and declines the
+    // whole transaction with reason code 102. Five real attempts hit this.
+    const fields = await prepare({ name: "Communications" });
+
+    expect(fields.bill_to_surname).not.toBe("-");
+    expect(fields.bill_to_forename).toBe("Communications");
+    expect(fields.bill_to_surname).toBe("Communications");
+  });
+
+  it("strips punctuation a customer naturally types into a phone number", async () => {
+    const fields = await prepare({ phone: "(313) 288-8312" });
+
+    expect(fields.bill_to_phone).toBe("3132888312");
+    expect(fields.bill_to_phone).toMatch(/^\d*$/);
+  });
+
+  it("keeps a normal two-part name intact", async () => {
+    const fields = await prepare({ name: "Ashraf Uddin" });
+
+    expect(fields.bill_to_forename).toBe("Ashraf");
+    expect(fields.bill_to_surname).toBe("Uddin");
+  });
+
+  it("caps the phone at the gateway's 15-character limit", async () => {
+    const fields = await prepare({ phone: "+1 (313) 288-8312 ext 99999999" });
+
+    expect(fields.bill_to_phone.length).toBeLessThanOrEqual(15);
+  });
+});
+
 describe("merchantPost — reading the echoed reference number", () => {
   // The regression this suite exists for. Secure Acceptance returns the
   // reference as req_reference_number; the controller read reference_number,
@@ -125,6 +202,37 @@ describe("merchantPost — reading the echoed reference number", () => {
     );
     // Still 200 — a 4xx would make the bank retry a payload we cannot use.
     expect(res.sendStatus).toHaveBeenCalledWith(200);
+  });
+
+  it("records which fields the gateway rejected", async () => {
+    const order = { _id: ORDER_ID, email: "buyer@example.com", line_items: [] };
+    Order.findById.mockResolvedValue(order);
+    Order.findOneAndUpdate.mockResolvedValue({ ...order, paid: false });
+
+    // A reason-102 rejection names the offending fields. Discarding them is
+    // what forced the cause to be reconstructed from the database by hand.
+    const body = signedReply({
+      decision: "REJECT",
+      reason_code: "102",
+      invalidField_0: "bill_to_surname",
+      invalidField_1: "bill_to_phone",
+    });
+
+    await boa.merchantPost({ body }, makeRes(), jest.fn());
+
+    const received = eventOfType("webhook_received");
+    expect(received.metadata.reason_code).toBe("102");
+    expect(received.metadata.invalid_fields).toEqual(["bill_to_surname", "bill_to_phone"]);
+  });
+
+  it("omits the invalid-fields key entirely on a clean confirmation", async () => {
+    const order = { _id: ORDER_ID, email: "buyer@example.com", line_items: [] };
+    Order.findById.mockResolvedValue(order);
+    Order.findOneAndUpdate.mockResolvedValue({ ...order, paid: true });
+
+    await boa.merchantPost({ body: signedReply({ auth_amount: "0.00" }) }, makeRes(), jest.fn());
+
+    expect(eventOfType("webhook_received").metadata).not.toHaveProperty("invalid_fields");
   });
 
   it("flags a confirmation for an order that does not exist", async () => {

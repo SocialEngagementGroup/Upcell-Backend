@@ -115,6 +115,14 @@ const usOnlyCountryField = trimmedString("Country", 2, 120)
   )
   .transform(() => "United States");
 
+// 50 states, DC, and the US territories the postal service delivers to — the
+// set the card networks accept for a US address.
+const US_STATE_CODES = new Set(
+  ("AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO " +
+   "MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY " +
+   "DC AS GU MP PR VI AA AE AP").split(" ")
+);
+
 const orderSchema = z.object({
   name: trimmedString("Name", 2, 120),
   email: emailField,
@@ -125,8 +133,24 @@ const orderSchema = z.object({
   // check fails — so a missing or malformed state silently costs a sale.
   // Optional here because the manual-order path predates it and older clients
   // still post without it.
-  state: z.string().trim().toUpperCase().length(2, "State must be a 2-letter code").optional(),
-  postal: trimmedString("Postal code", 3, 20),
+  // "FD" is two letters and passed the old length check, but it is not a state
+  // — the issuer's address check fails and the sale is lost. Match against the
+  // real list instead of just counting characters.
+  state: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .refine((value) => US_STATE_CODES.has(value), "Enter a valid 2-letter US state code")
+    .optional(),
+  // A real US ZIP, not "121" or "121212". The gateway rejects a malformed
+  // postal code outright (reason code 102), and a valid-but-wrong one fails
+  // the issuer's address check — either way the customer sees "payment failed"
+  // with no clue that a typo in this box caused it. Catching it at the form is
+  // the only place the customer can actually fix it.
+  postal: z
+    .string()
+    .trim()
+    .regex(/^\d{5}(-\d{4})?$/, "Enter a 5-digit ZIP code, e.g. 94043"),
   street: trimmedString("Street", 5, 200),
   country: usOnlyCountryField,
   // The max matters as much as the min: this array is one entry per unit, it

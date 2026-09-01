@@ -65,11 +65,26 @@ const toCountryCode = (value) => {
 // milliseconds. toISOString() includes them, which the gateway rejects.
 const signedDateTime = () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 
+// The checkout form collects one "Name" field, but the gateway wants forename
+// and surname separately and validates both.
+//
+// A single-word name used to send surname="-", which Secure Acceptance rejects
+// as invalid field data — reason code 102, the whole transaction declined. Any
+// customer entering just their first name hit it, and the error they saw said
+// nothing about a name. Repeating the one word they gave us is valid data and
+// costs nothing: AVS checks street and postal code, never the name.
 const splitName = (fullName) => {
-  const parts = String(fullName || "").trim().split(/\s+/);
-  if (parts.length < 2) return { forename: parts[0] || "Customer", surname: "-" };
+  const parts = String(fullName || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { forename: "Customer", surname: "Customer" };
+  if (parts.length === 1) return { forename: parts[0], surname: parts[0] };
   return { forename: parts[0], surname: parts.slice(1).join(" ") };
 };
+
+// Secure Acceptance rejects a phone containing anything but digits — the
+// "(313) 288-8312" a customer naturally types is invalid field data, again
+// reason code 102. Strip to digits and cap at the gateway's 15-character
+// limit; an empty result means send nothing rather than send garbage.
+const toGatewayPhone = (value) => String(value || "").replace(/\D/g, "").slice(0, 15);
 
 const OBJECT_ID_PATTERN = /^[0-9a-fA-F]{24}$/;
 
@@ -91,6 +106,17 @@ const echoed = (body, name) => body[`req_${name}`] ?? body[name];
 // and confirmation). Either way that is not a payment we should mark complete
 // without a human looking at it.
 const AMOUNT_TOLERANCE = 0.01;
+
+// On a rejection the gateway names every field it objected to, as invalidField_0,
+// invalidField_1, ... Nothing read them, so a reason-102 decline ("one or more
+// fields contain invalid data") arrived with the diagnosis attached and we threw
+// it away — the cause had to be reconstructed by diffing paid against failed
+// orders in the database. Capture them so the log says which field was wrong.
+const invalidFields = (body) =>
+  Object.keys(body)
+    .filter((key) => /^invalidField_\d+$/.test(key))
+    .sort((a, b) => Number(a.split("_")[1]) - Number(b.split("_")[1]))
+    .map((key) => body[key]);
 
 // Step 1 of the flow. The order is written before signing so its _id can be
 // the reference_number — that _id is the only thing tying the bank's later
@@ -154,7 +180,7 @@ exports.preparePayment = async (req, res, next) => {
       bill_to_forename: forename,
       bill_to_surname: surname,
       bill_to_email: newOrder.email,
-      bill_to_phone: newOrder.phone,
+      bill_to_phone: toGatewayPhone(newOrder.phone),
       bill_to_address_line1: newOrder.street,
       bill_to_address_city: newOrder.city,
       bill_to_address_state: newOrder.state || "",
@@ -196,11 +222,21 @@ exports.merchantPost = async (req, res, next) => {
 
     const referenceNumber = echoed(body, "reference_number");
 
+    const rejectedFields = invalidFields(body);
+
     logPaymentEvent({
       gateway: GATEWAY,
       eventType: "webhook_received",
       gatewayReference: body.transaction_id,
-      metadata: { decision: body.decision, reference_number: referenceNumber },
+      metadata: {
+        decision: body.decision,
+        reference_number: referenceNumber,
+        reason_code: body.reason_code,
+        message: body.message,
+        // Present only on a rejection, and the single most useful thing in the
+        // payload when one happens.
+        ...(rejectedFields.length ? { invalid_fields: rejectedFields } : {}),
+      },
     });
 
     // A confirmation whose reference we can't resolve means the bank believes
