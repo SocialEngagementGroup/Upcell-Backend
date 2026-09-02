@@ -224,13 +224,32 @@ describe("reconciliation — closing abandoned checkouts", () => {
     expect(Order.updateMany).not.toHaveBeenCalled();
     expect(report.info.join(" ")).not.toContain("closed automatically");
   });
+
+  it("keeps the findings when closing them fails", async () => {
+    // The sweep is the only part of this service that writes, so it is the
+    // only part that can fail in a new way. Sharing the outer catch meant a
+    // failure here threw away every problem found above it — the report would
+    // come back empty at exactly the moment it mattered most.
+    withOrders(abandoned);
+    withEvents({
+      unmatched_confirmation: [{ gatewayReference: "T1", metadata: { reason: "no_such_order" } }],
+    });
+    Order.updateMany.mockRejectedValue(new Error("write failed"));
+
+    const report = await runReconciliation();
+
+    expect(report.critical).toHaveLength(1);
+    expect(report.critical[0]).toContain("T1");
+    expect(report.warnings.join(" ")).toContain("Could not close abandoned checkouts");
+  });
 });
 
 describe("reconciliation — warnings", () => {
   it("flags a paid order with no bank transaction id", async () => {
-    Order.find.mockImplementation((query) => ({
-      lean: async () => (query.paid === true ? [{ _id: ORDER_ID }] : []),
-    }));
+    Order.find.mockImplementation((query) => {
+      const rows = query.paid === true ? [{ _id: ORDER_ID }] : [];
+      return { lean: async () => rows, select: () => ({ lean: async () => rows }) };
+    });
     Order.countDocuments.mockResolvedValue(0);
 
     const report = await runReconciliation();

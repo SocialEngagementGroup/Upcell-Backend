@@ -180,9 +180,18 @@ async function runReconciliation({ windowMs = 24 * HOUR } = {}) {
       info.push(`${abandoned} checkout${abandoned === 1 ? "" : "s"} started but never completed.`);
     }
 
-    const swept = await sweepAbandonedCheckouts();
-    if (swept > 0) {
-      info.push(`${swept} abandoned checkout${swept === 1 ? "" : "s"} closed automatically.`);
+    // Tidying up must never cost us the findings. The sweep is the only part
+    // of this service that writes, so it is the only part that can fail in a
+    // new way — and if it did, sharing the outer catch meant every problem
+    // found above was discarded with it. Its own catch keeps the report.
+    try {
+      const swept = await sweepAbandonedCheckouts();
+      if (swept > 0) {
+        info.push(`${swept} abandoned checkout${swept === 1 ? "" : "s"} closed automatically.`);
+      }
+    } catch (error) {
+      console.error("[reconciliation] closing abandoned checkouts failed:", error);
+      warnings.push("Could not close abandoned checkouts: " + error.message);
     }
   } catch (error) {
     console.error("[reconciliation] check failed:", error);
