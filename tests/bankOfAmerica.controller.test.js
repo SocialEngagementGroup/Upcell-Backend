@@ -134,6 +134,13 @@ describe("fields sent to the gateway — reason code 102 causes", () => {
       { _id: "68b59c07d4a1e2b8c3f10a51", price: 100, productName: "iPhone",
         color: { name: "Black" }, condition: "Good", storage: "128GB", image: "/x.png" },
     ]);
+    // preparePayment now holds each device before handing the customer over,
+    // so the claim has to succeed for these field-formatting tests to reach
+    // the point where the signed fields are built.
+    SingleVariation.findOneAndUpdate.mockImplementation((filter) => ({
+      lean: async () => ({ _id: filter._id }),
+    }));
+    SingleVariation.updateMany.mockResolvedValue({ modifiedCount: 0 });
   });
 
   it("never sends a bare hyphen as the surname for a one-word name", async () => {

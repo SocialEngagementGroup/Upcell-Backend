@@ -2,6 +2,12 @@ const crypto = require("crypto");
 const Order = require("../models/order.model");
 const { scrubPayload } = require("../utils/scrubPayload");
 const {
+  reserveVariations,
+  releaseReservation,
+  markSold,
+  variationIdsFromOrder,
+} = require("../services/inventory");
+const {
   makeOrderObjAndTotal,
   hasPendingCheckout,
   logPaymentEvent,
@@ -152,10 +158,36 @@ exports.preparePayment = async (req, res, next) => {
     });
 
     const transactionUuid = crypto.randomUUID();
-    const newOrder = await Order.create({
-      ...order,
-      boaTransactionUuid: transactionUuid,
-    });
+
+    // Hold the devices before the customer leaves for the bank. Every device is
+    // a single unit, so without this two people can be authorised for the same
+    // phone and one has to be refunded by hand. Reserved before the order is
+    // written so a customer who cannot be served does not leave an order behind.
+    const reservation = await reserveVariations(
+      variationIdsFromOrder({ line_items: order.line_items }),
+      transactionUuid
+    );
+
+    if (!reservation.ok) {
+      const error = new Error(
+        "Some items in your cart are no longer available. Please review your cart and try again."
+      );
+      error.status = 409;
+      error.details = reservation.unavailable;
+      throw error;
+    }
+
+    let newOrder;
+    try {
+      newOrder = await Order.create({
+        ...order,
+        boaTransactionUuid: transactionUuid,
+      });
+    } catch (error) {
+      // Never leave stock held for an order that was never created.
+      await releaseReservation(transactionUuid);
+      throw error;
+    }
 
     const { forename, surname } = splitName(newOrder.name);
 
@@ -336,7 +368,16 @@ exports.merchantPost = async (req, res, next) => {
       return res.sendStatus(200);
     }
 
+    const variationIds = variationIdsFromOrder(claimed);
+
     if (claimed.paid) {
+      // The money is confirmed, so the devices are sold. Nothing did this
+      // before: outOfStock could only be set by hand, so every sale depended on
+      // someone remembering to take that device off the shop afterwards.
+      await markSold(variationIds).catch((error) => {
+        console.error("[boa] failed to mark devices sold:", error);
+      });
+
       logPaymentEvent({
         gateway: GATEWAY,
         eventType: "marked_paid",
@@ -345,6 +386,12 @@ exports.merchantPost = async (req, res, next) => {
       });
       sendPaymentReceiptEmail(claimed);
       sendAdminNewOrderEmail(claimed);
+    } else {
+      // A confirmed decline means these devices are free again. Waiting for the
+      // hold to expire would keep sellable stock off the shop for no reason.
+      await releaseReservation(claimed.boaTransactionUuid).catch((error) => {
+        console.error("[boa] failed to release reservation:", error);
+      });
     }
 
     res.sendStatus(200);
