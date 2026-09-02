@@ -284,9 +284,22 @@ describe("orderSchema — missing fields, wrong types, injection shapes", () => 
     expect(() => orderSchema.parse({ ...base, paidWith: "Cash" })).toThrow();
   });
 
-  it.each(["Stripe", "Paypal", "Card", "Manual"])("accepts paidWith value '%s'", (paidWith) => {
-    expect(() => orderSchema.parse({ ...base, paidWith })).not.toThrow();
-  });
+  // The full accepted set. Stripe and Paypal were dropped with their gateways;
+  // BankOfAmerica is the live one and belongs here explicitly, so a future edit
+  // to the enum cannot quietly stop accepting the only gateway that works.
+  it.each(["BankOfAmerica", "Card", "Manual"])(
+    "accepts paidWith value '%s'",
+    (paidWith) => {
+      expect(() => orderSchema.parse({ ...base, paidWith })).not.toThrow();
+    }
+  );
+
+  it.each(["Stripe", "Paypal"])(
+    "rejects retired gateway '%s'",
+    (paidWith) => {
+      expect(() => orderSchema.parse({ ...base, paidWith })).toThrow();
+    }
+  );
 
   it("rejects an idempotencyKey over the 100-character limit", () => {
     expect(() => orderSchema.parse({ ...base, idempotencyKey: "x".repeat(101) })).toThrow();

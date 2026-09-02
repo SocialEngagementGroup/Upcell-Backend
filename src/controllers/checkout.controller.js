@@ -124,9 +124,7 @@ exports.hasPendingCheckout = async (email) => {
   const pending = await Order.findOne({
     email,
     paid: false,
-    // Stripe and Paypal are retired, but orders placed under them still
-    // exist and an unpaid one must still block a duplicate checkout.
-    paidWith: { $in: ["Stripe", "Paypal", "BankOfAmerica"] },
+    paidWith: "BankOfAmerica",
     // A confirmed decline is not a checkout in progress — the bank told us no
     // money moved, so the customer should be free to retry with another card
     // immediately rather than waiting out the window. Everything else that is

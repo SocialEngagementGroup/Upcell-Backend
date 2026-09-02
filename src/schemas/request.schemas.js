@@ -162,7 +162,7 @@ const orderSchema = z.object({
     .min(1, "At least one product is required")
     .max(100, "Too many items in one order"),
   shipping: z.enum(["standard", "priority", "express"]).default("standard"),
-  paidWith: z.enum(["Stripe", "Paypal", "Card", "Manual", "BankOfAmerica"]).optional(),
+  paidWith: z.enum(["Card", "Manual", "BankOfAmerica"]).optional(),
   // Client-generated, once per checkout attempt — forwarded as the
   // PayPal-Request-Id / Stripe idempotencyKey on the outbound gateway call
   // so a retried request lands on the original transaction. Optional since

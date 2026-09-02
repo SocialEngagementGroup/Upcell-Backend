@@ -24,14 +24,14 @@ const eventTypeEnum = [
   // order. Expected and harmless; recorded so retry storms stay visible.
   "duplicate_confirmation",
 ];
-const gatewayEnum = ["Stripe", "Paypal", "BankOfAmerica"];
+const gatewayEnum = ["BankOfAmerica"];
 
 const PaymentEventLogSchema = new Schema(
   {
     gateway: { type: String, enum: gatewayEnum, required: true },
     eventType: { type: String, enum: eventTypeEnum, required: true },
     orderId: { type: Schema.Types.ObjectId, ref: "Order" },
-    gatewayReference: String, // paypalId / stripeSessionId / gateway event id
+    gatewayReference: String, // the bank's transaction_id
     metadata: Schema.Types.Mixed,
   },
   { timestamps: true }

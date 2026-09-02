@@ -113,7 +113,8 @@ describe("hasPendingCheckout — multi-tab duplicate-checkout guard", () => {
     const query = Order.findOne.mock.calls[0][0];
     expect(query.email).toBe("buyer@example.com");
     expect(query.paid).toBe(false);
-    expect(query.paidWith).toEqual({ $in: ["Stripe", "Paypal", "BankOfAmerica"] });
+    // Only one gateway remains, so this is a plain equality rather than a set.
+    expect(query.paidWith).toBe("BankOfAmerica");
   });
 
   it("returns false when no pending order exists", async () => {

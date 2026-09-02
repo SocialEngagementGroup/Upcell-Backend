@@ -14,3 +14,6 @@ src/services/chat/
 
 # Point-in-time DB backups taken before destructive syncs — local only
 scripts/backups/
+
+# Database dumps written by scripts/clear-test-data.js
+backups/
