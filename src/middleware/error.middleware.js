@@ -1,11 +1,11 @@
 const { Resend } = require("resend");
 const { adminErrorAlertEmail } = require("../services/emailTemplates");
 const { EmailConfig } = require("../models/emailConfig.model");
+const { postToGoogleChat } = require("../services/alertService");
 
 const resend = new Resend(process.env.RESEND_KEY);
 const adminNotificationEmail = process.env.ADMIN_NOTIFICATION_EMAIL;
 const alertEmailFrom = process.env.EMAIL_FROM;
-const googleChatWebhookUrl = process.env.GOOGLE_CHAT_WEBHOOK_URL;
 
 // Simple in-memory throttle so a burst of 500s (e.g. DB outage) sends one
 // alert instead of flooding the admin inbox/chat.
@@ -25,34 +25,18 @@ function sendEmailAlert() {
 }
 
 function sendGoogleChatAlert() {
-  if (!googleChatWebhookUrl) return;
-
+  // Posting is shared with the payment checks via alertService — the same
+  // webhook, the same "a 4xx resolves rather than rejects" trap to handle.
+  // Only the wording differs, and it stays here: this alert is deliberately
+  // vague because it fires for any 5xx, where naming a cause would be a guess.
+  //
   // Plain text with Chat's own lightweight markup (*bold*) — every webhook
   // supports this with no schema to get wrong, unlike cardsV2 which needs an
   // exact nested structure and fails silently if it's off.
-  const payload = {
-    text:
-      "🔧 *A little hiccup on the site*\n" +
-      "Nothing urgent — something needs a developer's attention. They've already been notified and will take a look soon.",
-  };
-
-  fetch(googleChatWebhookUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  })
-    .then(async (response) => {
-      // fetch() only rejects on network failure — a 4xx/5xx from Google
-      // Chat (bad payload, revoked webhook, etc.) resolves normally and
-      // would otherwise fail silently.
-      if (!response.ok) {
-        const body = await response.text().catch(() => "");
-        console.error(`Google Chat alert rejected (${response.status}):`, body);
-      }
-    })
-    .catch((chatErr) => {
-      console.error("Failed to send Google Chat alert:", chatErr);
-    });
+  postToGoogleChat(
+    "🔧 *A little hiccup on the site*\n" +
+      "Nothing urgent — something needs a developer's attention. They've already been notified and will take a look soon."
+  );
 }
 
 async function sendErrorAlert() {

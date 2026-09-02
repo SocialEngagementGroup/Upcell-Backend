@@ -218,8 +218,10 @@ describe("errorHandler — alert delivery failures never surface to the client",
     errorHandler(new Error("boom"), req, res, jest.fn());
     await flush();
 
+    // Wording comes from alertService now — the posting is shared with the
+    // payment checks, so a 4xx is reported in one place for both callers.
     expect(consoleErrorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Google Chat alert rejected (400)"),
+      expect.stringContaining("Google Chat rejected (400)"),
       "Invalid webhook token"
     );
   });
@@ -231,6 +233,9 @@ describe("errorHandler — alert delivery failures never surface to the client",
     expect(() => errorHandler(new Error("boom"), req, res, jest.fn())).not.toThrow();
     await flush();
 
-    expect(consoleErrorSpy).toHaveBeenCalledWith("Failed to send Google Chat alert:", expect.any(Error));
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "[alert] Google Chat post failed:",
+      "network unreachable"
+    );
   });
 });

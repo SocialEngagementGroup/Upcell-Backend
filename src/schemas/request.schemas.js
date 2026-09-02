@@ -95,7 +95,7 @@ const productFilterSchema = z.object({
 // We ship to US addresses only (see Delivery Policy §2 "Shipping Destinations
 // and Export"). The checkout form sends a fixed "United States", but the
 // schema is the actual gate — it's shared by all three order-creation routes
-// (POST /orders, /checkout-stripe, /checkoutcustomer), so a request crafted
+// (currently POST /orders and /boa/prepare-payment), so a request crafted
 // outside the form can't slip a foreign destination past it either. Accepts
 // the handful of spellings a customer or an autofill might supply and
 // normalises them, so downstream code and the admin view see one value.
@@ -170,12 +170,6 @@ const orderSchema = z.object({
   idempotencyKey: z.string().trim().max(100).optional(),
 });
 
-const captureSchema = z.object({
-  // PayPal order IDs are uppercase alphanumeric, ~17 chars in practice, but
-  // PayPal doesn't guarantee an exact length — this just blocks obviously
-  // malformed/garbage input before it's used to build the PayPal API URL.
-  orderID: z.string().trim().regex(/^[A-Z0-9]{10,30}$/, "Invalid PayPal order ID"),
-});
 
 const tradeInRequestSchema = z.object({
   device: trimmedString("Device", 1, 60),
@@ -226,7 +220,6 @@ module.exports = {
   productCreateSchema,
   productSchema,
   orderSchema,
-  captureSchema,
   productFilterSchema,
   wholesaleFormSchema,
   tradeInRequestSchema,

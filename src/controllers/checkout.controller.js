@@ -1,5 +1,3 @@
-const { default: axios } = require("axios");
-const { randomUUID } = require("crypto");
 const Order = require("../models/order.model");
 const SingleVariation = require("../models/singleVariation.model");
 const PaymentEventLog = require("../models/paymentEventLog.model");
@@ -21,10 +19,10 @@ const customerEmailsEnabled = async () => {
   }
 };
 
-// Order.line_items are stored in a Stripe price_data-shaped structure
-// (checkout.controller.js models both gateways after Stripe's shape) —
-// this flattens them to the {name, qty, price} rows the payment receipt
-// email template expects, for either gateway.
+// Order.line_items keep a Stripe-style price_data shape. Stripe itself is
+// long gone, but the stored orders still use that structure, so the shape
+// stays — this flattens it to the {name, qty, price} rows the receipt email
+// template expects.
 exports.orderLineItemsForReceipt = (order) =>
   (order?.line_items || []).map((item) => ({
     name: item?.price_data?.product_data?.name || "Item",
@@ -41,10 +39,10 @@ exports.orderTotal = (order) =>
     .orderLineItemsForReceipt(order)
     .reduce((sum, item) => sum + item.price, 0);
 
-// Shared by every payment gateway's "order just got marked paid" path
-// (PayPal capture/webhook and Stripe webhook) so they can't drift out of
-// sync the way Stripe previously did — it called sendPaymentReceiptEmail
-// but never this, so paid Stripe orders never notified the admin at all.
+// Called whenever an order is confirmed paid, alongside the customer
+// receipt. Kept next to sendPaymentReceiptEmail deliberately: when these two
+// lived apart, one gateway called the receipt and forgot this, and paid
+// orders silently never reached the admin.
 exports.sendAdminNewOrderEmail = (order) => {
   if (!adminNotificationEmail) return;
 
@@ -62,11 +60,11 @@ exports.sendAdminNewOrderEmail = (order) => {
     });
 };
 
-// Fire-and-forget on purpose — a failed receipt email shouldn't fail the
-// whole webhook/capture response (which is what tells PayPal/Stripe whether
-// to retry), the way an admin-notification failure currently does.
-// Callers invoke this without awaiting, so it must never reject — an unhandled
-// rejection here would take the process down instead of losing one email.
+// Fire-and-forget on purpose — a failed receipt email must not fail the
+// merchant-post response, since that response code is what tells the bank
+// whether to retry the confirmation. Callers do not await it, so it must
+// never reject: an unhandled rejection would take the process down rather
+// than lose one email.
 exports.sendPaymentReceiptEmail = async (order) => {
   try {
     if (!order?.email) return;
@@ -98,54 +96,24 @@ exports.sendPaymentReceiptEmail = async (order) => {
   }
 };
 
-// Fire-and-forget on purpose, same pattern as AuditLog.create() calls
-// elsewhere — a logging failure must never block or fail the actual webhook
-// response (that response code is what tells Stripe/PayPal whether to retry).
+// Fire-and-forget on purpose, same pattern as AuditLog.create() elsewhere —
+// a logging failure must never block or fail the confirmation response, since
+// that response code is what tells the bank whether to retry.
 exports.logPaymentEvent = (fields) => {
   PaymentEventLog.create(fields).catch((error) => {
     console.error("[payment-event-log] failed to write:", error);
   });
 };
 
-// PayPal's client-credentials token is valid for ~9 hours (response.expires_in,
-// in seconds) — cache it in memory instead of fetching a fresh one on every
-// checkout/capture request, which was adding an extra OAuth round-trip to
-// every payment action.
-let cachedPaypalToken = { token: null, expiresAt: 0 };
-
-// Outbound calls to PayPal shouldn't hang indefinitely if their API is slow —
-// fail fast so the customer sees an error instead of an endless spinner.
-const PAYPAL_REQUEST_TIMEOUT_MS = 15000;
-
 const resend = new Resend(process.env.RESEND_KEY);
 const adminNotificationEmail = process.env.ADMIN_NOTIFICATION_EMAIL;
 const orderEmailFrom = process.env.EMAIL_FROM;
 
-const endpoint_url =
-  process.env.ENVIRONMENT === "PRODUCTION"
-    ? process.env.PAYPAL_BASE_URL
-    : process.env.TEST_PAYPAL_BASE_URL;
-
-const clientID =
-  process.env.ENVIRONMENT === "PRODUCTION"
-    ? process.env.PAYPAL_CLIENT_ID
-    : process.env.TEST_PAYPAL_CLIENT_ID;
-
-const clientSecret =
-  process.env.ENVIRONMENT === "PRODUCTION"
-    ? process.env.PAYPAL_SECRET
-    : process.env.TEST_PAYPAL_SECRET;
-
-const paypalWebhookId =
-  process.env.ENVIRONMENT === "PRODUCTION"
-    ? process.env.PAYPAL_WEBHOOK_ID
-    : process.env.TEST_PAYPAL_WEBHOOK_ID;
-
 // A multi-tab customer (or a slow first request they retry) can otherwise
-// create two separate, independently-payable orders for the same cart —
-// PayPal/Stripe idempotency doesn't help here since these are genuinely two
-// different orders, not a retry of one. Block a second checkout attempt for
-// the same email while an earlier one is still unpaid and recent.
+// create two separate, independently-payable orders for the same cart. These
+// are genuinely two different orders rather than one retried, so no gateway
+// idempotency key helps. Block a second attempt for the same email while an
+// earlier one is still unpaid and recent.
 //
 // Deliberately short (not the 15min checkoutLimiter window). It only needs to
 // cover the multi-tab race, which happens within seconds — a longer window
@@ -156,6 +124,8 @@ exports.hasPendingCheckout = async (email) => {
   const pending = await Order.findOne({
     email,
     paid: false,
+    // Stripe and Paypal are retired, but orders placed under them still
+    // exist and an unpaid one must still block a duplicate checkout.
     paidWith: { $in: ["Stripe", "Paypal", "BankOfAmerica"] },
     // A confirmed decline is not a checkout in progress — the bank told us no
     // money moved, so the customer should be free to retry with another card
@@ -168,176 +138,8 @@ exports.hasPendingCheckout = async (email) => {
   return Boolean(pending);
 };
 
-exports.paypalCheckout = async (req, res, next) => {
-  try {
-    if (await exports.hasPendingCheckout(req.body?.email)) {
-      return res.status(409).json({
-        error: "Checkout already in progress",
-        message: "You already have a checkout in progress. Please complete it, or wait a few minutes and try again.",
-      });
-    }
-
-    const { order, totalPrice } = await exports.makeOrderObjAndTotal({
-      req,
-      paidWith: "Paypal",
-    });
-
-    const paypalOrder = await exports.createPaypalOrder(totalPrice, req.body?.idempotencyKey);
-
-    const paypalId = paypalOrder?.id;
-
-    if (paypalId) {
-      order.paypalId = paypalId;
-
-      await Order.create(order);
-
-      res.json(paypalOrder);
-    } else {
-      return res.status(400).send("paypal error getting order id");
-    }
-  } catch (error) {
-    next(error);
-  }
-};
-
-// PayPal supports the same idempotency mechanism Stripe does, via a
-// PayPal-Request-Id header: retrying a create/capture call with the same id
-// returns the original result instead of creating a duplicate. Wraps fetch
-// with a timeout so a slow PayPal response fails fast instead of hanging.
-const paypalFetch = (url, options) => {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PAYPAL_REQUEST_TIMEOUT_MS);
-  return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timeout));
-};
-
-// use the orders api to create an order
-exports.createPaypalOrder = async (totalprice, idempotencyKey) => {
-  // create accessToken using your clientID and clientSecret
-  // for the full stack example, please see the Standard Integration guide
-  // https://developer.paypal.com/docs/multiparty/checkout/standard/integrate/
-  const access_token = await exports.generatePaypalAccessToken();
-
-  return paypalFetch(endpoint_url + "/v2/checkout/orders", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${access_token}`,
-      // Client-provided key reused across retries when available (see
-      // orderSchema.idempotencyKey) so a retried request lands on the same
-      // PayPal order instead of creating a second one. Falls back to a
-      // fresh id for any caller that doesn't supply one.
-      "PayPal-Request-Id": idempotencyKey || randomUUID(),
-    },
-    body: JSON.stringify({
-      purchase_units: [
-        {
-          amount: {
-            currency_code: "USD",
-            value: "" + totalprice,
-          },
-          reference_id: "d9f80740-38f0-11e8-b467-0ed5f89f718b",
-        },
-      ],
-      intent: "CAPTURE",
-      payment_source: {
-        paypal: {
-          experience_context: {
-            payment_method_preference: "IMMEDIATE_PAYMENT_REQUIRED",
-            payment_method_selected: "PAYPAL",
-            brand_name: "EXAMPLE INC",
-            locale: "en-US",
-            landing_page: "LOGIN",
-            shipping_preference: "GET_FROM_FILE",
-            user_action: "PAY_NOW",
-            return_url: process.env.PAYPAL_RETURN_URL || "https://example.com/returnUrl",
-            cancel_url: process.env.PAYPAL_CANCEL_URL || "https://example.com/cancelUrl",
-          },
-        },
-      },
-    }),
-  }).then((response) => response.json());
-};
-
-exports.generatePaypalAccessToken = async () => {
-  if (cachedPaypalToken.token && Date.now() < cachedPaypalToken.expiresAt) {
-    return cachedPaypalToken.token;
-  }
-
-  const response = await axios({
-    url: endpoint_url + "/v1/oauth2/token",
-    method: "post",
-    data: "grant_type=client_credentials",
-    auth: {
-      username: clientID,
-      password: clientSecret,
-    },
-    timeout: PAYPAL_REQUEST_TIMEOUT_MS,
-  });
-
-  const { access_token, expires_in } = response?.data || {};
-
-  // Refresh 60s before actual expiry so a near-expiry token is never handed
-  // out and used just as PayPal invalidates it.
-  cachedPaypalToken = {
-    token: access_token,
-    expiresAt: Date.now() + Math.max((expires_in || 0) - 60, 0) * 1000,
-  };
-
-  return access_token;
-};
-
-exports.capturePayment = async (req, res, next) => {
-  try {
-    const orderId = req.body?.orderID;
-
-    const accessToken = await exports.generatePaypalAccessToken();
-
-    const url = `${endpoint_url}/v2/checkout/orders/${orderId}/capture`;
-
-    const response = await paypalFetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
-        "PayPal-Request-Id": randomUUID(),
-        // Uncomment one of these to force an error for negative testing (in sandbox mode only). Documentation:
-        // https://developer.paypal.com/tools/sandbox/negative-testing/request-headers/
-        // "PayPal-Mock-Response": '{"mock_application_codes": "INSTRUMENT_DECLINED"}'
-        // "PayPal-Mock-Response": '{"mock_application_codes": "TRANSACTION_REFUSED"}'
-        // "PayPal-Mock-Response": '{"mock_application_codes": "INTERNAL_SERVER_ERROR"}'
-      },
-    });
-
-    const responseData = await response.json();
-
-    // update order status to paid
-    let dbOrderId;
-    if (responseData?.status === "COMPLETED") {
-      const order = await exports.updateOrderPaid(responseData.id);
-      dbOrderId = order?._id;
-    } else if (responseData?.details?.some((detail) => detail.issue === "ORDER_ALREADY_CAPTURED")) {
-      // A retried capture (network retry, double-click) landed on an order
-      // PayPal already captured on an earlier attempt. The payment did
-      // succeed — surface it as success instead of a false failure that
-      // would otherwise invite the customer to pay a second time. Goes
-      // through updateOrderPaid (not a raw lookup) so this is also the
-      // self-healing path if the original call got COMPLETED from PayPal
-      // but crashed before it could mark the order paid itself.
-      const order = await exports.updateOrderPaid(orderId);
-      dbOrderId = order?._id;
-      return res.json({ status: "COMPLETED", orderId: dbOrderId });
-    }
-
-    return res.json({ ...responseData, orderId: dbOrderId });
-  } catch (error) {
-    next(error);
-  }
-};
-
-// **********************************************
-// we already designed order Schema accroding to stripe and used in different places in UI,
-
-// that's why designing order data like this way with line items
+// Builds the order document and its true total. Prices come from the
+// database, never from the request — the client sends only product ids.
 exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
 
   const {
@@ -504,123 +306,4 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
   );
 
   return { order, totalPrice };
-};
-
-// Three independent callers can reach this for the same order (the
-// synchronous capture response, the PayPal webhook, and a retried capture
-// that lands on ORDER_ALREADY_CAPTURED) — findOne-then-save would let two of
-// them race past the `!order.paid` check at once and double-send the admin
-// email. findOneAndUpdate's filter makes the "claim" atomic: only the
-// caller that actually flips paid:false -> true gets a non-null result.
-exports.updateOrderPaid = async (paypalId) => {
-  const updatedOrder = await Order.findOneAndUpdate(
-    { paypalId, paid: false },
-    { paid: true, status: "Processing" },
-    { new: true }
-  );
-
-  if (updatedOrder) {
-    exports.sendAdminNewOrderEmail(updatedOrder);
-    exports.sendPaymentReceiptEmail(updatedOrder);
-    return updatedOrder;
-  }
-
-  // Already paid by another caller, or no matching order — return current
-  // state (possibly null) without re-notifying.
-  return Order.findOne({ paypalId });
-};
-
-// Verifies that a webhook POST actually came from PayPal, using PayPal's own
-// verification API (there's no shared-secret HMAC like Stripe's — PayPal
-// signs with a rotating cert and expects you to ask it to check the
-// signature itself). See:
-// https://developer.paypal.com/api/rest/webhooks/rest/#link-verifywebhooksignature
-exports.verifyPaypalWebhookSignature = async (req) => {
-  const accessToken = await exports.generatePaypalAccessToken();
-
-  const response = await axios({
-    url: `${endpoint_url}/v1/notifications/verify-webhook-signature`,
-    method: "post",
-    headers: { Authorization: `Bearer ${accessToken}` },
-    timeout: PAYPAL_REQUEST_TIMEOUT_MS,
-    data: {
-      auth_algo: req.headers["paypal-auth-algo"],
-      cert_url: req.headers["paypal-cert-url"],
-      transmission_id: req.headers["paypal-transmission-id"],
-      transmission_sig: req.headers["paypal-transmission-sig"],
-      transmission_time: req.headers["paypal-transmission-time"],
-      webhook_id: paypalWebhookId,
-      webhook_event: req.body,
-    },
-  });
-
-  return response?.data?.verification_status === "SUCCESS";
-};
-
-// Independent confirmation channel for PayPal payments, mirroring
-// stripeWebhook in stripe.controller.js: the browser-driven capture in
-// exports.capturePayment is a fast path, not the source of truth, because
-// nothing guarantees that request completes (closed tab, dropped mobile
-// connection, crashed app). This webhook lets PayPal tell us a payment
-// succeeded even when that browser round trip never finishes.
-exports.paypalWebhook = async (req, res, next) => {
-  try {
-    if (!paypalWebhookId) {
-      // Genuinely worth alerting on, not just logging — this means the
-      // webhook is completely non-functional in this environment.
-      exports.logPaymentEvent({ gateway: "Paypal", eventType: "config_error" });
-      next(new Error("No PayPal webhook ID configured for this environment; rejecting webhook."));
-      return;
-    }
-
-    const isVerified = await exports.verifyPaypalWebhookSignature(req);
-    if (!isVerified) {
-      exports.logPaymentEvent({ gateway: "Paypal", eventType: "signature_rejected" });
-      return res.status(400).send("Webhook signature verification failed");
-    }
-
-    const event = req.body;
-    const paypalOrderId = event?.resource?.supplementary_data?.related_ids?.order_id;
-
-    exports.logPaymentEvent({
-      gateway: "Paypal",
-      eventType: "webhook_received",
-      gatewayReference: paypalOrderId,
-      metadata: { event_type: event?.event_type, event_id: event?.id },
-    });
-
-    if (event?.event_type === "PAYMENT.CAPTURE.COMPLETED") {
-      if (paypalOrderId) {
-        const order = await exports.updateOrderPaid(paypalOrderId);
-        if (order?.paid) {
-          console.log(`Order with PayPal id ${paypalOrderId} marked as paid via webhook.`);
-          exports.logPaymentEvent({
-            gateway: "Paypal",
-            eventType: "marked_paid",
-            orderId: order._id,
-            gatewayReference: paypalOrderId,
-          });
-        }
-      }
-    } else if (event?.event_type === "PAYMENT.CAPTURE.REFUNDED") {
-      if (paypalOrderId) {
-        const order = await Order.findOneAndUpdate({ paypalId: paypalOrderId }, { status: "Refunded" }, { new: true });
-        console.log(`Order with PayPal id ${paypalOrderId} marked as refunded via webhook.`);
-        exports.logPaymentEvent({
-          gateway: "Paypal",
-          eventType: "refunded",
-          orderId: order?._id,
-          gatewayReference: paypalOrderId,
-        });
-      }
-    }
-
-    res.json({ received: true });
-  } catch (error) {
-    // next(error), not a direct res.status(500) — routes through the global
-    // error handler so a broken webhook actually alerts the admin instead of
-    // failing silently into a console log nobody's watching in production.
-    // Still lands as a 5xx either way, which is what makes PayPal retry.
-    next(error);
-  }
 };

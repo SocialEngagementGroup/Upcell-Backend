@@ -1,7 +1,6 @@
 const {
   productFilterSchema,
   wholesaleFormSchema,
-  captureSchema,
   orderSchema,
   categorySchema,
   productSchema,
@@ -80,24 +79,6 @@ describe("wholesaleFormSchema (mass-assignment fix)", () => {
     expect(() =>
       wholesaleFormSchema.parse({ name: "Jane", email: "not-an-email", phone: "123", devices: "x" })
     ).toThrow();
-  });
-});
-
-describe("captureSchema (PayPal order id validation)", () => {
-  it("accepts a realistic PayPal order id", () => {
-    expect(captureSchema.parse({ orderID: "8U481631H66031715" }).orderID).toBe("8U481631H66031715");
-  });
-
-  it("rejects an object payload (NoSQL injection attempt via orderID)", () => {
-    expect(() => captureSchema.parse({ orderID: { $ne: null } })).toThrow();
-  });
-
-  it("rejects a garbage/oversized string", () => {
-    expect(() => captureSchema.parse({ orderID: "a".repeat(200) })).toThrow();
-  });
-
-  it("rejects an empty string", () => {
-    expect(() => captureSchema.parse({ orderID: "" })).toThrow();
   });
 });
 
@@ -309,28 +290,6 @@ describe("orderSchema — missing fields, wrong types, injection shapes", () => 
 
   it("rejects an idempotencyKey over the 100-character limit", () => {
     expect(() => orderSchema.parse({ ...base, idempotencyKey: "x".repeat(101) })).toThrow();
-  });
-});
-
-describe("captureSchema — additional boundary/type cases", () => {
-  it("rejects a missing orderID", () => {
-    expect(() => captureSchema.parse({})).toThrow();
-  });
-
-  it("rejects a lowercase orderID (PayPal ids are uppercase)", () => {
-    expect(() => captureSchema.parse({ orderID: "8u481631h66031715" })).toThrow();
-  });
-
-  it("rejects a numeric orderID (wrong type)", () => {
-    expect(() => captureSchema.parse({ orderID: 8481631 })).toThrow();
-  });
-
-  it("accepts an orderID at the 10-character minimum boundary", () => {
-    expect(() => captureSchema.parse({ orderID: "AB12345678" })).not.toThrow();
-  });
-
-  it("rejects an orderID one character below the minimum boundary", () => {
-    expect(() => captureSchema.parse({ orderID: "AB1234567" })).toThrow();
   });
 });
 
