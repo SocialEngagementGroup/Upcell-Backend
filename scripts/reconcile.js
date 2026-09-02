@@ -29,7 +29,14 @@ const hours = Number(process.argv[2]) || 24;
   section("WARNING", report.warnings);
   section("INFO", report.info);
 
-  if (report.clean) console.log("\nNothing to report. All payment records agree.");
+  // `clean` only means nothing is wrong — info lines are still worth printing.
+  // Saying "nothing to report" directly under a list of findings reads as a bug
+  // in the check itself, which is the last thing this tool should look like.
+  if (report.clean && !report.info.length) {
+    console.log("\nNothing to report. All payment records agree.");
+  } else if (report.clean) {
+    console.log("\nNothing wrong. The lines above are for information only.");
+  }
 
   await mongoose.disconnect();
   process.exit(report.critical.length ? 1 : 0);

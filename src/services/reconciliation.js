@@ -23,7 +23,11 @@ const STUCK_AFTER_MS = 1 * HOUR;
 // Orders never confirmed at all. These are almost always abandoned carts — the
 // customer closed the tab at the bank's page. Reported as information, not as
 // an alarm, so real problems stay visible.
-const ABANDONED_AFTER_MS = 24 * HOUR;
+//
+// 12 hours rather than a full day: the point of counting these is to notice a
+// sudden jump, because that means the payment page itself has broken. Waiting
+// until tomorrow to find out that nobody could pay today defeats the purpose.
+const ABANDONED_AFTER_MS = 12 * HOUR;
 
 const money = (value) => `$${Number(value || 0).toFixed(2)}`;
 const orderTotal = (order) =>
