@@ -398,8 +398,42 @@ function adminPaymentAlertEmail({ title, summary, lines = [], urgent = false }) 
   };
 }
 
+// Sent when someone uses the contact form. Until this existed the message was
+// saved to the database and nobody was told, so it was only seen if an admin
+// happened to open the contact page and look.
+//
+// The customer's own message is included in full: making someone log in to
+// read it means slower replies, which is the whole point of a contact form.
+function adminNewContactEmail({ name, email, subject, message, submissionId }) {
+  const rows =
+    detailRow("From", escapeHtml(name)) +
+    detailRow("Email", escapeHtml(email)) +
+    detailRow("Subject", escapeHtml(subject), { bordered: false });
+
+  return {
+    subject: `New message: ${subject}`,
+    html: emailShell({
+      preheader: `${name} sent a message through the contact form`,
+      badgeGlyph: "&#9993;",
+      headline: "New contact message",
+      subtext:
+        "Someone got in touch through the website. Their message is below — " +
+        "you can reply to them directly at the address shown.",
+      detailRowsHtml:
+        detailRowsBox(rows) +
+        `<tr><td style="padding:16px 0 0 0;font-family:${FONT};font-size:15px;line-height:24px;color:#FFFFFF;white-space:pre-wrap;">${escapeHtml(
+          message
+        )}</td></tr>`,
+      ctaLabel: "Open Admin Dashboard",
+      ctaHref: `${FRONTEND_URL}/admin-secret/contact`,
+      footerNote: "You're receiving this because you're listed as an UpCell site admin.",
+    }),
+  };
+}
+
 module.exports = {
   emailShell,
+  adminNewContactEmail,
   adminPaymentAlertEmail,
   tradeInRequestEmail,
   tradeInStatusEmail,
