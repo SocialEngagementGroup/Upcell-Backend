@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const Order = require("../models/order.model");
+const { scrubPayload } = require("../utils/scrubPayload");
 const {
   makeOrderObjAndTotal,
   hasPendingCheckout,
@@ -236,6 +237,12 @@ exports.merchantPost = async (req, res, next) => {
         // Present only on a rejection, and the single most useful thing in the
         // payload when one happens.
         ...(rejectedFields.length ? { invalid_fields: rejectedFields } : {}),
+        // The bank's own account of the transaction, card data removed. This
+        // is the only independent evidence we hold if a customer later
+        // disputes a charge — the summary fields above are what we chose to
+        // keep, which is worth nothing when the question is what the bank
+        // actually said.
+        payload: scrubPayload(body),
       },
     });
 
