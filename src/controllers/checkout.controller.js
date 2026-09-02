@@ -109,6 +109,15 @@ const resend = new Resend(process.env.RESEND_KEY);
 const adminNotificationEmail = process.env.ADMIN_NOTIFICATION_EMAIL;
 const orderEmailFrom = process.env.EMAIL_FROM;
 
+// Sales tax rate charged at checkout. Defined once, here, because the customer
+// is shown this figure before paying and the bank is sent the same figure — the
+// two must never be able to drift apart.
+//
+// A single flat rate is a simplification: US sales tax varies by state, and some
+// states charge none at all. Confirmed with the client as the rate to use for
+// now; revisit if UpCell registers in more states.
+const SALES_TAX_RATE = 0.08;
+
 // A multi-tab customer (or a slow first request they retry) can otherwise
 // create two separate, independently-payable orders for the same cart. These
 // are genuinely two different orders rather than one retried, so no gateway
@@ -231,6 +240,39 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
     error.status = 409;
     error.details = unavailable;
     throw error;
+  }
+
+  // Sales tax, charged on the goods only — not on shipping. This matches what
+  // the cart and checkout have always displayed to the customer.
+  //
+  // Until now it was displayed and never charged: the website showed a total
+  // including tax while the amount sent to the bank was goods plus shipping.
+  // On a $2,398.84 order the card was charged $2,223.00, and UpCell absorbed
+  // the $175.84 difference on every sale.
+  //
+  // Rounded to cents here rather than left as a float, so the figure the bank
+  // receives is exactly the figure shown on screen. A cent of drift between
+  // them would fail the amount check on the confirmation.
+  const goodsTotal = line_items.reduce(
+    (sum, item) => sum + (item?.price_data?.product_data?.metadata?.totalPaid || 0),
+    0
+  );
+  const taxAmount = Math.round(goodsTotal * SALES_TAX_RATE * 100) / 100;
+
+  if (taxAmount > 0) {
+    line_items.push({
+      quantity: 1,
+      price_data: {
+        currency: "USD",
+        unit_amount: Math.round(taxAmount * 100),
+        product_data: {
+          name: "Sales tax",
+          metadata: {
+            totalPaid: taxAmount,
+          },
+        },
+      },
+    });
   }
 
   // adding price for shipping

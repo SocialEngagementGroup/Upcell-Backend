@@ -146,6 +146,12 @@ describe("makeOrderObjAndTotal — server-side pricing (the core anti-tampering 
     image: "/staticImages/iphone.png",
   };
 
+  // The 8% the website has always shown as "Estimated tax" is now also charged,
+  // so every total below is goods + tax + shipping. Tax is worked out from the
+  // goods alone — shipping is never taxed — which is why this takes the goods
+  // total rather than the order total.
+  const taxOnGoods = (goodsTotal) => Math.round(goodsTotal * 0.08 * 100) / 100;
+
   it("computes the price from the database, ignoring anything price-like the client sent", async () => {
     SingleVariation.find.mockResolvedValue([dbProduct]);
     const req = {
@@ -162,7 +168,10 @@ describe("makeOrderObjAndTotal — server-side pricing (the core anti-tampering 
 
     const { order, totalPrice } = await checkout.makeOrderObjAndTotal({ req, paidWith: "BankOfAmerica" });
 
-    expect(totalPrice).toBe(999); // from dbProduct.price, not req.body
+    // 999 goods + 79.92 tax. The 999 comes from dbProduct.price, never from
+    // the 1 the client asked to be charged, and the tax is worked out from
+    // that same database price.
+    expect(totalPrice).toBe(999 + taxOnGoods(999));
     expect(order.line_items[0].price_data.unit_amount).toBe(99900); // cents
     expect(order.paid).toBe(false);
     expect(order.status).toBe("pending_payment");
@@ -175,7 +184,8 @@ describe("makeOrderObjAndTotal — server-side pricing (the core anti-tampering 
     const { order, totalPrice } = await checkout.makeOrderObjAndTotal({ req, paidWith: "BankOfAmerica" });
 
     expect(order.line_items[0].quantity).toBe(3);
-    expect(totalPrice).toBe(999 * 3);
+    // All three units are priced and taxed together: 2997 goods + 239.76 tax.
+    expect(totalPrice).toBe(999 * 3 + taxOnGoods(999 * 3));
   });
 
   it.each([
@@ -188,7 +198,10 @@ describe("makeOrderObjAndTotal — server-side pricing (the core anti-tampering 
 
     const { totalPrice } = await checkout.makeOrderObjAndTotal({ req, paidWith: "BankOfAmerica" });
 
-    expect(totalPrice).toBe(999 + expectedShippingCost);
+    // Goods + tax + shipping. The tax is the same 79.92 in all three rows
+    // because it is charged on the 999 of goods and never on the shipping —
+    // only the shipping cost moves, so 1078.92, 1089.42 and 1103.92.
+    expect(totalPrice).toBe(999 + taxOnGoods(999) + expectedShippingCost);
   });
 
   it("stamps the authenticated account onto the order", async () => {
