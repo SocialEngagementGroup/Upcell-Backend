@@ -375,8 +375,32 @@ function adminErrorAlertEmail() {
   };
 }
 
+// Unlike adminErrorAlertEmail, this one is deliberately specific. A payment
+// problem needs the admin to know which orders to look at — a reassuring
+// "nothing to worry about" is the wrong tone when money may be involved.
+function adminPaymentAlertEmail({ title, summary, lines = [], urgent = false }) {
+  const rows = lines
+    .map((line) => detailRow("", escapeHtml(line), { valueColor: "#FFFFFF" }))
+    .join("");
+
+  return {
+    subject: `${urgent ? "Action needed" : "Payment check"}: ${title}`,
+    html: emailShell({
+      preheader: summary,
+      badgeGlyph: urgent ? "&#9888;" : "&#128176;",
+      headline: title,
+      subtext: escapeHtml(summary),
+      detailRowsHtml: rows ? detailRowsBox(rows) : "",
+      ctaLabel: "Open Admin Dashboard",
+      ctaHref: `${FRONTEND_URL}/admin-secret`,
+      footerNote: "You're receiving this because you're listed as an UpCell site admin.",
+    }),
+  };
+}
+
 module.exports = {
   emailShell,
+  adminPaymentAlertEmail,
   tradeInRequestEmail,
   tradeInStatusEmail,
   orderPlacedEmail,

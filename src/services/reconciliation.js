@@ -1,0 +1,167 @@
+const Order = require("../models/order.model");
+const PaymentEventLog = require("../models/paymentEventLog.model");
+const { sendOpsAlert } = require("./alertService");
+
+// The safety net. Until now nothing checked whether what the bank did matches
+// what the shop recorded — a payment taken with no order behind it would have
+// sat undiscovered forever, because every failure path answers the bank 200
+// and writes a log line nobody reads.
+//
+// Scope, stated honestly: this compares our own records against each other.
+// Comparing against the bank's ledger needs the CyberSource Reporting API and
+// a second set of credentials we do not have. That is the stronger check and
+// worth adding once those keys exist. Everything below still catches the cases
+// that actually lose money, because each one leaves a trace on our side.
+
+const HOUR = 60 * 60 * 1000;
+
+// How long an order may sit unpaid after the bank replied about it before that
+// counts as stuck. A confirmation is processed in milliseconds, so anything
+// still pending an hour later did not finish.
+const STUCK_AFTER_MS = 1 * HOUR;
+
+// Orders never confirmed at all. These are almost always abandoned carts — the
+// customer closed the tab at the bank's page. Reported as information, not as
+// an alarm, so real problems stay visible.
+const ABANDONED_AFTER_MS = 24 * HOUR;
+
+const money = (value) => `$${Number(value || 0).toFixed(2)}`;
+const orderTotal = (order) =>
+  (order?.line_items || []).reduce(
+    (sum, item) => sum + (item?.price_data?.product_data?.metadata?.totalPaid || 0),
+    0
+  );
+
+/**
+ * Look for payment records that disagree with each other.
+ * Returns a report; never throws, so a scheduled run cannot take the app down.
+ */
+async function runReconciliation({ windowMs = 24 * HOUR } = {}) {
+  const since = new Date(Date.now() - windowMs);
+  const critical = [];
+  const warnings = [];
+  const info = [];
+
+  try {
+    // 1. The bank confirmed a payment we could not tie to an order. Money may
+    //    have moved with nothing in the shop to show for it.
+    const unmatched = await PaymentEventLog.find({
+      eventType: "unmatched_confirmation",
+      createdAt: { $gte: since },
+    }).lean();
+
+    for (const event of unmatched) {
+      critical.push(
+        `Bank confirmed a payment we cannot match to an order. ` +
+          `Transaction ${event.gatewayReference || "unknown"}, ` +
+          `reason: ${event.metadata?.reason || "unknown"}`
+      );
+    }
+
+    // 2. The bank authorised an amount that is not what the order is worth.
+    const mismatches = await PaymentEventLog.find({
+      eventType: "amount_mismatch",
+      createdAt: { $gte: since },
+    }).lean();
+
+    for (const event of mismatches) {
+      critical.push(
+        `Amount mismatch on order ${event.orderId}: expected ` +
+          `${money(event.metadata?.expected)}, bank authorised ` +
+          `${money(event.metadata?.authorised)}. Not marked paid.`
+      );
+    }
+
+    // 3. We heard from the bank about an order, but it never reached a settled
+    //    state. This is the shape the req_reference_number bug produced, and
+    //    the check that would have caught it on day one.
+    const replied = await PaymentEventLog.find({
+      eventType: "webhook_received",
+      createdAt: { $gte: since, $lte: new Date(Date.now() - STUCK_AFTER_MS) },
+    }).lean();
+
+    const repliedIds = [
+      ...new Set(
+        replied
+          .map((e) => e.metadata?.reference_number)
+          .filter((id) => /^[0-9a-fA-F]{24}$/.test(id || ""))
+      ),
+    ];
+
+    if (repliedIds.length) {
+      const stuck = await Order.find({
+        _id: { $in: repliedIds },
+        status: "pending_payment",
+      }).lean();
+
+      for (const order of stuck) {
+        critical.push(
+          `Order ${order._id} (${order.email}, ${money(orderTotal(order))}) — ` +
+            `the bank replied but the order is still pending. Check the ` +
+            `Business Center before assuming no money moved.`
+        );
+      }
+    }
+
+    // 4. Marked paid with no transaction id. Nothing can be refunded or
+    //    disputed without that reference.
+    const paidWithoutReference = await Order.find({
+      paidWith: "BankOfAmerica",
+      paid: true,
+      createdAt: { $gte: since },
+      $or: [{ boaTransactionId: { $exists: false } }, { boaTransactionId: null }, { boaTransactionId: "" }],
+    }).lean();
+
+    for (const order of paidWithoutReference) {
+      warnings.push(
+        `Order ${order._id} is marked paid but has no bank transaction id — ` +
+          `it cannot be refunded from the Business Center.`
+      );
+    }
+
+    // 5. Abandoned checkouts. Expected and harmless; counted so a sudden jump
+    //    is visible, because that usually means the payment page is broken.
+    const abandoned = await Order.countDocuments({
+      paidWith: "BankOfAmerica",
+      status: "pending_payment",
+      createdAt: { $gte: since, $lte: new Date(Date.now() - ABANDONED_AFTER_MS) },
+    });
+
+    if (abandoned > 0) {
+      info.push(`${abandoned} checkout${abandoned === 1 ? "" : "s"} started but never completed.`);
+    }
+  } catch (error) {
+    console.error("[reconciliation] check failed:", error);
+    return { ok: false, error: error.message, critical, warnings, info, checkedAt: new Date() };
+  }
+
+  const report = {
+    ok: true,
+    checkedAt: new Date(),
+    windowHours: Math.round(windowMs / HOUR),
+    critical,
+    warnings,
+    info,
+    clean: critical.length === 0 && warnings.length === 0,
+  };
+
+  if (critical.length || warnings.length) {
+    await sendOpsAlert({
+      kind: "payment_reconciliation",
+      title: critical.length
+        ? `${critical.length} payment problem${critical.length === 1 ? "" : "s"} need checking`
+        : `${warnings.length} payment warning${warnings.length === 1 ? "" : "s"}`,
+      summary: critical.length
+        ? "The daily payment check found records that do not agree. Money may be involved — please look today."
+        : "The daily payment check found something worth a look. Not urgent.",
+      lines: [...critical, ...warnings],
+      // Anything critical bypasses the throttle. A payment problem silenced by
+      // an unrelated burst of errors is the exact failure this exists to stop.
+      urgent: critical.length > 0,
+    });
+  }
+
+  return report;
+}
+
+module.exports = { runReconciliation };

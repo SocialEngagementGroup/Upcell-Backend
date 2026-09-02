@@ -17,6 +17,7 @@ const notificationRoutes = require("./notification.routes");
 const auditLogRoutes = require("./auditLog.routes");
 const uploadRoutes = require("./upload.routes");
 const bankOfAmericaRoutes = require("./bankOfAmerica.routes");
+const reconciliationRoutes = require("./reconciliation.routes");
 
 router.use("/", categoryRoutes);
 router.use("/", productRoutes);
@@ -36,6 +37,7 @@ router.use("/this-month-sold-items", monthlySellRoutes);
 router.use("/", emailConfigRoutes);
 router.use("/", notificationRoutes);
 router.use("/", auditLogRoutes);
+router.use("/", reconciliationRoutes);
 router.use("/", uploadRoutes);
 
 module.exports = router;
