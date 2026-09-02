@@ -27,14 +27,20 @@ const ORDER_ID = "6a79f7298341f33d9a65b0b7";
 // Each reconciliation query is a different find(); route by what it asks for
 // rather than by call order, so adding a check doesn't break every test.
 const withEvents = (byType) => {
-  PaymentEventLog.find.mockImplementation((query) => ({
-    lean: async () => byType[query.eventType] || [],
-  }));
+  PaymentEventLog.find.mockImplementation((query) => {
+    // The sweep asks a different question: "any event at all for these orders?"
+    const rows = query.orderId ? byType.byOrderId || [] : byType[query.eventType] || [];
+    return { lean: async () => rows, select: () => ({ lean: async () => rows }) };
+  });
 };
 
 const withOrders = (rows = []) => {
-  Order.find.mockImplementation(() => ({ lean: async () => rows }));
+  Order.find.mockImplementation(() => ({
+    lean: async () => rows,
+    select: () => ({ lean: async () => rows }),
+  }));
   Order.countDocuments.mockResolvedValue(0);
+  Order.updateMany.mockResolvedValue({ modifiedCount: 0 });
 };
 
 beforeEach(() => {
@@ -164,6 +170,59 @@ describe("reconciliation — alerting", () => {
 
     expect(report.ok).toBe(false);
     expect(report.error).toContain("connection lost");
+  });
+});
+
+describe("reconciliation — closing abandoned checkouts", () => {
+  const abandoned = [{ _id: "6a79f7298341f33d9a65b0b1" }, { _id: "6a79f7298341f33d9a65b0b2" }];
+
+  it("closes checkouts the bank never replied about", async () => {
+    withOrders(abandoned);
+    withEvents({ byOrderId: [] });
+    Order.updateMany.mockResolvedValue({ modifiedCount: 2 });
+
+    const report = await runReconciliation();
+
+    expect(Order.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ _id: { $in: abandoned.map((o) => o._id) } }),
+      { $set: { status: "payment failed" } }
+    );
+    expect(report.info.join(" ")).toContain("2 abandoned checkouts closed");
+  });
+
+  it("never closes an order the bank did reply about", async () => {
+    // This is the dangerous case. An order the bank spoke about that is still
+    // pending means something broke on our side — marking it "payment failed"
+    // could bury a real payment. It stays pending for a person to resolve.
+    withOrders(abandoned);
+    withEvents({ byOrderId: [{ orderId: abandoned[0]._id }, { orderId: abandoned[1]._id }] });
+
+    await runReconciliation();
+
+    expect(Order.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("closes only the untouched ones when some had bank replies", async () => {
+    withOrders(abandoned);
+    withEvents({ byOrderId: [{ orderId: abandoned[0]._id }] });
+    Order.updateMany.mockResolvedValue({ modifiedCount: 1 });
+
+    await runReconciliation();
+
+    expect(Order.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ _id: { $in: [abandoned[1]._id] } }),
+      expect.anything()
+    );
+  });
+
+  it("does nothing when there is nothing to close", async () => {
+    withOrders([]);
+    withEvents({});
+
+    const report = await runReconciliation();
+
+    expect(Order.updateMany).not.toHaveBeenCalled();
+    expect(report.info.join(" ")).not.toContain("closed automatically");
   });
 });
 

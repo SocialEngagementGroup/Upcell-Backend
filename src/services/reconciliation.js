@@ -37,6 +37,51 @@ const orderTotal = (order) =>
   );
 
 /**
+ * Close checkouts the customer started and walked away from, so they stop
+ * sitting in the order list looking like real orders.
+ *
+ * The safety condition is the important part: only orders the bank has never
+ * said anything about are touched. If any payment event exists for an order,
+ * the bank did reply and something went wrong on our side — auto-marking that
+ * one "payment failed" could bury a real payment, which is the exact failure
+ * this whole service exists to prevent. Those stay pending and are reported as
+ * critical above, for a person to resolve.
+ */
+async function sweepAbandonedCheckouts() {
+  const cutoff = new Date(Date.now() - ABANDONED_AFTER_MS);
+
+  const candidates = await Order.find({
+    paidWith: "BankOfAmerica",
+    status: "pending_payment",
+    paid: false,
+    createdAt: { $lte: cutoff },
+  })
+    .select("_id")
+    .lean();
+
+  if (!candidates.length) return 0;
+
+  const ids = candidates.map((order) => order._id);
+
+  // Any event at all — even a rejected signature — means the bank was involved.
+  const spokenFor = await PaymentEventLog.find({ orderId: { $in: ids } })
+    .select("orderId")
+    .lean();
+
+  const heardAbout = new Set(spokenFor.map((event) => String(event.orderId)));
+  const safeToClose = ids.filter((id) => !heardAbout.has(String(id)));
+
+  if (!safeToClose.length) return 0;
+
+  const result = await Order.updateMany(
+    { _id: { $in: safeToClose }, status: "pending_payment", paid: false },
+    { $set: { status: "payment failed" } }
+  );
+
+  return result.modifiedCount || 0;
+}
+
+/**
  * Look for payment records that disagree with each other.
  * Returns a report; never throws, so a scheduled run cannot take the app down.
  */
@@ -133,6 +178,11 @@ async function runReconciliation({ windowMs = 24 * HOUR } = {}) {
 
     if (abandoned > 0) {
       info.push(`${abandoned} checkout${abandoned === 1 ? "" : "s"} started but never completed.`);
+    }
+
+    const swept = await sweepAbandonedCheckouts();
+    if (swept > 0) {
+      info.push(`${swept} abandoned checkout${swept === 1 ? "" : "s"} closed automatically.`);
     }
   } catch (error) {
     console.error("[reconciliation] check failed:", error);

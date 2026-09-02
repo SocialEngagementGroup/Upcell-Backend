@@ -296,27 +296,54 @@ describe("getAdminOrders — status/byEmail/byOrderId lookup", () => {
   });
 });
 
-describe("getAdminOrdersByDate — today/this-week/this-month buckets", () => {
-  it("returns three buckets from three separate queries", async () => {
-    Order.find
-      .mockResolvedValueOnce([{ _id: "today-order" }])
-      .mockResolvedValueOnce([{ _id: "today-order" }, { _id: "week-order" }])
-      .mockResolvedValueOnce([{ _id: "month-order" }]);
+describe("getAdminOrdersByDate — today/this-week/this-month totals", () => {
+  it("returns counts and revenue for each period", async () => {
+    Order.aggregate
+      .mockResolvedValueOnce([{ amount: 1, money: 529 }])
+      .mockResolvedValueOnce([{ amount: 3, money: 1587.5 }])
+      .mockResolvedValueOnce([{ amount: 9, money: 8213.25 }]);
 
     const { req, res } = makeReqRes({}, { params: {}, query: {} });
     await orderController.getAdminOrdersByDate(req, res, jest.fn());
 
-    expect(Order.find).toHaveBeenCalledTimes(3);
+    expect(Order.aggregate).toHaveBeenCalledTimes(3);
     expect(res.json).toHaveBeenCalledWith({
-      today: [{ _id: "today-order" }],
-      thisWeek: [{ _id: "today-order" }, { _id: "week-order" }],
-      thisMonth: [{ _id: "month-order" }],
+      today: { amount: 1, money: 529 },
+      thisWeek: { amount: 3, money: 1587.5 },
+      thisMonth: { amount: 9, money: 8213.25 },
+    });
+  });
+
+  it("counts only paid orders, so abandoned checkouts are not sales", async () => {
+    Order.aggregate.mockResolvedValue([{ amount: 0, money: 0 }]);
+
+    const { req, res } = makeReqRes({}, { params: {}, query: {} });
+    await orderController.getAdminOrdersByDate(req, res, jest.fn());
+
+    // The rule belongs in the query. It used to live in the dashboard's own
+    // rendering code, which meant every abandoned checkout — with the
+    // customer's name, email, phone and address — was sent to the browser
+    // just to be discarded there.
+    const [pipeline] = Order.aggregate.mock.calls[0];
+    expect(pipeline[0].$match.paid).toBe(true);
+  });
+
+  it("reports zero rather than undefined when a period has no orders", async () => {
+    Order.aggregate.mockResolvedValue([]);
+
+    const { req, res } = makeReqRes({}, { params: {}, query: {} });
+    await orderController.getAdminOrdersByDate(req, res, jest.fn());
+
+    expect(res.json).toHaveBeenCalledWith({
+      today: { amount: 0, money: 0 },
+      thisWeek: { amount: 0, money: 0 },
+      thisMonth: { amount: 0, money: 0 },
     });
   });
 
   it("routes a DB failure through next(error) instead of crashing", async () => {
     const dbError = new Error("Mongo is down");
-    Order.find.mockRejectedValue(dbError);
+    Order.aggregate.mockRejectedValue(dbError);
 
     const { req, res, next } = makeReqRes({}, { params: {}, query: {} });
     await orderController.getAdminOrdersByDate(req, res, next);

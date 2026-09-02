@@ -109,13 +109,40 @@ async function getAdminOrdersByDate(req, res, next) {
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
 
-    const [tDay, tWeek, tMonth] = await Promise.all([
-      Order.find({ createdAt: { $gte: thisDay } }),
-      Order.find({ createdAt: { $gte: thisWeekStart } }),
-      Order.find({ createdAt: { $gte: monthStart, $lt: monthEnd } }),
+    // Only paid orders count. A checkout someone started and abandoned is not
+    // a sale, and counting one would overstate both order volume and revenue.
+    //
+    // The filtering used to happen in the browser, which meant every abandoned
+    // checkout was sent over the wire first — name, email, phone and full
+    // address for orders that were then discarded on arrival. Counting in the
+    // database sends numbers instead of customer records, and makes the rule
+    // part of the data rather than part of one page's rendering code.
+    const summarise = async (range) => {
+      const [result] = await Order.aggregate([
+        { $match: { paid: true, createdAt: range } },
+        { $unwind: "$line_items" },
+        {
+          $group: {
+            _id: "$_id",
+            orderTotal: { $sum: "$line_items.price_data.product_data.metadata.totalPaid" },
+          },
+        },
+        { $group: { _id: null, amount: { $sum: 1 }, money: { $sum: "$orderTotal" } } },
+      ]);
+
+      return {
+        amount: result?.amount || 0,
+        money: Number((result?.money || 0).toFixed(2)),
+      };
+    };
+
+    const [today, thisWeek, thisMonth] = await Promise.all([
+      summarise({ $gte: thisDay }),
+      summarise({ $gte: thisWeekStart }),
+      summarise({ $gte: monthStart, $lt: monthEnd }),
     ]);
 
-    res.status(200).json({ today: tDay, thisWeek: tWeek, thisMonth: tMonth });
+    res.status(200).json({ today, thisWeek, thisMonth });
   } catch (error) {
     next(error);
   }
