@@ -56,6 +56,33 @@ const OrderSchema = new Schema(
     // Brand and last four only. A full card number never reaches this server.
     cardBrand: String,
     cardLast4: String,
+    // Set once, by processRefund, and never after. UpCell has no refund API
+    // credentials — Secure Acceptance keys can only take payments, never
+    // return them — so this records what a staff member calculated and
+    // approved, not a payment that actually moved. The real refund still has
+    // to be typed into the Business Center by hand, by Raymond or Yasir.
+    refund: {
+      // The line items' totalPaid, summed, before the fee — device and
+      // accessory rows only, never the tax or shipping line.
+      itemsTotal: Number,
+      // 15% of itemsTotal, or 0 if waived. Never applied to tax or shipping —
+      // the client's confirmed rule only ever mentions "Devices" and never
+      // charges a restocking fee on money that was not paid for goods.
+      restockingFee: Number,
+      restockingFeeWaived: Boolean,
+      // Required by the controller whenever restockingFeeWaived is true, so a
+      // waived fee always has a reason attached, not just a checked box.
+      waiveReason: String,
+      // itemsTotal minus restockingFee. What the customer is owed, and the
+      // figure staff type into the Business Center.
+      amount: Number,
+      // productIds of the exact line items refunded. A partial refund on a
+      // multi-item order needs this to say which items, not just how much.
+      itemIds: [String],
+      notes: String,
+      approvedBy: String,
+      approvedAt: Date,
+    },
   },
   { timestamps: true }
 );

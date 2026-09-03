@@ -204,6 +204,21 @@ const contactSubmissionSchema = z.object({
   message: trimmedString("Message", 10, 3000),
 });
 
+// A waived fee always carries a reason, enforced here rather than only in the
+// controller — a request that fails validation never reaches business logic
+// that could act on half-checked input.
+const refundSchema = z
+  .object({
+    itemIds: z.array(objectIdField).max(50).optional(),
+    waiveRestockingFee: z.boolean().optional().default(false),
+    waiveReason: z.string().trim().max(500, "Reason must be 500 characters or fewer").optional(),
+    notes: z.string().trim().max(1000, "Notes must be 1000 characters or fewer").optional(),
+  })
+  .refine((data) => !data.waiveRestockingFee || Boolean(data.waiveReason), {
+    message: "A reason is required to waive the restocking fee.",
+    path: ["waiveReason"],
+  });
+
 const analyticsEventSchema = z.object({
   category: z.enum(["form_submit", "form_dropoff", "form_engagement", "admin_api_error"]),
   name: trimmedString("Event name", 1, 120),
@@ -226,4 +241,5 @@ module.exports = {
   newsletterSubscriberSchema,
   contactSubmissionSchema,
   analyticsEventSchema,
+  refundSchema,
 };

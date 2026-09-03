@@ -2,12 +2,13 @@ const router = require("express").Router();
 const { verifyToken, requireAdmin, optionalAuth } = require("../middleware/auth.middleware");
 const { validateRequest } = require("../middleware/validate.middleware");
 const { checkoutLimiter } = require("../middleware/rateLimit.middleware");
-const { orderSchema } = require("../schemas/request.schemas");
+const { orderSchema, refundSchema } = require("../schemas/request.schemas");
 const {
   getOrder,
   getAdminOrders,
   getAdminOrdersByDate,
   updateOrderStatus,
+  processRefund,
   getClientOrders,
   createOrder,
 } = require("../controllers/order.controller");
@@ -16,6 +17,7 @@ router.get("/order/:id", optionalAuth, getOrder);
 router.get("/admin-orders/:status", verifyToken, requireAdmin, getAdminOrders);
 router.get("/admin-orders-by-data", verifyToken, requireAdmin, getAdminOrdersByDate);
 router.post("/update-order-status", verifyToken, requireAdmin, updateOrderStatus);
+router.post("/admin-orders/:id/refund", verifyToken, requireAdmin, validateRequest(refundSchema), processRefund);
 router.get("/client-orders/:email", verifyToken, getClientOrders);
 // Same reasoning as /boa/prepare-payment: this created a real order for an
 // anonymous caller. No frontend code calls it, which made it an unauthenticated

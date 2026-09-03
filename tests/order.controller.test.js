@@ -425,3 +425,131 @@ describe("getOrder — malformed id handling", () => {
     expect(Order.findById).not.toHaveBeenCalled();
   });
 });
+
+// This never calls the bank — UpCell has no refund API credentials, so
+// Raymond or Yasir still type the amount into the Business Center by hand.
+// The controller's job is the calculation, the record, and the customer email.
+describe("processRefund", () => {
+  const deviceLine = (productId, name, totalPaid) => ({
+    quantity: 1,
+    price_data: { product_data: { name, metadata: { productId, quantity: 1, totalPaid } } },
+  });
+
+  const paidOrder = (overrides = {}) => ({
+    _id: "order1",
+    email: "buyer@example.com",
+    paid: true,
+    status: "Processing",
+    line_items: [deviceLine("p1", "iPhone 17", 999)],
+    save: jest.fn().mockResolvedValue(true),
+    ...overrides,
+  });
+
+  it("404s for an order that does not exist", async () => {
+    Order.findById.mockResolvedValue(null);
+
+    const { req, res } = makeReqRes({}, { params: { id: "ghost" }, user: { email: "admin@upcellit.com" } });
+    await orderController.processRefund(req, res, jest.fn());
+
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("refuses to refund an order that was never paid", async () => {
+    Order.findById.mockResolvedValue(paidOrder({ paid: false }));
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    await orderController.processRefund(req, res, jest.fn());
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("refuses a second refund on an order already refunded", async () => {
+    const order = paidOrder({ refund: { approvedAt: new Date(), amount: 849.15 } });
+    Order.findById.mockResolvedValue(order);
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    await orderController.processRefund(req, res, jest.fn());
+
+    expect(res.statusCode).toBe(400);
+    expect(order.save).not.toHaveBeenCalled();
+  });
+
+  it("records the refund, sets status Refunded, and keeps paid true", async () => {
+    const order = paidOrder();
+    Order.findById.mockResolvedValue(order);
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { id: "u1", email: "admin@upcellit.com" } });
+    await orderController.processRefund(req, res, jest.fn());
+
+    expect(res.statusCode).toBe(200);
+    expect(order.status).toBe("Refunded");
+    expect(order.paid).toBe(true);
+    expect(order.refund.amount).toBe(849.15);
+    expect(order.refund.restockingFee).toBe(149.85);
+    expect(order.refund.approvedBy).toBe("admin@upcellit.com");
+    expect(order.refund.approvedAt).toBeInstanceOf(Date);
+    expect(order.save).toHaveBeenCalled();
+  });
+
+  it("writes an audit log entry with the actual figures", async () => {
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { id: "u1", email: "admin@upcellit.com" } });
+    await orderController.processRefund(req, res, jest.fn());
+
+    expect(AuditLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "order.refund_processed",
+        metadata: expect.objectContaining({ refundAmount: 849.15, itemsTotal: 999 }),
+      })
+    );
+  });
+
+  it("refunds only the named item on a multi-item order", async () => {
+    const order = paidOrder({
+      line_items: [deviceLine("p1", "iPhone 17", 999), deviceLine("p2", "Clear Case", 39)],
+    });
+    Order.findById.mockResolvedValue(order);
+
+    const { req, res } = makeReqRes({ itemIds: ["p2"] }, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    await orderController.processRefund(req, res, jest.fn());
+
+    expect(order.refund.itemsTotal).toBe(39);
+    expect(order.refund.itemIds).toEqual(["p2"]);
+  });
+
+  it("waives the fee only with a reason recorded on the order", async () => {
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res } = makeReqRes(
+      { waiveRestockingFee: true, waiveReason: "Confirmed faulty screen" },
+      { params: { id: "order1" }, user: { email: "admin@upcellit.com" } }
+    );
+    await orderController.processRefund(req, res, jest.fn());
+
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("400s a request that names no real item on this order", async () => {
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res } = makeReqRes(
+      { itemIds: ["does-not-exist"] },
+      { params: { id: "order1" }, user: { email: "admin@upcellit.com" } }
+    );
+    await orderController.processRefund(req, res, jest.fn());
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("the response is the number a human enters at the bank, not a claim that money moved", async () => {
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    await orderController.processRefund(req, res, jest.fn());
+
+    const body = res.json.mock.calls[0][0];
+    expect(body.message).toContain("849.15");
+    expect(body.message.toLowerCase()).toContain("enter");
+  });
+});

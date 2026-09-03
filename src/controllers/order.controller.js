@@ -8,7 +8,9 @@ const {
   orderPlacedEmail,
   adminOrderStatusEmail,
   adminNewOrderEmail,
+  refundApprovedEmail,
 } = require("../services/emailTemplates");
+const { calculateRefund } = require("../services/refund");
 const {
   getAdminListPagination,
   emptyPaginatedResponse,
@@ -228,6 +230,105 @@ async function updateOrderStatus(req, res, next) {
   }
 }
 
+/**
+ * Record a refund and email the customer. This never contacts the bank —
+ * UpCell has no refund API credentials, so Raymond or Yasir still enter the
+ * exact figure into the Business Center by hand. What this does is the part
+ * that was entirely manual before: calculating the right number under the
+ * client's own 15% restocking-fee rule, keeping a record of who approved it
+ * and why a fee was or was not waived, and telling the customer.
+ */
+async function processRefund(req, res, next) {
+  const { itemIds, waiveRestockingFee, waiveReason, notes } = req.body;
+
+  try {
+    const order = await Order.findById(req.params.id || null);
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    if (!order.paid) {
+      return res.status(400).json({ error: "This order has not been paid, so there is nothing to refund." });
+    }
+
+    if (order.refund?.approvedAt) {
+      return res.status(400).json({ error: "This order has already been refunded." });
+    }
+
+    const result = calculateRefund(order, {
+      itemIds,
+      waiveRestockingFee: Boolean(waiveRestockingFee),
+      waiveReason,
+    });
+
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error });
+    }
+
+    const { refundableItems, itemsTotal, restockingFee, restockingFeeWaived, refundAmount } = result;
+    const refundedProductIds = refundableItems.map(
+      (item) => item.price_data.product_data.metadata.productId
+    );
+
+    order.refund = {
+      itemsTotal,
+      restockingFee,
+      restockingFeeWaived,
+      waiveReason: restockingFeeWaived ? waiveReason : undefined,
+      amount: refundAmount,
+      itemIds: refundedProductIds,
+      notes,
+      approvedBy: req.user?.email,
+      approvedAt: new Date(),
+    };
+    // Refunded stays paid:true — the charge did happen. This is a record of
+    // it being reversed, not proof that it was never real, and a customer
+    // must still be able to find the order in their own account afterward.
+    order.status = "Refunded";
+    await order.save();
+
+    AuditLog.create({
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      action: "order.refund_processed",
+      targetType: "Order",
+      targetId: order._id,
+      metadata: { itemsTotal, restockingFee, restockingFeeWaived, refundAmount, itemIds: refundedProductIds },
+    }).catch((error) => {
+      console.error("[audit] order.refund_processed log failed:", error);
+    });
+
+    // Fire-and-forget, matching sendPaymentReceiptEmail elsewhere — a slow or
+    // failed send must not undo a refund that has already been recorded and
+    // is waiting on a human to enter it at the bank.
+    if (order.email) {
+      const itemNames = refundableItems.map((item) => item.price_data.product_data.name);
+      const { subject, html } = refundApprovedEmail({
+        orderId: order._id,
+        itemNames,
+        itemsTotal,
+        restockingFee,
+        refundAmount,
+      });
+      resend.emails
+        .send({ from: orderEmailFrom, to: [order.email], subject, html })
+        .catch((error) => {
+          console.error("[order] refund email failed:", error);
+        });
+    }
+
+    res.json({
+      refund: order.refund,
+      // Said once, plainly, in the response the admin UI reads directly —
+      // this is the number that goes in the Business Center, not a
+      // confirmation that money already moved.
+      message: `Refund of $${refundAmount.toFixed(2)} recorded. Enter this exact amount in the Bank of America Business Center to complete it.`,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 async function getClientOrders(req, res, next) {
   const email = req.params.email;
 
@@ -302,6 +403,7 @@ module.exports = {
   getAdminOrders,
   getAdminOrdersByDate,
   updateOrderStatus,
+  processRefund,
   getClientOrders,
   createOrder,
 };

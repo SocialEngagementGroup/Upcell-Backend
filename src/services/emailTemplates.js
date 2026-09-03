@@ -266,6 +266,46 @@ function paymentReceiptEmail({ orderId, paidWith, lineItems, total }) {
   };
 }
 
+// itemNames is a plain list of what was refunded ("iPhone 17 (Sage, 256GB)"),
+// not the raw line_items — the email should read like a person wrote it, not
+// like a database dump.
+function refundApprovedEmail({ orderId, itemNames, itemsTotal, restockingFee, refundAmount }) {
+  const itemRows = (itemNames || [])
+    .map(
+      (name) =>
+        `<tr><td colspan="2" style="padding:5px 0;font-family:${FONT};font-size:13px;color:#C7C7C7;">${escapeHtml(name)}</td></tr>`
+    )
+    .join("");
+
+  const rows =
+    detailRow("Order ID", `#${escapeHtml(orderId)}`) +
+    `<tr><td colspan="2" style="padding:12px 0 4px 0;font-family:${FONT};font-size:14px;color:#9A9A9A;">Items refunded</td></tr>` +
+    itemRows +
+    detailRow("Items total", money(itemsTotal)) +
+    (restockingFee > 0
+      ? detailRow("Restocking fee (15%)", `&minus;${money(restockingFee)}`)
+      : "") +
+    detailRow("Refund amount", money(refundAmount), { bordered: false, valueColor: "#FFFFFF", valueWeight: 800 });
+
+  return {
+    subject: "Your refund has been approved",
+    html: emailShell({
+      preheader: `${money(refundAmount)} has been approved for order ${orderId}.`,
+      badgeGlyph: "&#8617;",
+      headline: "Refund approved",
+      // Accurate without exposing the internal process: nothing here claims
+      // the bank has been contacted automatically, because it has not — a
+      // person still enters this by hand. "Being processed" is true the
+      // moment this email sends and stays true until they do.
+      subtext: "Your refund has been approved and is being processed. It typically takes 2 business days to reach your original payment method.",
+      detailRowsHtml: rows,
+      ctaLabel: "View Order",
+      ctaHref: ACCOUNT_URL,
+      footerNote: "You're receiving this because you placed an order with UpCell.",
+    }),
+  };
+}
+
 function adminNewTradeInEmail({ name, email, phone, modelTitle, storage, estimate, requestId }) {
   const rows =
     detailRow("Device", escapeHtml(modelTitle)) +
@@ -440,6 +480,7 @@ module.exports = {
   orderPlacedEmail,
   orderStatusEmail,
   paymentReceiptEmail,
+  refundApprovedEmail,
   adminErrorAlertEmail,
   adminNewTradeInEmail,
   adminTradeInStatusEmail,
