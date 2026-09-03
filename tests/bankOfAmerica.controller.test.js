@@ -194,6 +194,34 @@ describe("fields sent to the gateway — reason code 102 causes", () => {
 
     expect(fields.bill_to_phone.length).toBeLessThanOrEqual(15);
   });
+
+  // The hosted page's Payment Form tab is being switched so every Billing
+  // Information field shows Display — a fixed value the customer cannot
+  // retype. A field the bank displays but we never send renders blank, so
+  // this list has to stay in sync with the checkout form's own fields
+  // (Frontend/src/pages/Checkout/Checkout.jsx) by hand: name, email, phone,
+  // street, city, state, postal, country. There is no company or
+  // address-line-2 field on either side, so none is expected here.
+  it("sends every billing field the hosted page's Display setting needs", async () => {
+    const fields = await prepare({});
+
+    const billingFields = [
+      "bill_to_forename",
+      "bill_to_surname",
+      "bill_to_email",
+      "bill_to_phone",
+      "bill_to_address_line1",
+      "bill_to_address_city",
+      "bill_to_address_state",
+      "bill_to_address_postal_code",
+      "bill_to_address_country",
+    ];
+
+    for (const name of billingFields) {
+      expect(fields[name]).toBeTruthy();
+      expect(fields.signed_field_names.split(",")).toContain(name);
+    }
+  });
 });
 
 describe("merchantPost — reading the echoed reference number", () => {
@@ -502,6 +530,80 @@ describe("merchantPost — a review that finishes", () => {
     expect(eventTypes()).toContain("duplicate_confirmation");
     expect(mockSend).not.toHaveBeenCalled();
     expect(res.sendStatus).toHaveBeenCalledWith(200);
+  });
+});
+
+// The bank can and does deliver the same merchant POST more than once — a
+// timeout on its side with no visibility into whether we actually received
+// it is a normal reason to retry. The claim in merchantPost is meant to make
+// a second delivery a no-op; the tests above only ever prove that by mocking
+// what findOneAndUpdate returns. This one instead fakes Mongo's atomic-claim
+// semantics against a single mutable order and calls merchantPost twice with
+// the identical body, so it fails if that guarantee ever breaks for real.
+describe("merchantPost — the same delivery arrives twice", () => {
+  const inventory = require("../src/services/inventory");
+
+  // Mirrors the real filter in bankOfAmerica.controller.js: claimable when
+  // unclaimed, or still under review.
+  const claim = (order, update) => {
+    const claimable = !order.boaTransactionId || order.status === "under_review";
+    if (!claimable) return null;
+    Object.assign(order, update.$set);
+    return { ...order };
+  };
+
+  it("pays, sells and emails once no matter how many times the same POST arrives", async () => {
+    const order = {
+      _id: ORDER_ID,
+      email: "buyer@example.com",
+      boaTransactionId: null,
+      line_items: [
+        { quantity: 1, price_data: { product_data: { name: "iPhone", metadata: { totalPaid: 1109.5 } } } },
+      ],
+    };
+    Order.findById.mockImplementation(async () => order);
+    Order.findOneAndUpdate.mockImplementation(async (filter, update) => claim(order, update));
+
+    const body = signedReply({ decision: "ACCEPT" });
+    const first = makeRes();
+    const second = makeRes();
+    await boa.merchantPost({ body }, first, jest.fn());
+    await flushMicrotasks();
+    await boa.merchantPost({ body }, second, jest.fn());
+    await flushMicrotasks();
+
+    expect(first.sendStatus).toHaveBeenCalledWith(200);
+    expect(second.sendStatus).toHaveBeenCalledWith(200);
+    expect(order.paid).toBe(true);
+    expect(inventory.markSold).toHaveBeenCalledTimes(1);
+    // Two sends for one paid order — the customer receipt and the admin
+    // notification — and the duplicate delivery must add neither.
+    expect(mockSend).toHaveBeenCalledTimes(2);
+    expect(eventTypes()).toContain("duplicate_confirmation");
+  });
+
+  it("does not re-sell or re-email a device already marked sold by the first delivery", async () => {
+    const order = {
+      _id: ORDER_ID,
+      email: "buyer@example.com",
+      boaTransactionId: "7882749437566123004007",
+      status: "Processing",
+      paid: true,
+      line_items: [
+        { quantity: 1, price_data: { product_data: { name: "iPhone", metadata: { totalPaid: 1109.5 } } } },
+      ],
+    };
+    Order.findById.mockImplementation(async () => order);
+    Order.findOneAndUpdate.mockImplementation(async (filter, update) => claim(order, update));
+
+    const res = makeRes();
+    await boa.merchantPost({ body: signedReply({ decision: "ACCEPT" }) }, res, jest.fn());
+    await flushMicrotasks();
+
+    expect(res.sendStatus).toHaveBeenCalledWith(200);
+    expect(inventory.markSold).not.toHaveBeenCalled();
+    expect(mockSend).not.toHaveBeenCalled();
+    expect(eventTypes()).toContain("duplicate_confirmation");
   });
 });
 

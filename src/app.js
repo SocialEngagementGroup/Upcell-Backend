@@ -56,7 +56,7 @@ app.use(
 //
 // /boa/prepare-payment is deliberately NOT in this list — that one is called
 // by our own frontend and should stay behind CORS.
-const GATEWAY_CALLBACK_PATHS = ["/boa/merchant-post", "/boa/response"];
+const GATEWAY_CALLBACK_PATHS = ["/boa/merchant-post", "/boa/response", "/boa/cancel"];
 const corsMiddleware = cors(corsOptions);
 
 app.use((req, res, next) => {

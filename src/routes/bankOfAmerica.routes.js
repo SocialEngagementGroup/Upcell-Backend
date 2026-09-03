@@ -43,4 +43,16 @@ router.post("/merchant-post", form, merchantPost);
 
 router.post("/response", form, paymentResponse);
 
+// The portal's "Custom Cancel Response Page" is a separate setting from the
+// Transaction Response Page above — it fires when the customer clicks Cancel
+// on the hosted page itself, before any transaction completes, and posts to
+// its own configured URL rather than to /response. It was left "Hosted By
+// <TOKEN>" (Cybersource's own page) until now, so this is a new delivery,
+// not a duplicate of one /response already received. Same handler as
+// /response on purpose: the payload is the same signed shape, and
+// paymentResponse already has a decision === "CANCEL" branch — verify
+// signature, release the stock hold by transaction_uuid, redirect to the
+// cart — written for exactly this notification.
+router.post("/cancel", form, paymentResponse);
+
 module.exports = router;
