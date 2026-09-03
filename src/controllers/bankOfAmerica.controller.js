@@ -511,8 +511,32 @@ exports.paymentResponse = async (req, res) => {
     return res.redirect(`${frontendUrl}/cart?payment=review`);
   }
 
+  // A customer who clicks Cancel on the hosted page — often before ever
+  // entering a card number — may never generate a merchant POST at all, since
+  // there is no completed transaction for the bank to confirm server-to-server.
+  // Without this, the device they were looking at stays held for the full
+  // twenty minutes for nobody. The signature was already verified above, which
+  // is what makes it safe to act on this browser-only request: a forged CANCEL
+  // cannot release a hold that belongs to somebody else's checkout.
+  if (body.decision === "CANCEL") {
+    const transactionUuid = echoed(body, "transaction_uuid");
+
+    releaseReservation(transactionUuid).catch((error) => {
+      console.error("[boa] failed to release reservation on customer cancel:", error);
+    });
+
+    logPaymentEvent({
+      gateway: GATEWAY,
+      eventType: "customer_cancelled",
+      orderId,
+      metadata: { source: "customer_response" },
+    });
+
+    return res.redirect(`${frontendUrl}/cart?payment=cancelled`);
+  }
+
   if (body.decision !== "ACCEPT") {
-    return res.redirect(`${frontendUrl}/cart?payment=failed`);
+    return res.redirect(`${frontendUrl}/cart?payment=declined`);
   }
 
   res.redirect(`${frontendUrl}/succeed?order_id=${orderId}`);

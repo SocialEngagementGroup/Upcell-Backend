@@ -525,12 +525,15 @@ describe("paymentResponse — where the customer lands", () => {
     expect(res.redirectedTo).toBe(`https://shop.example.com/succeed?order_id=${ORDER_ID}`);
   });
 
-  it("sends a declined customer back to the cart", async () => {
-    const res = makeRes();
-    await boa.paymentResponse({ body: signedReply({ decision: "DECLINE" }) }, res);
+  it.each(["DECLINE", "ERROR"])(
+    "sends a %s customer back to the cart with a plain decline flag",
+    async (decision) => {
+      const res = makeRes();
+      await boa.paymentResponse({ body: signedReply({ decision }) }, res);
 
-    expect(res.redirectedTo).toBe("https://shop.example.com/cart?payment=failed");
-  });
+      expect(res.redirectedTo).toBe("https://shop.example.com/cart?payment=declined");
+    }
+  );
 
   it("distinguishes a forged response from one it cannot read", async () => {
     const forged = makeRes();
@@ -549,5 +552,50 @@ describe("paymentResponse — where the customer lands", () => {
     // signature_rejected is what disguised the req_ prefix bug as an attack.
     expect(eventTypes()).toContain("unmatched_confirmation");
     expect(eventTypes()).not.toContain("signature_rejected");
+  });
+});
+
+// A customer who clicks Cancel on the hosted page, often before entering a
+// card at all, may never generate a merchant POST — there is no completed
+// transaction for the bank to confirm server-to-server. Without this, the
+// device stays held for the full twenty minutes for someone who already said
+// they don't want it.
+describe("paymentResponse — a customer who cancels frees the device immediately", () => {
+  const inventory = require("../src/services/inventory");
+
+  it("releases the hold for this checkout, not by guessing the order id", async () => {
+    const res = makeRes();
+    await boa.paymentResponse(
+      { body: signedReply({ decision: "CANCEL", transaction_uuid: "checkout-uuid-9" }) },
+      res
+    );
+
+    await flushMicrotasks();
+
+    // Released by transaction_uuid — the checkout's own reservation key — not
+    // by reference_number, which identifies the order, not the hold.
+    expect(inventory.releaseReservation).toHaveBeenCalledWith("checkout-uuid-9");
+    expect(res.redirectedTo).toBe("https://shop.example.com/cart?payment=cancelled");
+  });
+
+  it("only releases once the signature has verified — a forged cancel frees nothing", async () => {
+    const res = makeRes();
+    await boa.paymentResponse(
+      { body: { ...signedReply({ decision: "CANCEL" }), signature: "not-real" } },
+      res
+    );
+
+    await flushMicrotasks();
+
+    expect(inventory.releaseReservation).not.toHaveBeenCalled();
+  });
+
+  it("still redirects to the cart even if the release itself fails", async () => {
+    inventory.releaseReservation.mockRejectedValueOnce(new Error("db down"));
+
+    const res = makeRes();
+    await boa.paymentResponse({ body: signedReply({ decision: "CANCEL" }) }, res);
+
+    expect(res.redirectedTo).toBe("https://shop.example.com/cart?payment=cancelled");
   });
 });
