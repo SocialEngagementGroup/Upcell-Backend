@@ -1,13 +1,15 @@
 const crypto = require("crypto");
 const Order = require("../models/order.model");
 const { scrubPayload } = require("../utils/scrubPayload");
+const { US_STATE_CODES } = require("../schemas/request.schemas");
 const {
   reserveVariations,
   releaseReservation,
-  holdForReview,
+  soldAway,
   markSold,
   variationIdsFromOrder,
 } = require("../services/inventory");
+const { sendOpsAlert } = require("../services/alertService");
 const {
   makeOrderObjAndTotal,
   hasPendingCheckout,
@@ -147,6 +149,25 @@ exports.preparePayment = async (req, res, next) => {
       return res.status(500).json({ error: "Payment is not configured." });
     }
 
+    // orderSchema leaves state optional, deliberately: the admin-created Manual
+    // path predates the field and does not go through a gateway at all. This
+    // path does, and the hosted page collects no billing information — so a
+    // checkout without a state posts an empty bill_to_address_state, the
+    // issuer's address check has nothing to compare, and the profile's
+    // "reverse on failed AVS" rule turns that into a reversed authorisation.
+    // The customer sees an unexplained failure and no field on any form that
+    // would have told them why.
+    //
+    // Refused here rather than sent empty. A 400 the customer can act on beats
+    // a decline nobody can explain, and this is checked before anything is
+    // reserved or written so a rejected attempt leaves no order and no hold.
+    const state = String(req.body?.state || "").trim().toUpperCase();
+    if (!US_STATE_CODES.has(state)) {
+      return res.status(400).json({
+        error: "Enter a valid 2-letter US state code so the bank can verify your billing address.",
+      });
+    }
+
     if (await hasPendingCheckout(req.body?.email)) {
       return res
         .status(409)
@@ -217,7 +238,13 @@ exports.preparePayment = async (req, res, next) => {
       bill_to_phone: toGatewayPhone(newOrder.phone),
       bill_to_address_line1: newOrder.street,
       bill_to_address_city: newOrder.city,
-      bill_to_address_state: newOrder.state || "",
+      // The normalised value from the guard above, not newOrder.state.
+      // Never `|| ""`: an empty state passes the gateway's own field check and
+      // then fails the issuer's address check, which under this profile
+      // reverses the authorisation. Taking it from the guard also means the
+      // uppercasing does not depend on the validation middleware having run
+      // first — the bank gets "NY" whether the customer typed "ny" or not.
+      bill_to_address_state: state,
       bill_to_address_postal_code: newOrder.postal,
       bill_to_address_country: toCountryCode(newOrder.country),
     });
@@ -372,6 +399,37 @@ exports.merchantPost = async (req, res, next) => {
       }
     }
 
+    // The one hole the claim below cannot close on its own.
+    //
+    // An order under review is deliberately claimable a second time, because a
+    // review ends with the bank sending a follow-up carrying the real decision.
+    // That reopening is what makes a redelivered REVIEW — the same message, not
+    // a follow-up — pass straight through it and run the review branch again:
+    // a second entered_review event and, worse, a second urgent alert about a
+    // situation that has not changed. Render's cold start makes redelivery
+    // likely rather than theoretical, so this is a duplicate the team would
+    // actually see.
+    //
+    // Matching on the decision as well as the transaction id is what keeps the
+    // legitimate follow-up working. The bank may reuse the same transaction id
+    // when it settles a review, so transaction id alone would refuse the very
+    // message this reopening exists to accept.
+    const isRedeliveredReview =
+      order.status === REVIEW_STATUS &&
+      status === REVIEW_STATUS &&
+      order.boaTransactionId === body.transaction_id;
+
+    if (isRedeliveredReview) {
+      logPaymentEvent({
+        gateway: GATEWAY,
+        eventType: "duplicate_confirmation",
+        orderId: order._id,
+        gatewayReference: body.transaction_id,
+        metadata: { decision: body.decision, reason: "review_redelivered" },
+      });
+      return res.sendStatus(200);
+    }
+
     // Claim the order atomically. The previous read-then-save left a window
     // where two retried confirmations both passed the "already handled?" check
     // and both sent the customer a receipt. The filter only matches an order
@@ -414,8 +472,76 @@ exports.merchantPost = async (req, res, next) => {
     }
 
     const variationIds = variationIdsFromOrder(claimed);
+    // The status the order held *before* this message claimed it. A review that
+    // comes back settled arrives as a second confirmation, and it is the only
+    // way to tell "paid straight through" from "paid after a review" — which
+    // are different problems, because only the second one can have lost its
+    // devices to another customer in the meantime.
+    const wasUnderReview = order.status === REVIEW_STATUS;
 
     if (claimed.paid) {
+      // A review no longer holds stock (see inventory.js), so between REVIEW
+      // and ACCEPT the twenty-minute hold expired and the device may have sold
+      // to somebody else. Check before selling it a second time.
+      const gone = wasUnderReview
+        ? await soldAway(variationIds).catch((error) => {
+            console.error("[boa] failed to re-check stock after review:", error);
+            // Unknown is not the same as fine. Treat a failed check as a
+            // collision so a person looks, rather than fulfilling blind.
+            return variationIds;
+          })
+        : [];
+
+      if (gone.length) {
+        // Money has moved and there is nothing to ship. Do not mark anything
+        // sold — the devices already belong to whoever bought them — and do
+        // not let this pass as an ordinary order.
+        await Order.updateOne(
+          { _id: claimed._id },
+          {
+            $set: {
+              fulfilmentBlocked: true,
+              fulfilmentBlockReason:
+                "Review accepted after the device had already sold to another customer. " +
+                "Contact the customer and reverse the authorisation in the Business Center.",
+            },
+          }
+        ).catch((error) => {
+          console.error("[boa] failed to flag an oversell collision:", error);
+        });
+
+        logPaymentEvent({
+          gateway: GATEWAY,
+          eventType: "oversell_collision",
+          orderId: claimed._id,
+          gatewayReference: body.transaction_id,
+          metadata: { soldAway: gone },
+        });
+
+        sendOpsAlert({
+          kind: "oversell_collision",
+          title: "Paid order with no device to ship",
+          summary:
+            "A payment under review was accepted after the device had already sold to " +
+            "another customer. The money has been taken and there is nothing to fulfil.",
+          lines: [
+            `Order ${claimed._id} (${claimed.email})`,
+            `Bank transaction ${body.transaction_id}`,
+            `Devices already sold: ${gone.join(", ")}`,
+            "Contact the customer today, and reverse the authorisation in the Business Center — the code cannot.",
+          ],
+          urgent: true,
+        }).catch((error) => {
+          console.error("[boa] oversell alert failed:", error);
+        });
+
+        // Still send the receipt. The customer has been charged, and a silent
+        // charge is worse than a receipt a person has to follow up.
+        sendPaymentReceiptEmail(claimed);
+        sendAdminNewOrderEmail(claimed);
+        return res.sendStatus(200);
+      }
+
       // The money is confirmed, so the devices are sold. Nothing did this
       // before: outOfStock could only be set by hand, so every sale depended on
       // someone remembering to take that device off the shop afterwards.
@@ -432,23 +558,37 @@ exports.merchantPost = async (req, res, next) => {
       sendPaymentReceiptEmail(claimed);
       sendAdminNewOrderEmail(claimed);
     } else if (claimed.status === REVIEW_STATUS) {
-      // Undecided, not refused. The customer may still be charged, so the
-      // devices stay held — but the ordinary hold runs out in twenty minutes
-      // and a person at the bank takes rather longer than that, so it is
-      // extended rather than merely left alone.
+      // Undecided, not refused. Nothing is paid, nothing is marked sold, and —
+      // by decision — nothing extends the stock hold either. The ordinary
+      // twenty minutes run out and the device returns to sale, because
+      // inventory is never held waiting for a person at the bank.
       //
-      // No receipt: nothing has been paid yet. Nothing is marked sold either,
-      // because the review can still come back as a decline.
-      await holdForReview(claimed.boaTransactionUuid).catch((error) => {
-        console.error("[boa] failed to extend the review hold:", error);
-      });
-
+      // That is why this alert is urgent and not throttled: the review is now
+      // racing a timer nobody can pause, and the sooner somebody looks at it in
+      // the Business Center the smaller the chance of an oversell collision.
       logPaymentEvent({
         gateway: GATEWAY,
-        eventType: "held_for_review",
+        eventType: "entered_review",
         orderId: claimed._id,
         gatewayReference: body.transaction_id,
         metadata: { reason_code: body.reason_code, message: body.message },
+      });
+
+      sendOpsAlert({
+        kind: "payment_review",
+        title: "Payment held for review by the bank",
+        summary:
+          "The bank has not settled this payment yet. The devices stay on the ordinary " +
+          "twenty-minute hold and will return to sale when it expires.",
+        lines: [
+          `Order ${claimed._id} (${claimed.email})`,
+          `Bank transaction ${body.transaction_id}`,
+          `Reason code ${body.reason_code || "not given"}: ${body.message || "no message"}`,
+          "Resolve it in the Business Center. It auto-rejects if nobody actions it.",
+        ],
+        urgent: true,
+      }).catch((error) => {
+        console.error("[boa] review alert failed:", error);
       });
     } else {
       // A confirmed decline means these devices are free again. Waiting for the
@@ -535,8 +675,47 @@ exports.paymentResponse = async (req, res) => {
     return res.redirect(`${frontendUrl}/cart?payment=cancelled`);
   }
 
+  // DECLINE and ERROR are not the same thing to the person standing there, and
+  // this route used to tell them both the same story. A decline is the card
+  // being refused: the useful action is another card. An ERROR is the payment
+  // never having been attempted properly — a gateway fault, a malformed field,
+  // a timeout — where changing card achieves nothing and the honest advice is
+  // to try again. Sending an errored customer off to find a different card is
+  // a wasted trip and reads as though their bank refused them when it did not.
+  //
+  // Anything the gateway sends that is neither ACCEPT, REVIEW, CANCEL nor
+  // DECLINE lands here too, deliberately: an outcome this handler has no
+  // opinion about is closer to a fault than to a refusal.
   if (body.decision !== "ACCEPT") {
-    return res.redirect(`${frontendUrl}/cart?payment=declined`);
+    const declined = body.decision === "DECLINE";
+
+    // The customer gets a flag and nothing else. Reason codes and gateway
+    // messages stay on this side — they mean nothing to a buyer, and
+    // `invalidField_0` in a URL is the kind of detail that turns a failed
+    // payment into a support ticket about the website being broken.
+    //
+    // Logged rather than dropped, because until now a customer landing on a
+    // decline left no server-side trace at all: the merchant POST records what
+    // the bank decided, but nothing recorded what the customer was actually
+    // shown, which is the first question asked when one of them writes in.
+    logPaymentEvent({
+      gateway: GATEWAY,
+      eventType: "webhook_received",
+      orderId,
+      gatewayReference: body.transaction_id,
+      metadata: {
+        source: "customer_response",
+        decision: body.decision ?? null,
+        reason_code: body.reason_code ?? null,
+        message: body.message ?? null,
+        invalid_fields: invalidFields(body),
+        shown_to_customer: declined ? "declined" : "error",
+      },
+    });
+
+    return res.redirect(
+      `${frontendUrl}/cart?payment=${declined ? "declined" : "error"}`
+    );
   }
 
   res.redirect(`${frontendUrl}/succeed?order_id=${orderId}`);

@@ -34,11 +34,20 @@ const withEvents = (byType) => {
   });
 };
 
-const withOrders = (rows = []) => {
-  Order.find.mockImplementation(() => ({
-    lean: async () => rows,
-    select: () => ({ lean: async () => rows }),
-  }));
+// Two of the checks ask a narrower question than the rest, and answering them
+// with the same rows would make every test about open reviews also a test about
+// expiring them. Route by the shape of the query, and default both to empty so
+// a test only sees the check it is about.
+const withOrders = (rows = [], { staleReviews = [], blocked = [] } = {}) => {
+  Order.find.mockImplementation((query = {}) => {
+    let out = rows;
+    if (query.updatedAt) out = staleReviews;
+    else if (query.fulfilmentBlocked) out = blocked;
+    return {
+      lean: async () => out,
+      select: () => ({ lean: async () => out }),
+    };
+  });
   Order.countDocuments.mockResolvedValue(0);
   Order.updateMany.mockResolvedValue({ modifiedCount: 0 });
 };
@@ -49,6 +58,7 @@ beforeEach(() => {
   EmailConfig.findOne.mockReturnValue({
     lean: jest.fn().mockResolvedValue({ enableErrorAlerts: true }),
   });
+  PaymentEventLog.create.mockResolvedValue({});
   withEvents({});
   withOrders([]);
 });
@@ -280,12 +290,21 @@ describe("reconciliation — payments the bank is still reviewing", () => {
   // checks and produce three findings from one row.
   const withOrdersByStatus = (byStatus) => {
     Order.find.mockImplementation((query = {}) => {
+      // The expiry sweep asks for under_review AND an updatedAt cutoff. Answer
+      // it separately, or an order that is merely open would also look overdue
+      // and every test here would become a test of the sweep as well.
+      if (query.updatedAt) return leanRows(byStatus.staleReviews || []);
       const rows = query.status ? byStatus[query.status] || [] : byStatus.other || [];
-      return { lean: async () => rows, select: () => ({ lean: async () => rows }) };
+      return leanRows(rows);
     });
     Order.countDocuments.mockResolvedValue(0);
     Order.updateMany.mockResolvedValue({ modifiedCount: 0 });
   };
+
+  const leanRows = (rows) => ({
+    lean: async () => rows,
+    select: () => ({ lean: async () => rows }),
+  });
 
   const reviewedOrder = (hoursAgo) => ({
     _id: ORDER_ID,
@@ -331,6 +350,67 @@ describe("reconciliation — payments the bank is still reviewing", () => {
     const report = await runReconciliation();
 
     expect(report.clean).toBe(true);
+  });
+
+  it("closes a review nobody answered inside the pending window", async () => {
+    // 24 hours. One full business day, then it stops being the customer's
+    // problem to wonder about.
+    withOrdersByStatus({ staleReviews: [{ ...reviewedOrder(30), boaTransactionId: "788274" }] });
+    Order.updateMany.mockResolvedValue({ modifiedCount: 1 });
+
+    const report = await runReconciliation();
+
+    const [filter, update] = Order.updateMany.mock.calls[0];
+    expect(filter.status).toBe("under_review");
+    expect(update.$set.status).toBe("payment failed");
+    expect(update.$set.paid).toBe(false);
+    expect(update.$set.reviewAutoRejectedAt).toBeInstanceOf(Date);
+  });
+
+  it("says plainly that an auto-rejected authorisation still needs reversing by hand", async () => {
+    // The code cannot return money — Secure Acceptance keys only take it. A
+    // report that implied otherwise would leave a customer's funds held with
+    // everyone believing they had been released.
+    withOrdersByStatus({ staleReviews: [{ ...reviewedOrder(48), boaTransactionId: "788274" }] });
+    Order.updateMany.mockResolvedValue({ modifiedCount: 1 });
+
+    const report = await runReconciliation();
+
+    expect(report.critical).toHaveLength(1);
+    expect(report.critical[0]).toContain("788274");
+    expect(report.critical[0]).toMatch(/reverse it by hand/i);
+  });
+
+  it("records the auto-rejection as a payment event", async () => {
+    withOrdersByStatus({ staleReviews: [reviewedOrder(26)] });
+    Order.updateMany.mockResolvedValue({ modifiedCount: 1 });
+
+    await runReconciliation();
+
+    const types = PaymentEventLog.create.mock.calls.map((call) => call[0].eventType);
+    expect(types).toContain("review_auto_rejected");
+  });
+
+  it("reports a paid order that has nothing left to ship", async () => {
+    // The accepted cost of never holding stock for a human: the review came
+    // back yes, the phone had already gone to somebody else.
+    Order.find.mockImplementation((query = {}) => {
+      if (query.fulfilmentBlocked) {
+        return leanRows([
+          {
+            ...reviewedOrder(2),
+            fulfilmentBlocked: true,
+            fulfilmentBlockReason: "Review accepted after the device had already sold",
+          },
+        ]);
+      }
+      return leanRows([]);
+    });
+
+    const report = await runReconciliation();
+
+    expect(report.critical).toHaveLength(1);
+    expect(report.critical[0]).toContain("paid but cannot be fulfilled");
   });
 
   it("does not sweep a reviewed order away as an abandoned checkout", async () => {

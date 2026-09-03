@@ -17,12 +17,18 @@ const SingleVariation = require("../models/singleVariation.model");
 // afternoon. It is only a floor — a confirmed decline releases immediately.
 const HOLD_MS = 20 * 60 * 1000;
 
-// How long a device stays held while the bank reviews the payment by hand.
-// Long enough that a review spanning a weekend does not quietly release the
-// device; short enough that a hold nobody ever resolves cannot outlive the
-// order. The daily reconciliation report is what makes this safe — see
-// holdForReview below.
-const REVIEW_HOLD_MS = 7 * 24 * 60 * 60 * 1000;
+// There is deliberately no separate, longer hold for a payment under review.
+// A review used to extend the hold to seven days on the reasoning that the
+// device was committed to that customer until the bank decided. The rule now
+// is the opposite and it is a business decision, not a technical one:
+// inventory is never held waiting for a human. One slow review must not take a
+// sellable device off the shop for a week.
+//
+// The cost of that choice is real and is handled rather than hidden — a device
+// can sell to somebody else once the twenty minutes are up while a review is
+// still open. merchantPost re-checks availability before fulfilling a review
+// that later comes back ACCEPT, and raises an oversell_collision when the
+// device is gone. See soldAway below.
 
 const isAvailableFilter = (holder, now) => ({
   outOfStock: { $ne: true },
@@ -112,30 +118,33 @@ async function releaseReservation(holder) {
 }
 
 /**
- * Keep holding the devices while the bank decides.
+ * Which of these devices have already been sold to somebody else.
  *
- * A REVIEW decision means a person at the bank is looking at the payment. That
- * takes hours or days, and the ordinary hold lasts twenty minutes — so simply
- * not releasing it is not enough: it expires on its own and the device goes
- * back on sale while the customer may still be charged for it.
+ * Only needed because a review no longer holds inventory: between the bank
+ * answering REVIEW and a person there answering ACCEPT, the twenty-minute hold
+ * expires and another customer can buy the device outright. Calling this
+ * before fulfilling such an order is what turns a silent oversell into a
+ * flagged one.
  *
- * Extending is the honest position. The device is genuinely committed to this
- * customer until the bank says otherwise, and selling it to someone else in the
- * meantime creates exactly the double-sale this whole service exists to stop.
- * The reconciliation report names these every day so a hold cannot sit
- * forgotten, which is what stops the extension quietly costing us sales.
+ * `outOfStock` is the test, not `reservedFor`. A device merely reserved by
+ * another in-flight checkout has not been sold — that checkout may still fail,
+ * and treating it as lost would refuse a customer who has actually paid.
+ *
+ * @param {string[]} ids  variation ids from the order
+ * @returns {Promise<string[]>} the ids that are gone, empty when all are fine
  */
-async function holdForReview(holder) {
-  if (!holder) return 0;
+async function soldAway(ids) {
+  if (!ids?.length) return [];
 
-  const until = new Date(Date.now() + REVIEW_HOLD_MS);
+  const gone = await SingleVariation.find({
+    _id: { $in: ids },
+    isAccessory: { $ne: true },
+    outOfStock: true,
+  })
+    .select("_id")
+    .lean();
 
-  const result = await SingleVariation.updateMany(
-    { reservedFor: holder },
-    { $set: { reservedUntil: until } }
-  );
-
-  return result.modifiedCount || 0;
+  return gone.map((variation) => String(variation._id));
 }
 
 /**
@@ -167,9 +176,8 @@ const variationIdsFromOrder = (order) =>
 module.exports = {
   reserveVariations,
   releaseReservation,
-  holdForReview,
+  soldAway,
   markSold,
   variationIdsFromOrder,
   HOLD_MS,
-  REVIEW_HOLD_MS,
 };

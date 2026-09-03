@@ -1,6 +1,7 @@
 const Order = require("../models/order.model");
 const PaymentEventLog = require("../models/paymentEventLog.model");
 const { sendOpsAlert } = require("./alertService");
+const { logPaymentEvent } = require("../controllers/checkout.controller");
 
 // The safety net. Until now nothing checked whether what the bank did matches
 // what the shop recorded — a payment taken with no order behind it would have
@@ -81,6 +82,64 @@ async function sweepAbandonedCheckouts() {
   return result.modifiedCount || 0;
 }
 
+// How long an order may sit under review before it is closed automatically.
+// One full business day: long enough that a review opened late on a Friday
+// afternoon is still there on Monday morning for a person to answer, short
+// enough that a customer is not left indefinitely unsure whether they have
+// bought something. Deliberately unrelated to the stock hold, which is twenty
+// minutes and never waits for a human.
+const REVIEW_PENDING_MS = 24 * HOUR;
+
+/**
+ * Close reviews nobody answered inside the pending window.
+ *
+ * The honest limit, stated rather than hidden: this does NOT get the money
+ * back. Secure Acceptance keys can take a payment and can never return one, so
+ * an authorisation that was placed and then auto-rejected still has to be
+ * reversed by hand in the Business Center. The code marks the order and says
+ * so; it must not imply the customer has been released.
+ *
+ * Nothing is released here either — the devices went back on sale twenty
+ * minutes after checkout, like every other hold.
+ */
+async function expireStaleReviews() {
+  const cutoff = new Date(Date.now() - REVIEW_PENDING_MS);
+
+  const stale = await Order.find({
+    paidWith: "BankOfAmerica",
+    status: "under_review",
+    updatedAt: { $lte: cutoff },
+  }).lean();
+
+  if (!stale.length) return { closed: 0, lines: [] };
+
+  const ids = stale.map((order) => order._id);
+
+  const result = await Order.updateMany(
+    { _id: { $in: ids }, status: "under_review" },
+    { $set: { status: "payment failed", paid: false, reviewAutoRejectedAt: new Date() } }
+  );
+
+  for (const order of stale) {
+    logPaymentEvent({
+      gateway: "BankOfAmerica",
+      eventType: "review_auto_rejected",
+      orderId: order._id,
+      gatewayReference: order.boaTransactionId,
+      metadata: { waitedHours: Math.floor((Date.now() - new Date(order.updatedAt).getTime()) / HOUR) },
+    });
+  }
+
+  const lines = stale.map(
+    (order) =>
+      `Order ${order._id} (${order.email}, ${money(orderTotal(order))}) — review never ` +
+      `answered, closed automatically. Transaction ${order.boaTransactionId || "unknown"} ` +
+      `may still be authorised: reverse it by hand in the Business Center.`
+  );
+
+  return { closed: result.modifiedCount || 0, lines };
+}
+
 /**
  * Look for payment records that disagree with each other.
  * Returns a report; never throws, so a scheduled run cannot take the app down.
@@ -152,10 +211,17 @@ async function runReconciliation({ windowMs = 24 * HOUR } = {}) {
       }
     }
 
-    // 4. Payments the bank is still reviewing by hand. These hold their devices
-    //    off sale for up to a week, so an unresolved one costs a sale as surely
-    //    as a lost payment does — and unlike an abandoned cart, nothing closes
-    //    it automatically. Naming them daily is what makes the long hold safe.
+    // 4. Close any review that outlived its pending window, then report the
+    //    ones still open. Order matters: sweeping first means a review that
+    //    just expired is reported as closed rather than as still waiting.
+    const expired = await expireStaleReviews();
+    for (const line of expired.lines) critical.push(line);
+
+    // 5. Payments the bank is still reviewing by hand. Their devices are NOT
+    //    held — the ordinary twenty-minute hold applies and has almost
+    //    certainly expired — so every hour one of these stays open is an hour
+    //    the device can sell to somebody else and leave a paid order with
+    //    nothing to ship. Naming them is what keeps that window short.
     const underReview = await Order.find({
       paidWith: "BankOfAmerica",
       status: "under_review",
@@ -166,11 +232,27 @@ async function runReconciliation({ windowMs = 24 * HOUR } = {}) {
       warnings.push(
         `Order ${order._id} (${order.email}, ${money(orderTotal(order))}) has been ` +
           `under review at the bank for ${waitingHours} hour${waitingHours === 1 ? "" : "s"}. ` +
-          `Its devices stay held until it resolves — check the Business Center.`
+          `Its devices are back on sale — resolve it in the Business Center before ` +
+          `someone else buys them.`
       );
     }
 
-    // 5. Marked paid with no transaction id. Nothing can be refunded or
+    // 6. Paid, but nothing to ship. The oversell collision the twenty-minute
+    //    rule accepts as its cost — money taken and the device already gone.
+    const blocked = await Order.find({
+      paidWith: "BankOfAmerica",
+      fulfilmentBlocked: true,
+      createdAt: { $gte: since },
+    }).lean();
+
+    for (const order of blocked) {
+      critical.push(
+        `Order ${order._id} (${order.email}, ${money(orderTotal(order))}) is paid but ` +
+          `cannot be fulfilled: ${order.fulfilmentBlockReason || "device unavailable"}`
+      );
+    }
+
+    // 7. Marked paid with no transaction id. Nothing can be refunded or
     //    disputed without that reference.
     const paidWithoutReference = await Order.find({
       paidWith: "BankOfAmerica",
@@ -186,7 +268,7 @@ async function runReconciliation({ windowMs = 24 * HOUR } = {}) {
       );
     }
 
-    // 6. Abandoned checkouts. Expected and harmless; counted so a sudden jump
+    // 8. Abandoned checkouts. Expected and harmless; counted so a sudden jump
     //    is visible, because that usually means the payment page is broken.
     const abandoned = await Order.countDocuments({
       paidWith: "BankOfAmerica",

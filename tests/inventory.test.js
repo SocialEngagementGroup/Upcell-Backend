@@ -4,11 +4,10 @@ const SingleVariation = require("../src/models/singleVariation.model");
 const {
   reserveVariations,
   releaseReservation,
-  holdForReview,
+  soldAway,
   markSold,
   variationIdsFromOrder,
   HOLD_MS,
-  REVIEW_HOLD_MS,
 } = require("../src/services/inventory");
 
 const PHONE_A = "68b59c07d4a1e2b8c3f10a51";
@@ -219,46 +218,47 @@ describe("reading device ids off an order", () => {
   });
 });
 
-describe("holding a device while the bank reviews the payment", () => {
-  it("pushes the hold well past the twenty-minute checkout window", async () => {
-    // Simply not releasing is not enough. The ordinary hold expires on its own,
-    // so a review lasting longer than twenty minutes would put the device back
-    // on sale while the customer may still be charged for it.
-    SingleVariation.updateMany.mockResolvedValue({ modifiedCount: 2 });
+describe("checking whether a device sold while a review was open", () => {
+  // A review no longer holds stock, so the twenty minutes expire and another
+  // customer can buy the device outright. This is what stops us selling the
+  // same phone twice when the review later comes back ACCEPT.
+  const findReturns = (docs) => {
+    SingleVariation.find.mockReturnValue({
+      select: () => ({ lean: () => Promise.resolve(docs) }),
+    });
+  };
 
-    const before = Date.now();
-    await holdForReview("checkout-1");
+  it("names only the devices that are actually gone", async () => {
+    findReturns([{ _id: PHONE_B }]);
 
-    const [filter, update] = SingleVariation.updateMany.mock.calls[0];
-    expect(filter).toEqual({ reservedFor: "checkout-1" });
+    expect(await soldAway([PHONE_A, PHONE_B])).toEqual([PHONE_B]);
 
-    const until = update.$set.reservedUntil.getTime();
-    expect(until).toBeGreaterThan(before + HOLD_MS);
-    expect(until).toBeLessThanOrEqual(Date.now() + REVIEW_HOLD_MS);
+    const [filter] = SingleVariation.find.mock.calls[0];
+    expect(filter).toEqual({
+      _id: { $in: [PHONE_A, PHONE_B] },
+      isAccessory: { $ne: true },
+      outOfStock: true,
+    });
   });
 
-  it("keeps the holder, so the hold can still be released later", async () => {
-    // A review ends in a decline as often as an accept, and releasing works by
-    // matching reservedFor. Clearing it here would strand the device.
-    SingleVariation.updateMany.mockResolvedValue({ modifiedCount: 1 });
-
-    await holdForReview("checkout-1");
-
-    const [, update] = SingleVariation.updateMany.mock.calls[0];
-    expect(update.$set).not.toHaveProperty("reservedFor");
+  it("returns nothing when every device is still available", async () => {
+    findReturns([]);
+    expect(await soldAway([PHONE_A])).toEqual([]);
   });
 
-  it("does not mark anything sold — a review can still be refused", async () => {
-    SingleVariation.updateMany.mockResolvedValue({ modifiedCount: 1 });
+  it("counts sold, not merely reserved — another checkout may still fail", async () => {
+    // Treating someone else's in-flight reservation as a loss would refuse a
+    // customer who has genuinely paid, for a sale that may never complete.
+    findReturns([]);
+    await soldAway([PHONE_A]);
 
-    await holdForReview("checkout-1");
-
-    const [, update] = SingleVariation.updateMany.mock.calls[0];
-    expect(update.$set).not.toHaveProperty("outOfStock");
+    const [filter] = SingleVariation.find.mock.calls[0];
+    expect(filter).not.toHaveProperty("reservedFor");
+    expect(filter).not.toHaveProperty("reservedUntil");
   });
 
-  it("does nothing without a holder rather than holding everything", async () => {
-    expect(await holdForReview(undefined)).toBe(0);
-    expect(SingleVariation.updateMany).not.toHaveBeenCalled();
+  it("asks the database nothing when the order has no devices", async () => {
+    expect(await soldAway([])).toEqual([]);
+    expect(SingleVariation.find).not.toHaveBeenCalled();
   });
 });

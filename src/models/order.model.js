@@ -56,6 +56,19 @@ const OrderSchema = new Schema(
     // Brand and last four only. A full card number never reaches this server.
     cardBrand: String,
     cardLast4: String,
+    // Paid, but nobody should pack it. Set when a payment under review is
+    // accepted after the device has already sold to another customer — money
+    // taken, nothing to ship. Deliberately a flag rather than a status value:
+    // the order genuinely is paid, and rewriting status to "payment failed"
+    // would hide a charge that really happened. A person has to resolve it,
+    // which is why the reason is stored in words rather than a code.
+    fulfilmentBlocked: { type: Boolean, default: false },
+    fulfilmentBlockReason: String,
+    // When the review pending window ran out and nothing had actioned it. The
+    // authorisation is NOT reversed by that sweep — Secure Acceptance keys
+    // cannot return money — so this marks an order still needing a manual
+    // reversal in the Business Center.
+    reviewAutoRejectedAt: Date,
     // Set once, by processRefund, and never after. UpCell has no refund API
     // credentials — Secure Acceptance keys can only take payments, never
     // return them — so this records what a staff member calculated and

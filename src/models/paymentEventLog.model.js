@@ -23,6 +23,26 @@ const eventTypeEnum = [
   // A retried confirmation that lost the race to claim an already-settled
   // order. Expected and harmless; recorded so retry storms stay visible.
   "duplicate_confirmation",
+  // The five below: the first three were already being emitted by the BOA
+  // controller without ever being listed here, so each one failed enum
+  // validation and was swallowed by logPaymentEvent's catch — exactly the
+  // failure the comment above warns about. The events that most needed
+  // recording were the ones that vanished: an unknown_decision is by
+  // definition a gap in the handler, and nothing was left to show it.
+  //
+  // The bank answered REVIEW. Nothing paid, nothing sold, and the stock hold
+  // is deliberately left on its ordinary twenty-minute timer.
+  "entered_review",
+  // The customer clicked Cancel on the hosted page. Releases the hold.
+  "customer_cancelled",
+  // A decision string this handler has no mapping for. Always investigate.
+  "unknown_decision",
+  // A review came back ACCEPT after the device had already sold to someone
+  // else. Money taken, nothing to ship. Never silent.
+  "oversell_collision",
+  // A review nobody actioned inside the pending window, closed automatically.
+  // This does NOT reverse the authorisation — see reconciliation.js.
+  "review_auto_rejected",
 ];
 const gatewayEnum = ["BankOfAmerica"];
 

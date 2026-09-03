@@ -231,6 +231,7 @@ const analyticsEventSchema = z.object({
 });
 
 module.exports = {
+  US_STATE_CODES,
   categorySchema,
   productCreateSchema,
   productSchema,

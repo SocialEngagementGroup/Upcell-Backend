@@ -23,6 +23,9 @@ jest.mock("../src/models/emailConfig.model");
 // reference the controller already captured. What the real ones do to stock is
 // covered in inventory.test.js; here we only care that the right one is called.
 jest.mock("../src/services/inventory");
+// Alerts go to Google Chat and email. Mocked so the decision tests assert that
+// staff were raised, without standing up a mail transport.
+jest.mock("../src/services/alertService");
 
 const Order = require("../src/models/order.model");
 const PaymentEventLog = require("../src/models/paymentEventLog.model");
@@ -77,6 +80,7 @@ const eventOfType = (type) =>
 beforeEach(() => {
   jest.clearAllMocks();
   PaymentEventLog.create.mockResolvedValue({});
+  Order.updateOne.mockResolvedValue({ modifiedCount: 1 });
   EmailConfig.findOne.mockReturnValue({ lean: jest.fn().mockResolvedValue({ enableCustomerEmails: true }) });
 
   // Stock succeeds unless a test says otherwise, so the tests about signed
@@ -84,9 +88,12 @@ beforeEach(() => {
   const inventory = require("../src/services/inventory");
   inventory.reserveVariations.mockResolvedValue({ ok: true, unavailable: [] });
   inventory.releaseReservation.mockResolvedValue(0);
-  inventory.holdForReview.mockResolvedValue(0);
+  inventory.soldAway.mockResolvedValue([]);
   inventory.markSold.mockResolvedValue(0);
   inventory.variationIdsFromOrder.mockReturnValue([]);
+
+  const { sendOpsAlert } = require("../src/services/alertService");
+  sendOpsAlert.mockResolvedValue({});
 });
 
 describe("signature round trip", () => {
@@ -105,6 +112,19 @@ describe("signature round trip", () => {
 });
 
 describe("fields sent to the gateway — reason code 102 causes", () => {
+  const validCheckout = {
+    name: "Communications",
+    email: "communications@socialengagementgroup.com",
+    phone: "(313) 288-8312",
+    city: "Astoria",
+    state: "NY",
+    postal: "11105",
+    street: "20-25 Shore Blvd apt 16a",
+    country: "United States",
+    orders: ["68b59c07d4a1e2b8c3f10a51"],
+    shipping: "standard",
+  };
+
   const prepare = async (overrides) => {
     Order.create.mockImplementation(async (doc) => ({
       _id: ORDER_ID,
@@ -122,19 +142,7 @@ describe("fields sent to the gateway — reason code 102 causes", () => {
     await boa.preparePayment(
       {
         user: { id: "user_abc" },
-        body: {
-          name: "Communications",
-          email: "communications@socialengagementgroup.com",
-          phone: "(313) 288-8312",
-          city: "Astoria",
-          state: "NY",
-          postal: "11105",
-          street: "20-25 Shore Blvd apt 16a",
-          country: "United States",
-          orders: ["68b59c07d4a1e2b8c3f10a51"],
-          shipping: "standard",
-          ...overrides,
-        },
+        body: { ...validCheckout, ...overrides },
       },
       res,
       (e) => { throw e; }
@@ -195,10 +203,14 @@ describe("fields sent to the gateway — reason code 102 causes", () => {
     expect(fields.bill_to_phone.length).toBeLessThanOrEqual(15);
   });
 
-  // The hosted page's Payment Form tab is being switched so every Billing
-  // Information field shows Display — a fixed value the customer cannot
-  // retype. A field the bank displays but we never send renders blank, so
-  // this list has to stay in sync with the checkout form's own fields
+  // Settled in the portal, and stricter than the plan: Billing Information is
+  // not merely Display on the hosted page, it is Disabled — the customer never
+  // sees a billing field at all. That removes the retype risk entirely and
+  // replaces it with a harder rule, printed on the portal tab itself: "You need
+  // to POST fields required by your processor if you do not capture these via
+  // Secure Acceptance." Nothing on the bank's page fills a gap any more.
+  //
+  // So this list has to stay in sync with the checkout form's own fields
   // (Frontend/src/pages/Checkout/Checkout.jsx) by hand: name, email, phone,
   // street, city, state, postal, country. There is no company or
   // address-line-2 field on either side, so none is expected here.
@@ -221,6 +233,67 @@ describe("fields sent to the gateway — reason code 102 causes", () => {
       expect(fields[name]).toBeTruthy();
       expect(fields.signed_field_names.split(",")).toContain(name);
     }
+  });
+
+  it("signs every field it posts, not just the billing ones", async () => {
+    // The structural half of the same rule. A field posted outside the signed
+    // set is one the bank will not treat as ours, and it would be an easy
+    // thing to introduce by building the payload and the signature separately.
+    const fields = await prepare({});
+
+    const signed = new Set(fields.signed_field_names.split(","));
+    const posted = Object.keys(fields).filter((name) => name !== "signature");
+
+    for (const name of posted) {
+      expect(signed.has(name)).toBe(true);
+    }
+  });
+
+  it("refuses a checkout with no state rather than sending an empty one", async () => {
+    // The schema leaves state optional for the admin Manual path. On this path
+    // an empty bill_to_address_state passes the gateway's own field check and
+    // then fails the issuer's address check — and this profile is set to
+    // reverse the authorisation when AVS fails, so the sale is lost with
+    // nothing on any form explaining why.
+    const res = { statusCode: null, body: null };
+    res.status = (code) => { res.statusCode = code; return res; };
+    res.json = (payload) => { res.body = payload; return res; };
+
+    await boa.preparePayment(
+      { user: { id: "user_abc" }, body: { ...validCheckout, state: undefined } },
+      res,
+      (e) => { throw e; }
+    );
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/state/i);
+    // Nothing reserved, nothing written: a refused attempt must not leave an
+    // order behind or a device held for a checkout that never happened.
+    expect(Order.create).not.toHaveBeenCalled();
+  });
+
+  it.each(["FD", "ZZ", "New York"])(
+    "refuses %s, which is not a state the issuer will recognise",
+    async (state) => {
+      const res = { statusCode: null, body: null };
+      res.status = (code) => { res.statusCode = code; return res; };
+      res.json = (payload) => { res.body = payload; return res; };
+
+      await boa.preparePayment(
+        { user: { id: "user_abc" }, body: { ...validCheckout, state } },
+        res,
+        (e) => { throw e; }
+      );
+
+      expect(res.statusCode).toBe(400);
+      expect(Order.create).not.toHaveBeenCalled();
+    }
+  );
+
+  it("accepts a lower-case state, because the form does not force the shape", async () => {
+    const fields = await prepare({ state: "ny" });
+
+    expect(fields.bill_to_address_state).toBe("NY");
   });
 });
 
@@ -402,10 +475,14 @@ describe("merchantPost — every decision the gateway can send", () => {
   // after it is exercised with the status it will really see. The order is
   // worth exactly what signedReply authorises, or the amount check would refuse
   // to mark it paid and every decision would look the same.
-  const claimYields = (status, paid) => {
+  // previousStatus is what the order held before this confirmation claimed it.
+  // It matters for exactly one case: a review that comes back settled arrives
+  // as a second message, and only that case can have lost its devices.
+  const claimYields = (status, paid, previousStatus = "pending_payment") => {
     const order = {
       _id: ORDER_ID,
       email: "buyer@example.com",
+      status: previousStatus,
       line_items: [
         { quantity: 1, price_data: { product_data: { name: "iPhone", metadata: { totalPaid: 1109.5 } } } },
       ],
@@ -440,7 +517,61 @@ describe("merchantPost — every decision the gateway can send", () => {
     expect(res.sendStatus).toHaveBeenCalledWith(200);
   });
 
-  it("REVIEW holds the devices instead of releasing them, and pays nothing", async () => {
+  it("a review accepted after the device sold is flagged, not fulfilled", async () => {
+    // The cost of never holding inventory for a human. Between REVIEW and
+    // ACCEPT the twenty minutes ran out and somebody else bought the phone.
+    // The money has moved and there is nothing to ship.
+    const { sendOpsAlert } = require("../src/services/alertService");
+    claimYields("Processing", true, "under_review");
+    inventory.variationIdsFromOrder.mockReturnValue(["device-1"]);
+    inventory.soldAway.mockResolvedValue(["device-1"]);
+
+    const res = await post("ACCEPT");
+
+    // Never sell it twice: the device belongs to whoever actually bought it.
+    expect(inventory.markSold).not.toHaveBeenCalled();
+    expect(eventTypes()).toContain("oversell_collision");
+
+    const [, update] = Order.updateOne.mock.calls[0];
+    expect(update.$set.fulfilmentBlocked).toBe(true);
+    expect(update.$set.fulfilmentBlockReason).toMatch(/reverse the authorisation/i);
+
+    expect(sendOpsAlert).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "oversell_collision", urgent: true })
+    );
+
+    // The customer was charged. A silent charge is worse than a receipt
+    // somebody has to follow up, so the receipt still goes.
+    expect(mockSend).toHaveBeenCalled();
+    expect(res.sendStatus).toHaveBeenCalledWith(200);
+  });
+
+  it("only re-checks stock for an order that was actually under review", async () => {
+    // An ordinary straight-through ACCEPT never lost its hold, so the extra
+    // database round trip would be waste on every normal sale.
+    claimYields("Processing", true, "pending_payment");
+    inventory.variationIdsFromOrder.mockReturnValue(["device-1"]);
+
+    await post("ACCEPT");
+
+    expect(inventory.soldAway).not.toHaveBeenCalled();
+    expect(inventory.markSold).toHaveBeenCalled();
+  });
+
+  it("treats a failed stock re-check as a collision rather than fulfilling blind", async () => {
+    // Not knowing whether the device is still there is not the same as knowing
+    // it is. Shipping on an unanswered question is how you sell it twice.
+    claimYields("Processing", true, "under_review");
+    inventory.variationIdsFromOrder.mockReturnValue(["device-1"]);
+    inventory.soldAway.mockRejectedValue(new Error("mongo unreachable"));
+
+    await post("ACCEPT");
+
+    expect(inventory.markSold).not.toHaveBeenCalled();
+    expect(eventTypes()).toContain("oversell_collision");
+  });
+
+  it("REVIEW pays nothing and does NOT extend the stock hold", async () => {
     claimYields("under_review", false);
 
     const res = await post("REVIEW");
@@ -448,18 +579,33 @@ describe("merchantPost — every decision the gateway can send", () => {
     expect(Order.findOneAndUpdate.mock.calls[0][1].$set.status).toBe("under_review");
     expect(Order.findOneAndUpdate.mock.calls[0][1].$set.paid).toBe(false);
 
-    // The whole point: the device stays off sale while a person at the bank
-    // decides. Releasing it here is what allowed the same phone to be sold
-    // twice, and the 20-minute hold expiring is why merely not releasing is
-    // not enough.
-    expect(inventory.holdForReview).toHaveBeenCalledWith("checkout-uuid");
+    // The decided rule: inventory is never held waiting for a human. The
+    // ordinary twenty-minute hold runs out and the device returns to sale,
+    // even though the bank has not finished deciding. Nothing here touches
+    // the reservation in either direction — not extending it, and not
+    // releasing it early either, because the customer may still be charged.
     expect(inventory.releaseReservation).not.toHaveBeenCalled();
     expect(inventory.markSold).not.toHaveBeenCalled();
 
-    expect(eventTypes()).toContain("held_for_review");
+    expect(eventTypes()).toContain("entered_review");
     expect(eventTypes()).not.toContain("marked_paid");
     expect(mockSend).not.toHaveBeenCalled();
     expect(res.sendStatus).toHaveBeenCalledWith(200);
+  });
+
+  it("REVIEW raises an urgent alert, because the device is now racing a timer", async () => {
+    const { sendOpsAlert } = require("../src/services/alertService");
+    claimYields("under_review", false);
+
+    await post("REVIEW");
+
+    expect(sendOpsAlert).toHaveBeenCalledTimes(1);
+    const alert = sendOpsAlert.mock.calls[0][0];
+    expect(alert.urgent).toBe(true);
+    expect(alert.kind).toBe("payment_review");
+    // Throttling an alert about money would be the wrong economy: two reviews
+    // inside fifteen minutes are two devices at risk, not one duplicate.
+    expect(alert.lines.join(" ")).toContain(ORDER_ID);
   });
 
   it.each(["DECLINE", "ERROR", "CANCEL"])(
@@ -471,7 +617,6 @@ describe("merchantPost — every decision the gateway can send", () => {
 
       expect(Order.findOneAndUpdate.mock.calls[0][1].$set.status).toBe("payment failed");
       expect(inventory.releaseReservation).toHaveBeenCalledWith("checkout-uuid");
-      expect(inventory.holdForReview).not.toHaveBeenCalled();
       expect(inventory.markSold).not.toHaveBeenCalled();
       expect(eventTypes()).not.toContain("marked_paid");
       expect(mockSend).not.toHaveBeenCalled();
@@ -607,6 +752,84 @@ describe("merchantPost — the same delivery arrives twice", () => {
   });
 });
 
+// A review is deliberately re-claimable, because the bank sends a follow-up
+// carrying the real decision once a person there has looked. That reopening is
+// exactly what lets a *redelivered* REVIEW — the same message again, which the
+// 63-second cold start on Render makes likely — run the review branch twice.
+describe("merchantPost — a review message delivered twice", () => {
+  const inventory = require("../src/services/inventory");
+
+  const reviewedOrder = () => ({
+    _id: ORDER_ID,
+    email: "buyer@example.com",
+    status: "under_review",
+    boaTransactionId: "7882749437566123004007",
+    line_items: [
+      { quantity: 1, price_data: { product_data: { name: "iPhone", metadata: { totalPaid: 1109.5 } } } },
+    ],
+  });
+
+  it("does not alert twice about a review that has not changed", async () => {
+    const { sendOpsAlert } = require("../src/services/alertService");
+    Order.findById.mockResolvedValue(reviewedOrder());
+
+    const res = makeRes();
+    await boa.merchantPost({ body: signedReply({ decision: "REVIEW" }) }, res, jest.fn());
+    await flushMicrotasks();
+
+    // An alert repeated for an unchanged situation is how a team learns to
+    // ignore the alert that matters.
+    expect(sendOpsAlert).not.toHaveBeenCalled();
+    expect(Order.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(eventTypes()).toContain("duplicate_confirmation");
+    expect(eventOfType("duplicate_confirmation").metadata.reason).toBe("review_redelivered");
+    expect(res.sendStatus).toHaveBeenCalledWith(200);
+  });
+
+  it("still accepts the follow-up that settles the review, same transaction id and all", async () => {
+    // The bank may reuse the transaction id when it settles. Refusing on the
+    // id alone would drop the one message this reopening exists to accept —
+    // the customer charged, the order left in review for ever.
+    const order = reviewedOrder();
+    Order.findById.mockResolvedValue(order);
+    Order.findOneAndUpdate.mockResolvedValue({
+      ...order,
+      status: "Processing",
+      paid: true,
+      boaTransactionUuid: "checkout-uuid",
+    });
+    inventory.variationIdsFromOrder.mockReturnValue([]);
+
+    const res = makeRes();
+    await boa.merchantPost({ body: signedReply({ decision: "ACCEPT" }) }, res, jest.fn());
+    await flushMicrotasks();
+
+    expect(Order.findOneAndUpdate).toHaveBeenCalled();
+    expect(eventTypes()).toContain("marked_paid");
+    expect(res.sendStatus).toHaveBeenCalledWith(200);
+  });
+
+  it("treats a genuinely new review message as new, not as a redelivery", async () => {
+    const { sendOpsAlert } = require("../src/services/alertService");
+    const order = { ...reviewedOrder(), boaTransactionId: "an-earlier-transaction" };
+    Order.findById.mockResolvedValue(order);
+    Order.findOneAndUpdate.mockResolvedValue({
+      ...order,
+      status: "under_review",
+      paid: false,
+      boaTransactionUuid: "checkout-uuid",
+    });
+
+    const res = makeRes();
+    await boa.merchantPost({ body: signedReply({ decision: "REVIEW" }) }, res, jest.fn());
+    await flushMicrotasks();
+
+    expect(sendOpsAlert).toHaveBeenCalledTimes(1);
+    expect(eventTypes()).toContain("entered_review");
+    expect(res.sendStatus).toHaveBeenCalledWith(200);
+  });
+});
+
 describe("paymentResponse — a reviewed customer is not told they are done", () => {
   it("keeps a review off the order-confirmed page", async () => {
     const res = makeRes();
@@ -627,15 +850,69 @@ describe("paymentResponse — where the customer lands", () => {
     expect(res.redirectedTo).toBe(`https://shop.example.com/succeed?order_id=${ORDER_ID}`);
   });
 
-  it.each(["DECLINE", "ERROR"])(
-    "sends a %s customer back to the cart with a plain decline flag",
+  it("tells a declined customer their card was refused", async () => {
+    const res = makeRes();
+    await boa.paymentResponse({ body: signedReply({ decision: "DECLINE" }) }, res);
+
+    expect(res.redirectedTo).toBe("https://shop.example.com/cart?payment=declined");
+  });
+
+  it.each(["ERROR", "SOMETHING_NEW"])(
+    "does not tell a %s customer their card was declined",
     async (decision) => {
+      // Their card was not refused. Sending them off to find another one is a
+      // wasted trip, and it reads as though their bank turned them down when
+      // it never saw the payment.
       const res = makeRes();
       await boa.paymentResponse({ body: signedReply({ decision }) }, res);
 
-      expect(res.redirectedTo).toBe("https://shop.example.com/cart?payment=declined");
+      expect(res.redirectedTo).toBe("https://shop.example.com/cart?payment=error");
     }
   );
+
+  it("keeps reason codes and gateway messages out of the customer's URL", async () => {
+    const res = makeRes();
+    await boa.paymentResponse(
+      {
+        body: signedReply({
+          decision: "DECLINE",
+          reason_code: "102",
+          message: "One or more fields contains invalid data",
+          invalid_fields: "bill_to_surname",
+        }),
+      },
+      res
+    );
+
+    expect(res.redirectedTo).not.toContain("102");
+    expect(res.redirectedTo).not.toContain("invalid");
+  });
+
+  it("records what the customer was actually shown", async () => {
+    // The merchant POST records what the bank decided. Nothing recorded what
+    // the buyer saw, which is the first question asked when one writes in.
+    const res = makeRes();
+    await boa.paymentResponse(
+      { body: signedReply({ decision: "ERROR", reason_code: "150" }) },
+      res
+    );
+
+    const logged = PaymentEventLog.create.mock.calls
+      .map((call) => call[0])
+      .find((event) => event.metadata?.source === "customer_response" && event.metadata?.decision);
+
+    expect(logged.metadata.shown_to_customer).toBe("error");
+    expect(logged.metadata.reason_code).toBe("150");
+  });
+
+  it("never changes payment status on the browser route", async () => {
+    // Anyone can request this URL. Only /boa/merchant-post may decide money.
+    const res = makeRes();
+    await boa.paymentResponse({ body: signedReply({ decision: "ACCEPT" }) }, res);
+
+    expect(Order.findOneAndUpdate).not.toHaveBeenCalled();
+    expect(Order.updateOne).not.toHaveBeenCalled();
+  });
 
   it("distinguishes a forged response from one it cannot read", async () => {
     const forged = makeRes();
