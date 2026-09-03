@@ -1,6 +1,7 @@
 const Order = require("../models/order.model");
 const SingleVariation = require("../models/singleVariation.model");
 const PaymentEventLog = require("../models/paymentEventLog.model");
+const { round2 } = require("../utils/money");
 const { Resend } = require("resend");
 const { paymentReceiptEmail, adminNewOrderEmail } = require("../services/emailTemplates");
 const { EmailConfig } = require("../models/emailConfig.model");
@@ -35,9 +36,11 @@ exports.orderLineItemsForReceipt = (order) =>
 // if they were computed separately, a drift between them would show up as a
 // customer being charged one amount and emailed another.
 exports.orderTotal = (order) =>
-  exports
-    .orderLineItemsForReceipt(order)
-    .reduce((sum, item) => sum + item.price, 0);
+  round2(
+    exports
+      .orderLineItemsForReceipt(order)
+      .reduce((sum, item) => sum + item.price, 0)
+  );
 
 // Called whenever an order is confirmed paid, alongside the customer
 // receipt. Kept next to sendPaymentReceiptEmail deliberately: when these two
@@ -224,7 +227,11 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
           metadata: {
             productId: info._id,
             quantity,
-            totalPaid: info.price * quantity,
+            // Rounded here rather than left as a raw product — a device
+            // price times a quantity can drift a fraction of a cent in
+            // floating point (99.99 * 3 stores as 299.96999999999997), and
+            // that drift is exactly how a reconciliation stops balancing.
+            totalPaid: round2(info.price * quantity),
           },
         },
       },
@@ -339,10 +346,12 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
     paidWith,
   };
 
-  const totalPrice = line_items.reduce(
-    (total, currentObj) =>
-      total + (currentObj?.price_data?.product_data?.metadata?.totalPaid ?? 0),
-    0
+  const totalPrice = round2(
+    line_items.reduce(
+      (total, currentObj) =>
+        total + (currentObj?.price_data?.product_data?.metadata?.totalPaid ?? 0),
+      0
+    )
   );
 
   return { order, totalPrice };

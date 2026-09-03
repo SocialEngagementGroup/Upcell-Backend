@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const Order = require("../models/order.model");
 const { scrubPayload } = require("../utils/scrubPayload");
 const { US_STATE_CODES } = require("../schemas/request.schemas");
+const { round2 } = require("../utils/money");
 const {
   reserveVariations,
   releaseReservation,
@@ -204,6 +205,10 @@ exports.preparePayment = async (req, res, next) => {
       newOrder = await Order.create({
         ...order,
         boaTransactionUuid: transactionUuid,
+        // The immutable record of what was actually signed and sent to the
+        // bank. merchantPost verifies against this rather than only ever
+        // re-summing line_items at confirmation time — see the comment there.
+        signedAmount: round2(totalPrice),
       });
     } catch (error) {
       // Never leave stock held for an order that was never created.
@@ -375,16 +380,21 @@ exports.merchantPost = async (req, res, next) => {
     let status = knownDecision ? DECISION_STATUS[body.decision] : UNKNOWN_DECISION_STATUS;
     let paid = status === "Processing";
 
-    // Confirm the bank authorised what the order is actually worth before
-    // treating it as settled. auth_amount is the gateway's own figure; the
-    // echoed req_amount is what we asked for.
+    // The bank's own figure for this confirmation, read once and reused below
+    // both for the check and for what gets persisted on the order.
+    const authorisedAmount = Number(body.auth_amount ?? echoed(body, "amount"));
+
+    // Confirm the bank authorised what was actually signed and sent at
+    // checkout, not merely what the order happens to total right now.
+    // signedAmount is the immutable record written in preparePayment;
+    // orders created before that field existed fall back to a live
+    // recomputation, same as this check always worked before.
     if (paid) {
-      const expected = orderTotal(order);
-      const authorised = Number(body.auth_amount ?? echoed(body, "amount"));
+      const expected = order.signedAmount ?? orderTotal(order);
       const currency = String(echoed(body, "currency") || "").toLowerCase();
       const amountOk =
-        Number.isFinite(authorised) &&
-        Math.abs(authorised - expected) < AMOUNT_TOLERANCE;
+        Number.isFinite(authorisedAmount) &&
+        Math.abs(authorisedAmount - expected) < AMOUNT_TOLERANCE;
 
       if (!amountOk || (currency && currency !== "usd")) {
         paid = false;
@@ -394,7 +404,7 @@ exports.merchantPost = async (req, res, next) => {
           eventType: "amount_mismatch",
           orderId: order._id,
           gatewayReference: body.transaction_id,
-          metadata: { expected, authorised, currency: currency || null },
+          metadata: { expected, authorised: authorisedAmount, currency: currency || null },
         });
       }
     }
@@ -452,6 +462,16 @@ exports.merchantPost = async (req, res, next) => {
           status,
           paid,
           boaTransactionId: body.transaction_id,
+          // The gateway's own decision string and its supporting detail,
+          // verbatim — Decision Manager is live, and until now a REVIEW had
+          // nowhere to record reason code, AVS, or CVN result.
+          boaDecision: body.decision,
+          reasonCode: body.reason_code || undefined,
+          avsResult: body.auth_avs_code || undefined,
+          cvnResult: body.auth_cv_result || undefined,
+          // Only set once the payment is actually confirmed — an
+          // authorisation that never clears is not "authorised at" anything.
+          ...(paid ? { authorizedAmount: authorisedAmount, authorizedAt: new Date() } : {}),
           // Brand and last four only — enough to answer a customer's question,
           // useless to anyone who breaches the database.
           cardBrand: body.card_type_name || body.req_card_type,

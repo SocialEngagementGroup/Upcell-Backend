@@ -203,6 +203,17 @@ describe("fields sent to the gateway — reason code 102 causes", () => {
     expect(fields.bill_to_phone.length).toBeLessThanOrEqual(15);
   });
 
+  it("persists the signed amount on the order, not just in the response to the browser", async () => {
+    // merchantPost later verifies against this. Without it there is no
+    // record of what was actually sent to the bank at checkout — only a live
+    // recomputation of whatever the order happens to total at confirmation
+    // time, which is a different and weaker guarantee.
+    const fields = await prepare({});
+
+    const created = Order.create.mock.calls[0][0];
+    expect(created.signedAmount).toBe(Number(fields.amount));
+  });
+
   // Settled in the portal, and stricter than the plan: Billing Information is
   // not merely Display on the hosted page, it is Disabled — the customer never
   // sees a billing field at all. That removes the retype risk entirely and
@@ -400,6 +411,54 @@ describe("merchantPost — amount verification", () => {
     expect(eventTypes()).toContain("marked_paid");
   });
 
+  it("verifies against the amount actually signed at checkout, not a live recomputation", async () => {
+    // signedAmount is what preparePayment recorded before the customer ever
+    // left for the bank. line_items summing to something else here stands in
+    // for "the order's current worth has since changed" — the exact gap a
+    // live-only recomputation could not have caught.
+    const order = { ...orderWorth(999), signedAmount: 1109.5 };
+    Order.findById.mockResolvedValue(order);
+    Order.findOneAndUpdate.mockResolvedValue({ ...order, paid: true });
+
+    const res = makeRes();
+    await boa.merchantPost({ body: signedReply({ auth_amount: "1109.50" }) }, res, jest.fn());
+    await flushMicrotasks();
+
+    // The bank authorised exactly what was signed, so this must pass even
+    // though it does not match what the line items add up to right now.
+    expect(eventTypes()).not.toContain("amount_mismatch");
+    expect(eventTypes()).toContain("marked_paid");
+  });
+
+  it("catches a mismatch against the signed amount that the current total would hide", async () => {
+    // The current line items happen to sum to what the bank authorised, but
+    // that is not what was signed at checkout — this is the scenario a
+    // recompute-only check cannot tell apart from a genuine match.
+    const order = { ...orderWorth(1109.5), signedAmount: 5.0 };
+    Order.findById.mockResolvedValue(order);
+    Order.findOneAndUpdate.mockResolvedValue({ ...order, paid: false });
+
+    const res = makeRes();
+    await boa.merchantPost({ body: signedReply({ auth_amount: "1109.50" }) }, res, jest.fn());
+
+    expect(eventTypes()).toContain("amount_mismatch");
+    const mismatch = eventOfType("amount_mismatch");
+    expect(mismatch.metadata.expected).toBe(5.0);
+  });
+
+  it("falls back to a live recomputation for an order that predates signedAmount", async () => {
+    const order = orderWorth(1109.5); // no signedAmount field at all
+    Order.findById.mockResolvedValue(order);
+    Order.findOneAndUpdate.mockResolvedValue({ ...order, paid: true });
+
+    const res = makeRes();
+    await boa.merchantPost({ body: signedReply() }, res, jest.fn());
+    await flushMicrotasks();
+
+    expect(eventTypes()).not.toContain("amount_mismatch");
+    expect(eventTypes()).toContain("marked_paid");
+  });
+
   it("refuses to mark paid when the bank authorised a different amount", async () => {
     Order.findById.mockResolvedValue(orderWorth(1109.5));
     Order.findOneAndUpdate.mockResolvedValue({ ...orderWorth(1109.5), paid: false });
@@ -515,6 +574,48 @@ describe("merchantPost — every decision the gateway can send", () => {
     expect(inventory.releaseReservation).not.toHaveBeenCalled();
     expect(mockSend).toHaveBeenCalled();
     expect(res.sendStatus).toHaveBeenCalledWith(200);
+  });
+
+  it("records the decision, reason code, AVS and CVN results, and when it was authorised", async () => {
+    // Decision Manager is live, and until now a REVIEW (or any decision) had
+    // nowhere to record this detail — only the derived status, not the
+    // gateway's own account of why.
+    claimYields("Processing", true);
+
+    const res = makeRes();
+    await boa.merchantPost(
+      {
+        body: signedReply({
+          decision: "ACCEPT",
+          reason_code: "100",
+          auth_avs_code: "Y",
+          auth_cv_result: "M",
+        }),
+      },
+      res,
+      jest.fn()
+    );
+    await flushMicrotasks();
+
+    const set = Order.findOneAndUpdate.mock.calls[0][1].$set;
+    expect(set.boaDecision).toBe("ACCEPT");
+    expect(set.reasonCode).toBe("100");
+    expect(set.avsResult).toBe("Y");
+    expect(set.cvnResult).toBe("M");
+    expect(set.authorizedAmount).toBe(1109.5);
+    expect(set.authorizedAt).toBeInstanceOf(Date);
+  });
+
+  it("does not stamp an authorisation time for a decision that was never paid", async () => {
+    claimYields("payment failed", false);
+
+    const res = makeRes();
+    await boa.merchantPost({ body: signedReply({ decision: "DECLINE" }) }, res, jest.fn());
+
+    const set = Order.findOneAndUpdate.mock.calls[0][1].$set;
+    expect(set.authorizedAt).toBeUndefined();
+    expect(set.authorizedAmount).toBeUndefined();
+    expect(set.boaDecision).toBe("DECLINE");
   });
 
   it("a review accepted after the device sold is flagged, not fulfilled", async () => {

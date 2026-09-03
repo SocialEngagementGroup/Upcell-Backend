@@ -12,9 +12,9 @@
 // (whether partial returns get any shipping back). Both are called out to
 // the caller so a human decides, rather than the code deciding quietly.
 
-const RESTOCKING_FEE_RATE = 0.15;
+const { round2 } = require("../utils/money");
 
-const round2 = (value) => Math.round(value * 100) / 100;
+const RESTOCKING_FEE_RATE = 0.15;
 
 // Tax and shipping lines carry no productId — only real devices and
 // accessories do. This is the same test checkout.controller.js uses to tell

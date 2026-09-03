@@ -53,6 +53,36 @@ const OrderSchema = new Schema(
     // transaction in the Business Center when issuing a refund.
     boaTransactionUuid: String,
     boaTransactionId: String,
+    // The amount actually signed and sent to the bank at checkout (dollars,
+    // rounded to the cent). merchantPost compares the bank's authorised
+    // figure against this rather than only ever re-summing line_items at
+    // confirmation time — a live recomputation validates against whatever the
+    // order happens to total right now, not against what the customer was
+    // actually shown and the bank actually agreed to. Absent on orders
+    // created before this field existed; those fall back to the recomputed
+    // total, same as before.
+    signedAmount: Number,
+    // Every order today is USD — this just makes that an explicit fact on
+    // the document rather than an assumption baked into every consumer of
+    // totalPaid, ahead of the day it stops being universally true.
+    currency: { type: String, default: "USD" },
+    // What the bank actually authorised (auth_amount), set once on ACCEPT.
+    // Kept distinct from signedAmount so a partial authorisation is visible
+    // as a fact in the data, not just as a reason a payment was refused.
+    authorizedAmount: Number,
+    authorizedAt: Date,
+    // Capture happens at dispatch, not at checkout — this project has no
+    // automated capture step yet, so this field exists for that later work
+    // and is not populated by anything today. updatedAt cannot stand in for
+    // it: an order can be touched for unrelated reasons after it is captured.
+    capturedAt: Date,
+    // The gateway's own decision string (ACCEPT/REVIEW/DECLINE/ERROR/CANCEL),
+    // kept verbatim alongside the derived `status` — Decision Manager can
+    // return a REVIEW for reasons `status` alone does not distinguish.
+    boaDecision: String,
+    reasonCode: String,
+    avsResult: String,
+    cvnResult: String,
     // Brand and last four only. A full card number never reaches this server.
     cardBrand: String,
     cardLast4: String,
@@ -105,6 +135,12 @@ const OrderSchema = new Schema(
 // the same null and collide. sparse skips indexing docs where the field is
 // absent, so uniqueness only applies to orders that actually have an ID.
 OrderSchema.index({ boaTransactionUuid: 1 }, { unique: true, sparse: true });
+// Same reasoning as boaTransactionUuid above: without this, the atomic claim
+// in merchantPost guarantees only that one writer wins per order — nothing
+// stops the same bank transaction id from ending up recorded against two
+// different orders if a reference number were ever resolved wrong. sparse,
+// because Manual orders and orders still pending never had a bank transaction.
+OrderSchema.index({ boaTransactionId: 1 }, { unique: true, sparse: true });
 OrderSchema.index({ email: 1, paid: 1 });
 OrderSchema.index({ status: 1, updatedAt: -1 });
 OrderSchema.index({ createdAt: 1 });
