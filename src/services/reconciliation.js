@@ -152,7 +152,25 @@ async function runReconciliation({ windowMs = 24 * HOUR } = {}) {
       }
     }
 
-    // 4. Marked paid with no transaction id. Nothing can be refunded or
+    // 4. Payments the bank is still reviewing by hand. These hold their devices
+    //    off sale for up to a week, so an unresolved one costs a sale as surely
+    //    as a lost payment does — and unlike an abandoned cart, nothing closes
+    //    it automatically. Naming them daily is what makes the long hold safe.
+    const underReview = await Order.find({
+      paidWith: "BankOfAmerica",
+      status: "under_review",
+    }).lean();
+
+    for (const order of underReview) {
+      const waitingHours = Math.floor((Date.now() - new Date(order.updatedAt).getTime()) / HOUR);
+      warnings.push(
+        `Order ${order._id} (${order.email}, ${money(orderTotal(order))}) has been ` +
+          `under review at the bank for ${waitingHours} hour${waitingHours === 1 ? "" : "s"}. ` +
+          `Its devices stay held until it resolves — check the Business Center.`
+      );
+    }
+
+    // 5. Marked paid with no transaction id. Nothing can be refunded or
     //    disputed without that reference.
     const paidWithoutReference = await Order.find({
       paidWith: "BankOfAmerica",
@@ -168,7 +186,7 @@ async function runReconciliation({ windowMs = 24 * HOUR } = {}) {
       );
     }
 
-    // 5. Abandoned checkouts. Expected and harmless; counted so a sudden jump
+    // 6. Abandoned checkouts. Expected and harmless; counted so a sudden jump
     //    is visible, because that usually means the payment page is broken.
     const abandoned = await Order.countDocuments({
       paidWith: "BankOfAmerica",

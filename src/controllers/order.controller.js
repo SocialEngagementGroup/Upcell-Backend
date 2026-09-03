@@ -148,13 +148,16 @@ async function getAdminOrdersByDate(req, res, next) {
   }
 }
 
-const ORDER_STATUS_VALUES = ["pending_payment", "Processing", "Shipped", "Delivered", "Returned", "Refunded", "payment failed"];
+const ORDER_STATUS_VALUES = ["pending_payment", "under_review", "Processing", "Shipped", "Delivered", "Returned", "Refunded", "payment failed"];
 
 // Statuses that mean no money has been received. Everything else implies a
 // confirmed payment — including Returned and Refunded, where the payment did
 // happen and was reversed afterwards, so those orders must stay visible to the
 // customer rather than dropping off their order list.
-const UNPAID_STATUSES = ["pending_payment", "payment failed"];
+//
+// under_review belongs here: the bank has not settled it, so treating it as
+// paid would put revenue on the dashboard that may never arrive.
+const UNPAID_STATUSES = ["pending_payment", "under_review", "payment failed"];
 
 async function updateOrderStatus(req, res, next) {
   const { orderId, status } = req.body;

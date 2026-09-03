@@ -17,6 +17,13 @@ const SingleVariation = require("../models/singleVariation.model");
 // afternoon. It is only a floor — a confirmed decline releases immediately.
 const HOLD_MS = 20 * 60 * 1000;
 
+// How long a device stays held while the bank reviews the payment by hand.
+// Long enough that a review spanning a weekend does not quietly release the
+// device; short enough that a hold nobody ever resolves cannot outlive the
+// order. The daily reconciliation report is what makes this safe — see
+// holdForReview below.
+const REVIEW_HOLD_MS = 7 * 24 * 60 * 60 * 1000;
+
 const isAvailableFilter = (holder, now) => ({
   outOfStock: { $ne: true },
   $or: [
@@ -105,6 +112,33 @@ async function releaseReservation(holder) {
 }
 
 /**
+ * Keep holding the devices while the bank decides.
+ *
+ * A REVIEW decision means a person at the bank is looking at the payment. That
+ * takes hours or days, and the ordinary hold lasts twenty minutes — so simply
+ * not releasing it is not enough: it expires on its own and the device goes
+ * back on sale while the customer may still be charged for it.
+ *
+ * Extending is the honest position. The device is genuinely committed to this
+ * customer until the bank says otherwise, and selling it to someone else in the
+ * meantime creates exactly the double-sale this whole service exists to stop.
+ * The reconciliation report names these every day so a hold cannot sit
+ * forgotten, which is what stops the extension quietly costing us sales.
+ */
+async function holdForReview(holder) {
+  if (!holder) return 0;
+
+  const until = new Date(Date.now() + REVIEW_HOLD_MS);
+
+  const result = await SingleVariation.updateMany(
+    { reservedFor: holder },
+    { $set: { reservedUntil: until } }
+  );
+
+  return result.modifiedCount || 0;
+}
+
+/**
  * Take the devices off sale for good, once the money is confirmed.
  *
  * Nothing did this before: outOfStock could only be set by hand in the admin
@@ -133,7 +167,9 @@ const variationIdsFromOrder = (order) =>
 module.exports = {
   reserveVariations,
   releaseReservation,
+  holdForReview,
   markSold,
   variationIdsFromOrder,
   HOLD_MS,
+  REVIEW_HOLD_MS,
 };

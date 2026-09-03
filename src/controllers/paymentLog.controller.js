@@ -73,13 +73,18 @@ async function getPaymentSummary(req, res, next) {
   try {
     const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
-    const [byType, paidCount, pendingCount, failedCount, unpaidValue] = await Promise.all([
+    const [byType, paidCount, pendingCount, reviewCount, failedCount, unpaidValue] = await Promise.all([
       PaymentEventLog.aggregate([
         { $match: { createdAt: { $gte: since } } },
         { $group: { _id: "$eventType", count: { $sum: 1 } } },
       ]),
       Order.countDocuments({ paidWith: "BankOfAmerica", paid: true, createdAt: { $gte: since } }),
       Order.countDocuments({ paidWith: "BankOfAmerica", status: "pending_payment", createdAt: { $gte: since } }),
+      // Counted separately from pending: these are payments a person at the
+      // bank is checking, and they hold their devices off sale while they wait.
+      // Folded into "pending" they would be indistinguishable from abandoned
+      // carts, which is the one thing they must not be mistaken for.
+      Order.countDocuments({ paidWith: "BankOfAmerica", status: "under_review", createdAt: { $gte: since } }),
       Order.countDocuments({ paidWith: "BankOfAmerica", status: "payment failed", createdAt: { $gte: since } }),
       Order.aggregate([
         { $match: { paidWith: "BankOfAmerica", paid: true, createdAt: { $gte: since } } },
@@ -97,7 +102,7 @@ async function getPaymentSummary(req, res, next) {
 
     res.json({
       windowDays: 7,
-      orders: { paid: paidCount, pending: pendingCount, failed: failedCount },
+      orders: { paid: paidCount, pending: pendingCount, review: reviewCount, failed: failedCount },
       takings: Number((unpaidValue[0]?.total || 0).toFixed(2)),
       events,
       problems,

@@ -18,6 +18,11 @@ jest.mock("../src/models/order.model");
 jest.mock("../src/models/paymentEventLog.model");
 jest.mock("../src/models/singleVariation.model");
 jest.mock("../src/models/emailConfig.model");
+// The controller destructures these at require time, so the module has to be
+// mocked rather than spied on — a spy installed later would not replace the
+// reference the controller already captured. What the real ones do to stock is
+// covered in inventory.test.js; here we only care that the right one is called.
+jest.mock("../src/services/inventory");
 
 const Order = require("../src/models/order.model");
 const PaymentEventLog = require("../src/models/paymentEventLog.model");
@@ -73,6 +78,15 @@ beforeEach(() => {
   jest.clearAllMocks();
   PaymentEventLog.create.mockResolvedValue({});
   EmailConfig.findOne.mockReturnValue({ lean: jest.fn().mockResolvedValue({ enableCustomerEmails: true }) });
+
+  // Stock succeeds unless a test says otherwise, so the tests about signed
+  // fields and decisions are not also tests about inventory.
+  const inventory = require("../src/services/inventory");
+  inventory.reserveVariations.mockResolvedValue({ ok: true, unavailable: [] });
+  inventory.releaseReservation.mockResolvedValue(0);
+  inventory.holdForReview.mockResolvedValue(0);
+  inventory.markSold.mockResolvedValue(0);
+  inventory.variationIdsFromOrder.mockReturnValue([]);
 });
 
 describe("signature round trip", () => {
@@ -345,6 +359,161 @@ describe("merchantPost — declines and retries", () => {
     expect(Order.findById).not.toHaveBeenCalled();
     expect(eventTypes()).toContain("signature_rejected");
     expect(res.sendStatus).toHaveBeenCalledWith(200);
+  });
+});
+
+// The gateway can answer with any of five words, and each one has to be a
+// deliberate decision here. REVIEW used to be absent: it fell through to
+// pending_payment, which released the device back on sale and was then swept
+// away as an abandoned cart twelve hours later, while the customer could still
+// be charged.
+describe("merchantPost — every decision the gateway can send", () => {
+  const inventory = require("../src/services/inventory");
+
+  // What the atomic claim would produce for a given decision, so the branch
+  // after it is exercised with the status it will really see. The order is
+  // worth exactly what signedReply authorises, or the amount check would refuse
+  // to mark it paid and every decision would look the same.
+  const claimYields = (status, paid) => {
+    const order = {
+      _id: ORDER_ID,
+      email: "buyer@example.com",
+      line_items: [
+        { quantity: 1, price_data: { product_data: { name: "iPhone", metadata: { totalPaid: 1109.5 } } } },
+      ],
+    };
+    Order.findById.mockResolvedValue(order);
+    Order.findOneAndUpdate.mockResolvedValue({
+      ...order,
+      status,
+      paid,
+      boaTransactionUuid: "checkout-uuid",
+    });
+  };
+
+  const post = async (decision) => {
+    const res = makeRes();
+    await boa.merchantPost({ body: signedReply({ decision }) }, res, jest.fn());
+    await flushMicrotasks();
+    return res;
+  };
+
+  it("ACCEPT marks the order paid, sells the devices and sends one receipt", async () => {
+    claimYields("Processing", true);
+
+    const res = await post("ACCEPT");
+
+    expect(Order.findOneAndUpdate.mock.calls[0][1].$set.status).toBe("Processing");
+    expect(Order.findOneAndUpdate.mock.calls[0][1].$set.paid).toBe(true);
+    expect(eventTypes()).toContain("marked_paid");
+    expect(inventory.markSold).toHaveBeenCalled();
+    expect(inventory.releaseReservation).not.toHaveBeenCalled();
+    expect(mockSend).toHaveBeenCalled();
+    expect(res.sendStatus).toHaveBeenCalledWith(200);
+  });
+
+  it("REVIEW holds the devices instead of releasing them, and pays nothing", async () => {
+    claimYields("under_review", false);
+
+    const res = await post("REVIEW");
+
+    expect(Order.findOneAndUpdate.mock.calls[0][1].$set.status).toBe("under_review");
+    expect(Order.findOneAndUpdate.mock.calls[0][1].$set.paid).toBe(false);
+
+    // The whole point: the device stays off sale while a person at the bank
+    // decides. Releasing it here is what allowed the same phone to be sold
+    // twice, and the 20-minute hold expiring is why merely not releasing is
+    // not enough.
+    expect(inventory.holdForReview).toHaveBeenCalledWith("checkout-uuid");
+    expect(inventory.releaseReservation).not.toHaveBeenCalled();
+    expect(inventory.markSold).not.toHaveBeenCalled();
+
+    expect(eventTypes()).toContain("held_for_review");
+    expect(eventTypes()).not.toContain("marked_paid");
+    expect(mockSend).not.toHaveBeenCalled();
+    expect(res.sendStatus).toHaveBeenCalledWith(200);
+  });
+
+  it.each(["DECLINE", "ERROR", "CANCEL"])(
+    "%s frees the devices, pays nothing and still answers 200",
+    async (decision) => {
+      claimYields("payment failed", false);
+
+      const res = await post(decision);
+
+      expect(Order.findOneAndUpdate.mock.calls[0][1].$set.status).toBe("payment failed");
+      expect(inventory.releaseReservation).toHaveBeenCalledWith("checkout-uuid");
+      expect(inventory.holdForReview).not.toHaveBeenCalled();
+      expect(inventory.markSold).not.toHaveBeenCalled();
+      expect(eventTypes()).not.toContain("marked_paid");
+      expect(mockSend).not.toHaveBeenCalled();
+      expect(res.sendStatus).toHaveBeenCalledWith(200);
+    }
+  );
+
+  it("a decision we have never seen is reported, not quietly filed as failed", async () => {
+    claimYields("pending_payment", false);
+
+    const res = await post("SOMETHING_NEW");
+
+    // Guessing "failed" would free a device for a payment that may have gone
+    // through; guessing "paid" is worse. Leave it unsettled and say so.
+    expect(Order.findOneAndUpdate.mock.calls[0][1].$set.paid).toBe(false);
+    expect(eventTypes()).toContain("unknown_decision");
+    expect(eventOfType("unknown_decision").metadata.decision).toBe("SOMETHING_NEW");
+    expect(res.sendStatus).toHaveBeenCalledWith(200);
+  });
+});
+
+describe("merchantPost — a review that finishes", () => {
+  it("lets the bank's second message settle an order already under review", async () => {
+    // A review ends with a second confirmation carrying the real decision. The
+    // first one already filled in boaTransactionId, so on an unclaimed-only
+    // filter this follow-up looked like a duplicate and was dropped: the
+    // customer was charged and the order sat in review for ever.
+    Order.findById.mockResolvedValue({ _id: ORDER_ID, email: "buyer@example.com", line_items: [] });
+    Order.findOneAndUpdate.mockResolvedValue({
+      _id: ORDER_ID,
+      email: "buyer@example.com",
+      line_items: [],
+      status: "Processing",
+      paid: true,
+    });
+
+    const res = makeRes();
+    await boa.merchantPost({ body: signedReply({ decision: "ACCEPT" }) }, res, jest.fn());
+    await flushMicrotasks();
+
+    const [filter] = Order.findOneAndUpdate.mock.calls[0];
+    expect(filter.$or).toContainEqual({ status: "under_review" });
+    expect(eventTypes()).toContain("marked_paid");
+    expect(res.sendStatus).toHaveBeenCalledWith(200);
+  });
+
+  it("still refuses a second message for an order that is already settled", async () => {
+    Order.findById.mockResolvedValue({ _id: ORDER_ID, email: "buyer@example.com", line_items: [] });
+    // Neither branch of the claim matches: not unclaimed, not under review.
+    Order.findOneAndUpdate.mockResolvedValue(null);
+
+    const res = makeRes();
+    await boa.merchantPost({ body: signedReply() }, res, jest.fn());
+    await flushMicrotasks();
+
+    expect(eventTypes()).toContain("duplicate_confirmation");
+    expect(mockSend).not.toHaveBeenCalled();
+    expect(res.sendStatus).toHaveBeenCalledWith(200);
+  });
+});
+
+describe("paymentResponse — a reviewed customer is not told they are done", () => {
+  it("keeps a review off the order-confirmed page", async () => {
+    const res = makeRes();
+    await boa.paymentResponse({ body: signedReply({ decision: "REVIEW" }) }, res);
+
+    // "Order confirmed" is a promise the shop cannot take back if the bank
+    // later refuses the payment.
+    expect(res.redirectedTo).not.toContain("/succeed");
+    expect(res.redirectedTo).toContain("payment=review");
   });
 });
 

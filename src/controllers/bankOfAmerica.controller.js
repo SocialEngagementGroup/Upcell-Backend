@@ -4,6 +4,7 @@ const { scrubPayload } = require("../utils/scrubPayload");
 const {
   reserveVariations,
   releaseReservation,
+  holdForReview,
   markSold,
   variationIdsFromOrder,
 } = require("../services/inventory");
@@ -227,12 +228,29 @@ exports.preparePayment = async (req, res, next) => {
   }
 };
 
+// Every answer the gateway can give, each mapped deliberately.
+//
+// REVIEW was missing, and an unmapped decision fell through to
+// "pending_payment" — which meant a payment a person at the bank was still
+// checking released the device back on sale immediately and was then swept away
+// as an abandoned cart twelve hours later, while the customer could still be
+// charged. It needs a state of its own precisely because it is neither settled
+// nor abandoned.
 const DECISION_STATUS = {
   ACCEPT: "Processing",
+  REVIEW: "under_review",
   DECLINE: "payment failed",
   ERROR: "payment failed",
   CANCEL: "payment failed",
 };
+
+const REVIEW_STATUS = "under_review";
+const REVIEW_STATUS_DECISION = "REVIEW";
+
+// A decision the gateway has never sent us before. Treated as unsettled and
+// reported rather than guessed at — assuming "failed" would release a device
+// for a payment that may have succeeded, and assuming "paid" is worse.
+const UNKNOWN_DECISION_STATUS = "pending_payment";
 
 // Step 2. This is the only thing that marks an order paid — the customer's
 // browser coming back proves nothing, since anyone can request that URL.
@@ -310,7 +328,24 @@ exports.merchantPost = async (req, res, next) => {
       return res.sendStatus(200);
     }
 
-    let status = DECISION_STATUS[body.decision] || "pending_payment";
+    const knownDecision = Object.prototype.hasOwnProperty.call(
+      DECISION_STATUS,
+      body.decision
+    );
+
+    // A decision we have no mapping for is a gap in this handler, not a normal
+    // outcome. Silently filing it as pending is how it would stay a gap.
+    if (!knownDecision) {
+      logPaymentEvent({
+        gateway: GATEWAY,
+        eventType: "unknown_decision",
+        orderId: order._id,
+        gatewayReference: body.transaction_id,
+        metadata: { decision: body.decision ?? null, reason_code: body.reason_code },
+      });
+    }
+
+    let status = knownDecision ? DECISION_STATUS[body.decision] : UNKNOWN_DECISION_STATUS;
     let paid = status === "Processing";
 
     // Confirm the bank authorised what the order is actually worth before
@@ -342,8 +377,18 @@ exports.merchantPost = async (req, res, next) => {
     // and both sent the customer a receipt. The filter only matches an order
     // that has not been claimed yet, so exactly one writer wins — and in Mongo
     // `field: null` also matches documents where the field is absent.
+    //
+    // An order under review is claimable again, and it has to be. A review ends
+    // with the bank sending a second message carrying the real decision, and
+    // the first message already filled in boaTransactionId — so on the
+    // unclaimed-only filter that follow-up looked like a duplicate and was
+    // dropped. The customer would have been charged and the order left sitting
+    // in review for ever. Settled orders stay closed: only under_review reopens.
     const claimed = await Order.findOneAndUpdate(
-      { _id: order._id, boaTransactionId: { $in: [null, ""] } },
+      {
+        _id: order._id,
+        $or: [{ boaTransactionId: { $in: [null, ""] } }, { status: REVIEW_STATUS }],
+      },
       {
         $set: {
           status,
@@ -386,6 +431,25 @@ exports.merchantPost = async (req, res, next) => {
       });
       sendPaymentReceiptEmail(claimed);
       sendAdminNewOrderEmail(claimed);
+    } else if (claimed.status === REVIEW_STATUS) {
+      // Undecided, not refused. The customer may still be charged, so the
+      // devices stay held — but the ordinary hold runs out in twenty minutes
+      // and a person at the bank takes rather longer than that, so it is
+      // extended rather than merely left alone.
+      //
+      // No receipt: nothing has been paid yet. Nothing is marked sold either,
+      // because the review can still come back as a decline.
+      await holdForReview(claimed.boaTransactionUuid).catch((error) => {
+        console.error("[boa] failed to extend the review hold:", error);
+      });
+
+      logPaymentEvent({
+        gateway: GATEWAY,
+        eventType: "held_for_review",
+        orderId: claimed._id,
+        gatewayReference: body.transaction_id,
+        metadata: { reason_code: body.reason_code, message: body.message },
+      });
     } else {
       // A confirmed decline means these devices are free again. Waiting for the
       // hold to expire would keep sellable stock off the shop for no reason.
@@ -439,7 +503,15 @@ exports.paymentResponse = async (req, res) => {
 
   const orderId = referenceNumber;
 
-  if (DECISION_STATUS[body.decision] === "payment failed") {
+  // Only ACCEPT has actually taken the money, so only ACCEPT may see "Order
+  // confirmed." A review in particular must not: the bank is still deciding,
+  // and showing a confirmation for a payment that can still be refused is the
+  // kind of promise a shop cannot take back.
+  if (body.decision === REVIEW_STATUS_DECISION) {
+    return res.redirect(`${frontendUrl}/cart?payment=review`);
+  }
+
+  if (body.decision !== "ACCEPT") {
     return res.redirect(`${frontendUrl}/cart?payment=failed`);
   }
 

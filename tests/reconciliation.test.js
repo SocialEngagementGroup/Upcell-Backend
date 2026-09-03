@@ -269,3 +269,79 @@ describe("reconciliation — warnings", () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 });
+
+// A payment the bank is checking by hand holds its devices off sale for up to a
+// week, and nothing closes it automatically the way an abandoned cart is closed.
+// If the daily report stayed silent about it, the long hold would quietly cost
+// sales — naming them is what makes that hold safe to grant.
+describe("reconciliation — payments the bank is still reviewing", () => {
+  // Every check calls Order.find with a different question. Route by status so
+  // one under-review order does not also answer the stuck and unreferenced
+  // checks and produce three findings from one row.
+  const withOrdersByStatus = (byStatus) => {
+    Order.find.mockImplementation((query = {}) => {
+      const rows = query.status ? byStatus[query.status] || [] : byStatus.other || [];
+      return { lean: async () => rows, select: () => ({ lean: async () => rows }) };
+    });
+    Order.countDocuments.mockResolvedValue(0);
+    Order.updateMany.mockResolvedValue({ modifiedCount: 0 });
+  };
+
+  const reviewedOrder = (hoursAgo) => ({
+    _id: ORDER_ID,
+    email: "buyer@example.com",
+    updatedAt: new Date(Date.now() - hoursAgo * 60 * 60 * 1000),
+    line_items: [
+      { quantity: 1, price_data: { product_data: { metadata: { totalPaid: 1109.5 } } } },
+    ],
+  });
+
+  it("names an order sitting under review, with how long it has waited", async () => {
+    withOrdersByStatus({ under_review: [reviewedOrder(30)] });
+
+    const report = await runReconciliation();
+
+    expect(report.warnings).toHaveLength(1);
+    expect(report.warnings[0]).toContain(ORDER_ID);
+    expect(report.warnings[0]).toContain("30 hours");
+    expect(report.warnings[0]).toContain("$1109.50");
+    expect(report.clean).toBe(false);
+  });
+
+  it("says one hour without an s", async () => {
+    withOrdersByStatus({ under_review: [reviewedOrder(1)] });
+
+    const report = await runReconciliation();
+
+    expect(report.warnings[0]).toContain("for 1 hour.");
+  });
+
+  it("is a warning, not a critical — the money is not lost, only undecided", async () => {
+    withOrdersByStatus({ under_review: [reviewedOrder(5)] });
+
+    const report = await runReconciliation();
+
+    expect(report.critical).toHaveLength(0);
+    expect(report.warnings).toHaveLength(1);
+  });
+
+  it("stays quiet when nothing is under review", async () => {
+    withOrdersByStatus({});
+
+    const report = await runReconciliation();
+
+    expect(report.clean).toBe(true);
+  });
+
+  it("does not sweep a reviewed order away as an abandoned checkout", async () => {
+    // The sweep only ever touches pending_payment. An order under review has a
+    // status of its own precisely so this can never reach it — that sweep is
+    // what would otherwise have deleted it twelve hours in.
+    withOrdersByStatus({ under_review: [reviewedOrder(20)] });
+
+    await runReconciliation();
+
+    const sweptStatuses = Order.updateMany.mock.calls.map((call) => call[0].status);
+    expect(sweptStatuses).not.toContain("under_review");
+  });
+});

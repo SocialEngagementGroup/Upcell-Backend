@@ -2,6 +2,11 @@ const { Schema, model, models } = require("mongoose");
 
 const statusEnum = [
   "pending_payment",
+  // The bank answered REVIEW: a person there is checking the payment by hand.
+  // Distinct from pending_payment, which means the bank never answered at all.
+  // The difference matters because pending_payment orders get swept away as
+  // abandoned carts after 12 hours, and a payment under review must not be.
+  "under_review",
   "Processing",
   "Shipped",
   "Delivered",
