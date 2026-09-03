@@ -44,7 +44,19 @@ async function reserveVariations(ids, holder) {
   const until = new Date(now.getTime() + HOLD_MS);
   const taken = [];
 
-  for (const id of ids) {
+  // Accessories are stocked in quantity, not one at a time. Holding a case for
+  // one customer would stop everyone else buying one, and marking it sold after
+  // the first order would take it off sale entirely.
+  const stockable = await SingleVariation.find({
+    _id: { $in: ids },
+    isAccessory: { $ne: true },
+  })
+    .select("_id")
+    .lean();
+
+  const heldIds = new Set(stockable.map((item) => String(item._id)));
+
+  for (const id of ids.filter((id) => heldIds.has(String(id)))) {
     const claimed = await SingleVariation.findOneAndUpdate(
       { _id: id, ...isAvailableFilter(holder, now) },
       { $set: { reservedUntil: until, reservedFor: holder } },
@@ -103,7 +115,8 @@ async function markSold(ids) {
   if (!ids?.length) return 0;
 
   const result = await SingleVariation.updateMany(
-    { _id: { $in: ids } },
+    // Devices only. Selling one case must not take cases off the shop.
+    { _id: { $in: ids }, isAccessory: { $ne: true } },
     { $set: { outOfStock: true, reservedUntil: null, reservedFor: null } }
   );
 

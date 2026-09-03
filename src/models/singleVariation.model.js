@@ -20,6 +20,23 @@ const singleVariationSchema = new mongoose.Schema({
         default: false,
         index: true,
     },
+    // A case or screen protector rather than a device.
+    //
+    // Accessories are real products so the cart, checkout, tax and receipts all
+    // work on them without special cases — they were previously hard-coded in
+    // the frontend with invented ids, which the cart then silently discarded,
+    // so a customer was charged for the phone alone and told they had bought
+    // accessories they never received.
+    //
+    // Two things differ from a device. They are not browsable: the shop lists
+    // devices, and an accessory is offered on a device's own page. And they are
+    // not single units, so the stock hold that stops one phone selling twice
+    // does not apply — see services/inventory.js.
+    isAccessory: {
+        type: Boolean,
+        default: false,
+        index: true,
+    },
     // Held while a customer is away at the bank's payment page. Every device is
     // a single unit, so without this two people can both be authorised for the
     // same phone and one of them has to be refunded by hand.

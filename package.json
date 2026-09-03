@@ -10,7 +10,8 @@
     "dev": "nodemon index.js",
     "check-db": "node check-db.js",
     "reconcile": "node scripts/reconcile.js",
-    "clear-test-data": "node scripts/clear-test-data.js"
+    "clear-test-data": "node scripts/clear-test-data.js",
+    "seed-accessories": "node scripts/seed-accessories.js"
   },
   "engines": {
     "node": ">=20.9.0 <25.0.0"

@@ -17,6 +17,7 @@ const {
   deleteProduct,
   deleteProductFamily,
   getRepresentativeProducts,
+  getAccessories,
 } = require("../controllers/product.controller");
 
 router.get("/product", getProducts);
@@ -32,5 +33,7 @@ router.patch("/product/:id", verifyToken, requireAdmin, validateRequest(productS
 router.delete("/product/:id", verifyToken, requireAdmin, deleteProduct);
 router.delete("/product-family/:parentId", verifyToken, requireAdmin, deleteProductFamily);
 router.get("/all-products-single-variation", getRepresentativeProducts);
+// Public: the add-ons shown on a product page.
+router.get("/accessories", getAccessories);
 
 module.exports = router;

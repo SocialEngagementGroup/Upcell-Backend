@@ -10,6 +10,7 @@ const {
 
 const PHONE_A = "68b59c07d4a1e2b8c3f10a51";
 const PHONE_B = "68b59c07d4a1e2b8c3f10a52";
+const CASE = "6a993469be5e6e2340492b33";
 
 // findOneAndUpdate(...).lean() — the claim. Returns the doc when the filter
 // matched (we won), null when it did not (someone else holds it, or it is sold).
@@ -19,8 +20,21 @@ const claimReturns = (byId) => {
   }));
 };
 
+// Before claiming anything, reserveVariations asks which of these ids are
+// stock-controlled devices — accessories are stocked in quantity and must not
+// be held for one customer. Unless a test says otherwise, everything it passes
+// in is a device.
+const stockableIsEverything = () => {
+  SingleVariation.find.mockImplementation((filter) => ({
+    select: () => ({
+      lean: async () => (filter._id?.$in || []).map((_id) => ({ _id })),
+    }),
+  }));
+};
+
 beforeEach(() => {
   jest.clearAllMocks();
+  stockableIsEverything();
   SingleVariation.updateMany.mockResolvedValue({ modifiedCount: 0 });
   SingleVariation.findById.mockReturnValue({
     select: () => ({ lean: async () => ({ productName: "iPhone 13" }) }),
@@ -119,7 +133,7 @@ describe("taking a device off sale once paid", () => {
     await markSold([PHONE_A, PHONE_B]);
 
     expect(SingleVariation.updateMany).toHaveBeenCalledWith(
-      { _id: { $in: [PHONE_A, PHONE_B] } },
+      { _id: { $in: [PHONE_A, PHONE_B] }, isAccessory: { $ne: true } },
       { $set: { outOfStock: true, reservedUntil: null, reservedFor: null } }
     );
   });
@@ -127,6 +141,59 @@ describe("taking a device off sale once paid", () => {
   it("does nothing for an empty list", async () => {
     await markSold([]);
     expect(SingleVariation.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("leaves accessories on sale", async () => {
+    // Cases and screen protectors are stocked in quantity. Taking one off sale
+    // because somebody bought one would empty the shelf after a single order.
+    await markSold([PHONE_A, CASE]);
+
+    const [filter] = SingleVariation.updateMany.mock.calls[0];
+    expect(filter.isAccessory).toEqual({ $ne: true });
+  });
+});
+
+describe("accessories are not held like devices", () => {
+  // Every device is one physical unit, so it is reserved for the customer who
+  // reached checkout first. An accessory is not: holding the one Clear Case row
+  // for one customer would stop everybody else buying a case at all.
+  const onlyPhoneIsStockable = () => {
+    SingleVariation.find.mockImplementation(() => ({
+      select: () => ({ lean: async () => [{ _id: PHONE_A }] }),
+    }));
+  };
+
+  it("claims the device and leaves the accessory alone", async () => {
+    onlyPhoneIsStockable();
+    claimReturns({});
+
+    const result = await reserveVariations([PHONE_A, CASE], "checkout-4");
+
+    expect(result.ok).toBe(true);
+    expect(SingleVariation.findOneAndUpdate).toHaveBeenCalledTimes(1);
+    expect(SingleVariation.findOneAndUpdate.mock.calls[0][0]._id).toBe(PHONE_A);
+  });
+
+  it("asks only for stock-controlled rows", async () => {
+    onlyPhoneIsStockable();
+    claimReturns({});
+
+    await reserveVariations([PHONE_A, CASE], "checkout-5");
+
+    const [filter] = SingleVariation.find.mock.calls[0];
+    expect(filter.isAccessory).toEqual({ $ne: true });
+  });
+
+  it("succeeds for a cart of accessories alone", async () => {
+    SingleVariation.find.mockImplementation(() => ({
+      select: () => ({ lean: async () => [] }),
+    }));
+    claimReturns({});
+
+    const result = await reserveVariations([CASE], "checkout-6");
+
+    expect(result.ok).toBe(true);
+    expect(SingleVariation.findOneAndUpdate).not.toHaveBeenCalled();
   });
 });
 

@@ -2,6 +2,12 @@ const ParentProduct = require("../models/parentProduct.model");
 const SingleVariation = require("../models/singleVariation.model");
 const AvailableCatagories = require("../models/availableCategory.model");
 
+// The shop sells devices. Accessories are real products so the cart and
+// checkout work on them, but they are offered on a device's own page and
+// must never appear in a listing, a search, a filter, or as a variant of a
+// phone. Lookups by id deliberately do not use this.
+const BROWSABLE = { isAccessory: { $ne: true } };
+
 const productCardFields = "parentCatagory productName categoryName description storage color price image outOfStock";
 
 const normalizeProductCard = (product) => ({
@@ -86,7 +92,7 @@ async function getProduct(req, res, next) {
 async function getProductsByParent(req, res, next) {
   try {
     const id = req.params.parentId;
-    const product = await SingleVariation.find({ parentCatagory: id }).lean();
+    const product = await SingleVariation.find({ parentCatagory: id, ...BROWSABLE }).lean();
     res.status(200).json(product);
   } catch (error) {
     next(error);
@@ -95,7 +101,7 @@ async function getProductsByParent(req, res, next) {
 
 async function getShopProducts(req, res, next) {
   try {
-    const products = await SingleVariation.find({}, productCardFields)
+    const products = await SingleVariation.find(BROWSABLE, productCardFields)
       .sort({ outOfStock: 1, price: 1 })
       .lean();
 
@@ -108,7 +114,9 @@ async function getShopProducts(req, res, next) {
 async function getRecommendedProducts(req, res, next) {
   try {
     const { excludeParentId, limit = 4 } = req.query;
-    const query = excludeParentId ? { parentCatagory: { $ne: excludeParentId } } : {};
+    const query = excludeParentId
+      ? { parentCatagory: { $ne: excludeParentId }, ...BROWSABLE }
+      : { ...BROWSABLE };
     const maxResults = Math.min(Number(limit) || 4, 12);
 
     const products = await SingleVariation.find(query, productCardFields)
@@ -138,6 +146,7 @@ async function searchProducts(req, res, next) {
 
     const result = await SingleVariation.find({
       $or: [{ productName: { $regex: regex } }],
+      ...BROWSABLE,
     }).lean();
 
     res.status(200).json(result);
@@ -156,7 +165,7 @@ async function getProductSuggestions(req, res, next) {
 
     // Light projection + sorted so the best representative (in-stock, cheapest) comes first.
     const matches = await SingleVariation.find(
-      { $or: [{ productName: regex }, { categoryName: regex }] },
+      { $or: [{ productName: regex }, { categoryName: regex }], ...BROWSABLE },
       "productName parentCatagory categoryName image price outOfStock"
     )
       .sort({ outOfStock: 1, price: 1 })
@@ -204,6 +213,7 @@ async function getFilteredProducts(req, res, next) {
       "color.name": color.length ? { $in: color } : { $exists: true },
       condition: condition.length ? { $in: condition } : { $exists: true },
       price: { $gte: price[0], $lte: price[1] },
+      ...BROWSABLE,
     };
 
     const products = await SingleVariation.find(searchQuery)
@@ -348,6 +358,24 @@ async function deleteProductFamily(req, res, next) {
   }
 }
 
+// The accessories offered alongside a device on its product page. Returned as
+// real products with real ids, so adding one to the cart goes through exactly
+// the same path as adding a phone — no special handling anywhere downstream.
+async function getAccessories(req, res, next) {
+  try {
+    const accessories = await SingleVariation.find(
+      { isAccessory: true, outOfStock: { $ne: true } },
+      "productName description price image storage color condition"
+    )
+      .sort({ price: 1 })
+      .lean();
+
+    res.status(200).json(accessories);
+  } catch (error) {
+    next(error);
+  }
+}
+
 async function getRepresentativeProducts(req, res, next) {
   try {
     const availCatagoriesData = await AvailableCatagories.find();
@@ -380,5 +408,6 @@ module.exports = {
   deleteProduct,
   deleteProductFamily,
   getRepresentativeProducts,
+  getAccessories,
 };
 

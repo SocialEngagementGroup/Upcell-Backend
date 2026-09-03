@@ -130,10 +130,18 @@ describe("fields sent to the gateway — reason code 102 causes", () => {
 
   beforeEach(() => {
     const SingleVariation = require("../src/models/singleVariation.model");
-    SingleVariation.find.mockResolvedValue([
-      { _id: "68b59c07d4a1e2b8c3f10a51", price: 100, productName: "iPhone",
-        color: { name: "Black" }, condition: "Good", storage: "128GB", image: "/x.png" },
-    ]);
+    const device = {
+      _id: "68b59c07d4a1e2b8c3f10a51", price: 100, productName: "iPhone",
+      color: { name: "Black" }, condition: "Good", storage: "128GB", image: "/x.png",
+    };
+    // A mongoose query is both awaitable and chainable. Building the order
+    // awaits find() directly; holding the device narrows it with
+    // .select().lean() first, to skip accessories.
+    SingleVariation.find.mockImplementation(() => ({
+      select: () => ({ lean: async () => [device] }),
+      lean: async () => [device],
+      then: (resolve, reject) => Promise.resolve([device]).then(resolve, reject),
+    }));
     // preparePayment now holds each device before handing the customer over,
     // so the claim has to succeed for these field-formatting tests to reach
     // the point where the signed fields are built.
