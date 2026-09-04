@@ -1,5 +1,6 @@
 const router = require("express").Router();
 const { verifyToken, requireAdmin } = require("../middleware/auth.middleware");
+const { validateObjectIdParam } = require("../middleware/validateObjectId.middleware");
 const {
   getAdminNotifications,
   getUnreadNotificationCount,
@@ -13,6 +14,12 @@ router.get(
   requireAdmin,
   getUnreadNotificationCount
 );
-router.patch("/admin-notifications/:id/read", verifyToken, requireAdmin, markNotificationRead);
+router.patch(
+  "/admin-notifications/:id/read",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  markNotificationRead
+);
 
 module.exports = router;

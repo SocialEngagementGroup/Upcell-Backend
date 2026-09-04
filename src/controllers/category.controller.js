@@ -51,16 +51,6 @@ async function getAvailableCategories(req, res, next) {
   }
 }
 
-async function makeAvailableCategories(req, res, next) {
-  try {
-    const ctg = new AvailableCatagories({ categories: [] });
-    await ctg.save();
-    res.status(200).json(ctg);
-  } catch (error) {
-    next(error);
-  }
-}
-
 async function createCategory(req, res, next) {
   const { modelName, description, images } = req.body;
 
@@ -125,7 +115,6 @@ module.exports = {
   getCategoryById,
   getShopCategories,
   getAvailableCategories,
-  makeAvailableCategories,
   createCategory,
   createShopCategory,
   updateCategory,

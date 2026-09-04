@@ -1,6 +1,7 @@
 const router = require("express").Router();
 const { verifyToken, requireAdmin } = require("../middleware/auth.middleware");
 const { validateRequest } = require("../middleware/validate.middleware");
+const { validateObjectIdParam } = require("../middleware/validateObjectId.middleware");
 const { cartLimiter } = require("../middleware/rateLimit.middleware");
 const { productCreateSchema, productSchema, productFilterSchema } = require("../schemas/request.schemas");
 const {
@@ -23,14 +24,21 @@ const {
 router.get("/product", getProducts);
 router.get("/products/shop", getShopProducts);
 router.get("/products/recommended", getRecommendedProducts);
-router.get("/product/:id", getProduct);
+router.get("/product/:id", validateObjectIdParam(), getProduct);
 router.get("/allSameParentProducts/:parentId", getProductsByParent);
 router.get("/searchproducts", searchProducts);
 router.get("/products/suggest", getProductSuggestions);
 router.post("/products/:n/:skip", cartLimiter, validateRequest(productFilterSchema), getFilteredProducts);
 router.post("/product", verifyToken, requireAdmin, validateRequest(productCreateSchema), createProduct);
-router.patch("/product/:id", verifyToken, requireAdmin, validateRequest(productSchema.partial()), updateProduct);
-router.delete("/product/:id", verifyToken, requireAdmin, deleteProduct);
+router.patch(
+  "/product/:id",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  validateRequest(productSchema.partial()),
+  updateProduct
+);
+router.delete("/product/:id", verifyToken, requireAdmin, validateObjectIdParam(), deleteProduct);
 router.delete("/product-family/:parentId", verifyToken, requireAdmin, deleteProductFamily);
 router.get("/all-products-single-variation", getRepresentativeProducts);
 // Public: the add-ons shown on a product page.

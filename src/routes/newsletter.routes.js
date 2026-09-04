@@ -2,6 +2,7 @@ const router = require("express").Router();
 const { verifyToken, requireAdmin } = require("../middleware/auth.middleware");
 const { validateRequest } = require("../middleware/validate.middleware");
 const { publicFormLimiter } = require("../middleware/rateLimit.middleware");
+const { validateObjectIdParam } = require("../middleware/validateObjectId.middleware");
 const { newsletterSubscriberSchema } = require("../schemas/request.schemas");
 const {
   createNewsletterSubscriber,
@@ -17,7 +18,19 @@ router.post(
   createNewsletterSubscriber
 );
 router.get("/admin-newsletter-subscribers/:filter", verifyToken, requireAdmin, getAdminNewsletterSubscribers);
-router.patch("/newsletter-subscribers/:id/status", verifyToken, requireAdmin, updateNewsletterStatus);
-router.delete("/newsletter-subscribers/:id", verifyToken, requireAdmin, deleteNewsletterSubscriber);
+router.patch(
+  "/newsletter-subscribers/:id/status",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  updateNewsletterStatus
+);
+router.delete(
+  "/newsletter-subscribers/:id",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  deleteNewsletterSubscriber
+);
 
 module.exports = router;

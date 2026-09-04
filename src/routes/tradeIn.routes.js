@@ -2,6 +2,7 @@ const router = require("express").Router();
 const { verifyToken, requireAdmin } = require("../middleware/auth.middleware");
 const { validateRequest } = require("../middleware/validate.middleware");
 const { publicFormLimiter } = require("../middleware/rateLimit.middleware");
+const { validateObjectIdParam } = require("../middleware/validateObjectId.middleware");
 const { tradeInRequestSchema } = require("../schemas/request.schemas");
 const {
   createTradeInRequest,
@@ -17,7 +18,13 @@ router.post(
   createTradeInRequest
 );
 router.get("/admin-trade-in-requests/:status", verifyToken, requireAdmin, getAdminTradeInRequests);
-router.patch("/trade-in-requests/:id/status", verifyToken, requireAdmin, updateTradeInStatus);
-router.delete("/trade-in-requests/:id", verifyToken, requireAdmin, deleteTradeInRequest);
+router.patch(
+  "/trade-in-requests/:id/status",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  updateTradeInStatus
+);
+router.delete("/trade-in-requests/:id", verifyToken, requireAdmin, validateObjectIdParam(), deleteTradeInRequest);
 
 module.exports = router;

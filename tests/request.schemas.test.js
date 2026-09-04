@@ -9,6 +9,8 @@ const {
   newsletterSubscriberSchema,
   contactSubmissionSchema,
   analyticsEventSchema,
+  monthlySellSchema,
+  cartLookupSchema,
 } = require("../src/schemas/request.schemas");
 
 describe("productFilterSchema (NoSQL injection fix — POST /products/:n/:skip)", () => {
@@ -597,5 +599,47 @@ describe("analyticsEventSchema — enums and nested metadata record", () => {
   it("rejects a missing required name", () => {
     const { name: _omit, ...rest } = base;
     expect(() => analyticsEventSchema.parse(rest)).toThrow();
+  });
+});
+
+describe("monthlySellSchema (NoSQL injection fix — POST /monthly-sell)", () => {
+  it("accepts a well-formed name and amount", () => {
+    const result = monthlySellSchema.parse({ name: "gt-sells", amount: 1234.5 });
+    expect(result).toEqual({ name: "gt-sells", amount: 1234.5 });
+  });
+
+  it("rejects an operator object in place of name (the actual injection vector)", () => {
+    // Before the fix, name went straight into MonthlySell.findOne({ name }) —
+    // an object like this would have been interpreted as a query operator.
+    expect(() => monthlySellSchema.parse({ name: { $ne: null }, amount: 1 })).toThrow();
+  });
+
+  it("rejects a non-numeric amount", () => {
+    expect(() => monthlySellSchema.parse({ name: "gt-sells", amount: "not a number" })).toThrow();
+  });
+
+  it("rejects a blank name", () => {
+    expect(() => monthlySellSchema.parse({ name: "   ", amount: 1 })).toThrow();
+  });
+});
+
+describe("cartLookupSchema (POST /cart)", () => {
+  it("accepts a list of well-formed product ids", () => {
+    const result = cartLookupSchema.parse({ ids: ["6a79f7298341f33d9a65b0b7"] });
+    expect(result.ids).toEqual(["6a79f7298341f33d9a65b0b7"]);
+  });
+
+  it("defaults to an empty list when ids is omitted", () => {
+    expect(cartLookupSchema.parse({}).ids).toEqual([]);
+  });
+
+  it("rejects a malformed id instead of letting it reach Mongo as a bad $in entry", () => {
+    expect(() => cartLookupSchema.parse({ ids: ["not-an-object-id"] })).toThrow();
+  });
+
+  it("rejects ids that isn't an array at all", () => {
+    // The original bug: a non-array ids throws an unhandled CastError deep in
+    // the driver, which the global handler turns into a 500.
+    expect(() => cartLookupSchema.parse({ ids: { $ne: null } })).toThrow();
   });
 });

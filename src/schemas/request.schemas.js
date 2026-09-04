@@ -230,6 +230,26 @@ const analyticsEventSchema = z.object({
   metadata: z.record(z.string(), z.any()).optional().default({}),
 });
 
+// ids went straight into SingleVariation.find({ _id: { $in: ids || [] } })
+// with no shape check. A Mongo operator object can't smuggle itself in
+// through an array element of $in, so this was never truly exploitable — but
+// a non-array ids (an object, a bare string) throws a CastError with no
+// .status, which the global handler turns into a 500 and pages the admin
+// over what is really just a malformed request.
+const cartLookupSchema = z.object({
+  ids: z.array(z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid product id")).default([]),
+});
+
+// name was being read straight into a Mongo filter (MonthlySell.findOne({
+// name })) with no shape check — a non-string value (an object such as
+// {"$ne": null}) would be interpreted as a query operator rather than a
+// literal to match. Admin-only, so not attacker-reachable from outside, but
+// a real injection pattern regardless of who can trigger it.
+const monthlySellSchema = z.object({
+  name: trimmedString("Name", 1, 60),
+  amount: z.number().finite("Amount must be a number"),
+});
+
 module.exports = {
   US_STATE_CODES,
   categorySchema,
@@ -243,4 +263,6 @@ module.exports = {
   contactSubmissionSchema,
   analyticsEventSchema,
   refundSchema,
+  monthlySellSchema,
+  cartLookupSchema,
 };
