@@ -2,6 +2,7 @@
 // on 2025-01-10 and no longer receives security patches.
 // Aliased on import because this module exports its own verifyToken middleware.
 const { clerkClient, verifyToken: verifyClerkToken } = require("@clerk/express");
+const { adminLimiter } = require("./rateLimit.middleware");
 
 // clerkClient picks CLERK_SECRET_KEY up from the environment on its own, but
 // verifyToken() does NOT — called without an explicit secretKey it throws a
@@ -71,12 +72,22 @@ const verifyToken = async (req, res, next) => {
   }
 };
 
+// Rate-limited here, once, rather than added to each of the 16 route files
+// individually — requireAdmin already runs on every single admin-gated route
+// with zero exceptions (confirmed 2026-09-04), so this is the one place that
+// guarantees coverage without relying on every future route remembering to
+// add it. Not meant to catch normal admin usage — see adminLimiter's own
+// comment for why 300/15min was chosen.
 const requireAdmin = (req, res, next) => {
-  if (req.user?.role !== "admin") {
-    return res.status(403).json({ error: "Forbidden" });
-  }
+  adminLimiter(req, res, (err) => {
+    if (err) return next(err);
 
-  next();
+    if (req.user?.role !== "admin") {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    next();
+  });
 };
 
 const optionalAuth = async (req, res, next) => {
