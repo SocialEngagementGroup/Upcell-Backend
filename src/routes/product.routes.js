@@ -6,11 +6,11 @@ const { cartLimiter } = require("../middleware/rateLimit.middleware");
 const { productCreateSchema, productSchema, productFilterSchema } = require("../schemas/request.schemas");
 const {
   getProducts,
+  getAdminProducts,
   getProduct,
   getProductsByParent,
   getShopProducts,
   getRecommendedProducts,
-  searchProducts,
   getProductSuggestions,
   getFilteredProducts,
   createProduct,
@@ -22,11 +22,12 @@ const {
 } = require("../controllers/product.controller");
 
 router.get("/product", getProducts);
+// AllProduct/AddProduct's own lean data source — see getAdminProducts.
+router.get("/admin-products", verifyToken, requireAdmin, getAdminProducts);
 router.get("/products/shop", getShopProducts);
 router.get("/products/recommended", getRecommendedProducts);
 router.get("/product/:id", validateObjectIdParam(), getProduct);
 router.get("/allSameParentProducts/:parentId", getProductsByParent);
-router.get("/searchproducts", searchProducts);
 router.get("/products/suggest", getProductSuggestions);
 router.post("/products/:n/:skip", cartLimiter, validateRequest(productFilterSchema), getFilteredProducts);
 router.post("/product", verifyToken, requireAdmin, validateRequest(productCreateSchema), createProduct);

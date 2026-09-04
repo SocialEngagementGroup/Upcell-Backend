@@ -10,6 +10,15 @@ const BROWSABLE = { isAccessory: { $ne: true } };
 
 const productCardFields = "parentCatagory productName categoryName description storage color price image outOfStock";
 
+// The fields the admin product-management pages (AllProduct, AddProduct)
+// actually render or edit — confirmed by grepping SingleProductGroup.jsx and
+// ProductBatchForm.jsx field-by-field, not assumed. Deliberately includes
+// discountPrice/originalPrice, which the customer-facing productCardFields
+// above does not, and deliberately has no BROWSABLE filter — staff manage
+// accessory pricing/stock here too, unlike the public shop listing.
+const adminProductFields =
+  "parentCatagory productName categoryName storage color price discountPrice originalPrice outOfStock image";
+
 const normalizeProductCard = (product) => ({
   ...product,
   _id: String(product._id),
@@ -79,6 +88,22 @@ async function getProducts(req, res) {
   res.json(allProduct);
 }
 
+// AllProduct and AddProduct both need the entire catalog in memory for
+// instant client-side search and duplicate-name detection while typing — the
+// same reasoning that kept the shop page's own filtering client-side (see
+// getShopProducts). This is that same fix applied here: same ungrouped,
+// unfiltered variation list, only the fields these two admin pages actually
+// use. No BROWSABLE filter — unlike the public shop, admin tooling must
+// still manage accessory pricing and stock.
+async function getAdminProducts(req, res, next) {
+  try {
+    const products = await SingleVariation.find({}, adminProductFields).lean();
+    res.status(200).json(products);
+  } catch (error) {
+    next(error);
+  }
+}
+
 async function getProduct(req, res, next) {
   try {
     const id = req.params.id;
@@ -99,13 +124,19 @@ async function getProductsByParent(req, res, next) {
   }
 }
 
+// Deliberately returns individual variations, not grouped cards — grouping,
+// filtering and search are the shop page's own job, done client-side against
+// this same data, so results stay instant with no network round trip per
+// click. This endpoint's only job is to hand that page a small enough
+// payload to start with: only the fields a listing card needs, browsable
+// products only, no accessories. See Frontend/src/pages/Shop/ShopPage.jsx.
 async function getShopProducts(req, res, next) {
   try {
     const products = await SingleVariation.find(BROWSABLE, productCardFields)
       .sort({ outOfStock: 1, price: 1 })
       .lean();
 
-    res.status(200).json(groupProductCards(products));
+    res.status(200).json(products);
   } catch (error) {
     next(error);
   }
@@ -124,32 +155,6 @@ async function getRecommendedProducts(req, res, next) {
       .lean();
 
     res.status(200).json(groupProductCards(products).slice(0, maxResults));
-  } catch (error) {
-    next(error);
-  }
-}
-
-async function searchProducts(req, res, next) {
-  const query = req.query.search;
-
-  if (!query) return res.status(200).json([]);
-
-  const searchTerms = query.split(" ");
-
-  try {
-    const filterredWord = searchTerms
-      .filter((word) => !/^iphone$/i.test(word))
-      .join(" ");
-
-    const escaped = filterredWord.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const regex = new RegExp(escaped, "i");
-
-    const result = await SingleVariation.find({
-      $or: [{ productName: { $regex: regex } }],
-      ...BROWSABLE,
-    }).lean();
-
-    res.status(200).json(result);
   } catch (error) {
     next(error);
   }
@@ -396,11 +401,11 @@ async function getRepresentativeProducts(req, res, next) {
 
 module.exports = {
   getProducts,
+  getAdminProducts,
   getProduct,
   getProductsByParent,
   getShopProducts,
   getRecommendedProducts,
-  searchProducts,
   getProductSuggestions,
   getFilteredProducts,
   createProduct,

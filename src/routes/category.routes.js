@@ -5,6 +5,7 @@ const { validateObjectIdParam } = require("../middleware/validateObjectId.middle
 const { categorySchema } = require("../schemas/request.schemas");
 const {
   getCategories,
+  getCategoriesWithProductCounts,
   getCategoryById,
   getShopCategories,
   getAvailableCategories,
@@ -17,6 +18,10 @@ const {
 } = require("../controllers/category.controller");
 
 router.get("/catagory", getCategories);
+// Admin-only: the categories page's own data source, with variant counts
+// computed server-side instead of the admin panel fetching every variation
+// in the catalog just to count them (see getCategoriesWithProductCounts).
+router.get("/admin-catagory-counts", verifyToken, requireAdmin, getCategoriesWithProductCounts);
 router.get("/catagory/:id", validateObjectIdParam(), getCategoryById);
 router.get("/shop-categories", getShopCategories);
 router.get("/available-catagories", getAvailableCategories);
