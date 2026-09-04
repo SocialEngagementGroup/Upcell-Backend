@@ -3,6 +3,7 @@
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
+const compression = require("compression");
 const routes = require("./routes");
 const { corsOptions } = require("./config/cors");
 const { errorHandler } = require("./middleware/error.middleware");
@@ -42,6 +43,15 @@ app.use(
     frameguard: { action: "deny" },
   })
 );
+
+// This API's biggest responses are plain JSON arrays (the product catalog),
+// and JSON compresses very well — often 70-85% smaller. Transparent to every
+// route and controller: it wraps the outgoing response, changes nothing about
+// what any handler sends, and only activates when the client's own
+// Accept-Encoding header says it can decode gzip (every browser does; a bare
+// `http.request()` with no such header, like this project's own security
+// header tests, is served uncompressed exactly as before).
+app.use(compression());
 
 // The payment gateway's callbacks arrive as cross-site form POSTs from the
 // bank's own domain, so they carry an Origin header our allow-list will never
