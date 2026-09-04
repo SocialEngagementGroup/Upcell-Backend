@@ -204,6 +204,66 @@ describe("makeOrderObjAndTotal — server-side pricing (the core anti-tampering 
     expect(totalPrice).toBe(999 + taxOnGoods(999) + expectedShippingCost);
   });
 
+  it("dual-writes the new items/*Cents shape alongside the legacy line_items", async () => {
+    // Migration in progress (Backend/src/utils/orderItems.js) — new orders
+    // carry both shapes, computed by the one shared conversion function
+    // rather than reimplemented here.
+    SingleVariation.find.mockResolvedValue([dbProduct]);
+    const req = { body: { orders: ["prod1"], shipping: "standard" } };
+
+    const { order, totalPrice } = await checkout.makeOrderObjAndTotal({ req, paidWith: "BankOfAmerica" });
+
+    expect(order.items).toEqual([
+      expect.objectContaining({
+        productId: "prod1",
+        name: "iPhone 15",
+        quantity: 1,
+        unitPriceCents: 99900,
+        lineTotalCents: 99900,
+      }),
+    ]);
+    expect(order.taxCents).toBe(Math.round(taxOnGoods(999) * 100));
+    expect(order.shippingCents).toBe(0);
+    expect(order.subtotalCents).toBe(99900);
+    expect(order.totalCents).toBe(Math.round(totalPrice * 100));
+  });
+
+  it("puts shipping in shippingCents, not folded into an item", async () => {
+    SingleVariation.find.mockResolvedValue([dbProduct]);
+    const req = { body: { orders: ["prod1"], shipping: "priority" } };
+
+    const { order } = await checkout.makeOrderObjAndTotal({ req, paidWith: "BankOfAmerica" });
+
+    expect(order.shippingCents).toBe(1050);
+    expect(order.items).toHaveLength(1); // shipping is not a second "item"
+  });
+
+  describe("orderTotal", () => {
+    it("prefers the stored totalCents over summing line_items live", () => {
+      // Deliberately mismatched from line_items, to prove which one wins —
+      // totalCents is the immutable figure computed once at checkout time.
+      const order = {
+        totalCents: 107892,
+        line_items: [
+          { price_data: { product_data: { metadata: { totalPaid: 1 } } } },
+        ],
+      };
+
+      expect(checkout.orderTotal(order)).toBe(1078.92);
+    });
+
+    it("falls back to summing line_items for an order that predates totalCents", () => {
+      const order = {
+        line_items: [
+          { price_data: { product_data: { metadata: { totalPaid: 999 } } } },
+          { price_data: { product_data: { metadata: { totalPaid: 79.92 } } } },
+        ],
+      };
+
+      expect(checkout.orderTotal(order)).toBe(1078.92);
+    });
+  });
+
   it("stamps the authenticated account onto the order", async () => {
     SingleVariation.find.mockResolvedValue([dbProduct]);
     const req = {

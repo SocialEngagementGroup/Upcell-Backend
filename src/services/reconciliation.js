@@ -1,7 +1,7 @@
 const Order = require("../models/order.model");
 const PaymentEventLog = require("../models/paymentEventLog.model");
 const { sendOpsAlert } = require("./alertService");
-const { logPaymentEvent } = require("../controllers/checkout.controller");
+const { logPaymentEvent, orderTotal } = require("../controllers/checkout.controller");
 
 // The safety net. Until now nothing checked whether what the bank did matches
 // what the shop recorded — a payment taken with no order behind it would have
@@ -31,11 +31,11 @@ const STUCK_AFTER_MS = 1 * HOUR;
 const ABANDONED_AFTER_MS = 12 * HOUR;
 
 const money = (value) => `$${Number(value || 0).toFixed(2)}`;
-const orderTotal = (order) =>
-  (order?.line_items || []).reduce(
-    (sum, item) => sum + (item?.price_data?.product_data?.metadata?.totalPaid || 0),
-    0
-  );
+// orderTotal used to be defined twice — once here, once in
+// checkout.controller.js, both walking line_items independently. Now there
+// is one definition, imported above, which also means this report benefits
+// for free from preferring the stored totalCents over a live recomputation
+// (see Backend/src/utils/orderItems.js).
 
 /**
  * Close checkouts the customer started and walked away from, so they stop

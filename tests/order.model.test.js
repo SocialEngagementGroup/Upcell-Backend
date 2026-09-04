@@ -36,3 +36,43 @@ describe("Order schema — amount and decision fields", () => {
     expect(order.currency).toBe("USD");
   });
 });
+
+describe("Order schema — the new items/cents shape (migration target)", () => {
+  it("has the new top-level cents fields alongside the legacy line_items", () => {
+    const paths = Order.schema.paths;
+
+    expect(paths.line_items).toBeDefined(); // not removed yet — see Chunk 7
+    expect(paths.items).toBeDefined();
+    expect(paths.shippingCents).toBeDefined();
+    expect(paths.taxCents).toBeDefined();
+    expect(paths.subtotalCents).toBeDefined();
+    expect(paths.totalCents).toBeDefined();
+  });
+
+  it("requires the fields a real item needs, so a malformed one fails loudly instead of saving silently", () => {
+    const order = new Order({ items: [{ name: "Missing productId and price" }] });
+    const error = order.validateSync();
+
+    expect(error).toBeDefined();
+    expect(error.errors["items.0.productId"]).toBeDefined();
+    expect(error.errors["items.0.unitPriceCents"]).toBeDefined();
+    expect(error.errors["items.0.lineTotalCents"]).toBeDefined();
+  });
+
+  it("accepts a well-formed item", () => {
+    const order = new Order({
+      items: [
+        {
+          productId: "6a271d2e72b1c0791a38e27d",
+          name: "iPhone 17e",
+          quantity: 5,
+          unitPriceCents: 89900,
+          lineTotalCents: 449500,
+        },
+      ],
+    });
+
+    expect(order.validateSync()).toBeUndefined();
+    expect(order.items[0].lineTotalCents).toBe(449500);
+  });
+});

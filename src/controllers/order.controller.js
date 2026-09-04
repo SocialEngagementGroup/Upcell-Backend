@@ -122,11 +122,21 @@ async function getAdminOrdersByDate(req, res, next) {
     const summarise = async (range) => {
       const [result] = await Order.aggregate([
         { $match: { paid: true, createdAt: range } },
-        { $unwind: "$line_items" },
+        // Prefers the stored totalCents (see Backend/src/utils/orderItems.js)
+        // over re-summing line_items — orders that predate it fall back to
+        // the same live sum this pipeline always did. No $unwind/regroup
+        // needed either way: Mongo's dot-notation through an array of
+        // subdocuments already yields an array of totalPaid values, which
+        // $sum totals directly.
         {
-          $group: {
-            _id: "$_id",
-            orderTotal: { $sum: "$line_items.price_data.product_data.metadata.totalPaid" },
+          $addFields: {
+            orderTotal: {
+              $cond: [
+                { $ifNull: ["$totalCents", false] },
+                { $divide: ["$totalCents", 100] },
+                { $sum: "$line_items.price_data.product_data.metadata.totalPaid" },
+              ],
+            },
           },
         },
         { $group: { _id: null, amount: { $sum: 1 }, money: { $sum: "$orderTotal" } } },

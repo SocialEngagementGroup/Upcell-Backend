@@ -88,8 +88,20 @@ async function getPaymentSummary(req, res, next) {
       Order.countDocuments({ paidWith: "BankOfAmerica", status: "payment failed", createdAt: { $gte: since } }),
       Order.aggregate([
         { $match: { paidWith: "BankOfAmerica", paid: true, createdAt: { $gte: since } } },
-        { $unwind: "$line_items" },
-        { $group: { _id: null, total: { $sum: "$line_items.price_data.product_data.metadata.totalPaid" } } },
+        // Same totalCents-preferring pattern as order.controller.js's
+        // getAdminOrdersByDate — see the comment there.
+        {
+          $addFields: {
+            orderTotal: {
+              $cond: [
+                { $ifNull: ["$totalCents", false] },
+                { $divide: ["$totalCents", 100] },
+                { $sum: "$line_items.price_data.product_data.metadata.totalPaid" },
+              ],
+            },
+          },
+        },
+        { $group: { _id: null, total: { $sum: "$orderTotal" } } },
       ]),
     ]);
 

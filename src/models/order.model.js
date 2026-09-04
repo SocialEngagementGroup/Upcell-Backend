@@ -20,9 +20,44 @@ const statusEnum = [
 const paidWithEnum = ["Card", "Manual", "BankOfAmerica"];
 const shippingEnum = ["standard", "priority", "express"];
 
+// One kind of thing — a real product line — typed properly, unlike the
+// Stripe-shaped line_items array it's replacing, which forced products and
+// fee lines (tax, shipping) into one untyped array and left every reader to
+// guess the difference by checking for a productId. Fee lines live as their
+// own top-level cents fields on the order instead (see shippingCents/
+// taxCents below), not as fake items with no product behind them.
+const OrderItemSchema = new Schema(
+  {
+    productId: { type: Schema.Types.ObjectId, required: true },
+    name: { type: String, required: true },
+    description: String,
+    image: String,
+    quantity: { type: Number, required: true, min: 1 },
+    // Both derived from the same source (see src/utils/orderItems.js) so
+    // they can never disagree the way unit_amount and totalPaid could in the
+    // legacy shape — one recorded per unit, the other quantity-multiplied,
+    // computed independently, with nothing enforcing they matched.
+    unitPriceCents: { type: Number, required: true, min: 0 },
+    lineTotalCents: { type: Number, required: true, min: 0 },
+  },
+  { _id: false }
+);
+
 const OrderSchema = new Schema(
   {
+    // Legacy Stripe-shaped shape. Being replaced by items/shippingCents/
+    // taxCents/subtotalCents/totalCents below (see src/utils/orderItems.js).
+    // Kept — not removed — until every order in the database has been
+    // migrated to the new fields and every reader has switched over.
     line_items: Object,
+    // The migration target. Populated going forward at checkout; backfilled
+    // on existing orders by a one-off migration script, never derived live
+    // on every read the way the old shape's total was.
+    items: [OrderItemSchema],
+    shippingCents: Number,
+    taxCents: Number,
+    subtotalCents: Number,
+    totalCents: Number,
     // Clerk user id of the account that placed the order. This — not `email` —
     // is what ties an order to a person. `email` is free text from the checkout
     // form, so a logged-in customer who types a different address files the

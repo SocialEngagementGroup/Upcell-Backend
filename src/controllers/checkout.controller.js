@@ -2,6 +2,7 @@ const Order = require("../models/order.model");
 const SingleVariation = require("../models/singleVariation.model");
 const PaymentEventLog = require("../models/paymentEventLog.model");
 const { round2 } = require("../utils/money");
+const { convertLineItems } = require("../utils/orderItems");
 const { Resend } = require("resend");
 const { paymentReceiptEmail, adminNewOrderEmail } = require("../services/emailTemplates");
 const { EmailConfig } = require("../models/emailConfig.model");
@@ -35,12 +36,18 @@ exports.orderLineItemsForReceipt = (order) =>
 // check that the bank authorised the right figure must agree by construction —
 // if they were computed separately, a drift between them would show up as a
 // customer being charged one amount and emailed another.
+//
+// Prefers the stored totalCents (see Backend/src/utils/orderItems.js) — a
+// number written once at checkout — over re-summing line_items live. Falls
+// back to the live sum for orders created before totalCents existed.
 exports.orderTotal = (order) =>
-  round2(
-    exports
-      .orderLineItemsForReceipt(order)
-      .reduce((sum, item) => sum + item.price, 0)
-  );
+  Number.isFinite(order?.totalCents)
+    ? round2(order.totalCents / 100)
+    : round2(
+        exports
+          .orderLineItemsForReceipt(order)
+          .reduce((sum, item) => sum + item.price, 0)
+      );
 
 // Called whenever an order is confirmed paid, alongside the customer
 // receipt. Kept next to sendPaymentReceiptEmail deliberately: when these two
@@ -327,8 +334,30 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
     });
   }
 
+  // Dual-write, migration in progress (see Backend/src/utils/orderItems.js).
+  // New orders carry both the legacy line_items shape and the new typed
+  // items/*Cents fields, computed by the one shared conversion function —
+  // not two independent implementations that could drift apart. unrecognized
+  // should always be empty here: every line above was just built by this
+  // same function from a known, fixed set of names. A non-empty result means
+  // this function and the conversion helper have fallen out of sync with
+  // each other, which is worth knowing about immediately rather than
+  // shipping an order silently missing part of its own total.
+  const converted = convertLineItems(line_items);
+  if (converted.unrecognized.length) {
+    console.error(
+      "[checkout] convertLineItems could not classify a line this function just built:",
+      converted.unrecognized
+    );
+  }
+
   const order = {
     line_items,
+    items: converted.items,
+    shippingCents: converted.shippingCents,
+    taxCents: converted.taxCents,
+    subtotalCents: converted.subtotalCents,
+    totalCents: converted.totalCents,
     // Set by verifyToken on the authenticated checkout routes. Undefined on
     // the admin-created Manual path, which has no customer session.
     userId: req.user?.id,
