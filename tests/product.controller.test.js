@@ -13,9 +13,13 @@ beforeEach(() => {
 });
 
 const makeRes = () => {
-  const res = { statusCode: null, body: null };
+  const res = { statusCode: null, body: null, headers: {} };
   res.status = jest.fn((code) => { res.statusCode = code; return res; });
   res.json = jest.fn((payload) => { res.body = payload; return res; });
+  // Express's own res.set, which getShopProducts uses to send Cache-Control.
+  // Without it the controller throws into next() and every assertion about
+  // the body reads null instead of the response.
+  res.set = jest.fn((name, value) => { res.headers[name] = value; return res; });
   return res;
 };
 
@@ -45,6 +49,17 @@ describe("getShopProducts — the shop page's data source", () => {
     // there would be one row per parent (2 total), not one per variation (3).
     expect(res.body).toHaveLength(3);
     expect(res.body).toEqual(variations);
+  });
+
+  it("lets the browser cache the listing, so a repeat visit revalidates instead of redownloading", async () => {
+    mockFindChain(variations);
+
+    const res = makeRes();
+    await product.getShopProducts({}, res, jest.fn());
+
+    // public — identical for every visitor, nothing per-user in it.
+    // max-age matches the frontend's React Query staleTime of 60s.
+    expect(res.headers["Cache-Control"]).toBe("public, max-age=60, stale-while-revalidate=300");
   });
 
   it("only asks for browsable products — accessories are excluded", async () => {

@@ -136,6 +136,19 @@ async function getShopProducts(req, res, next) {
       .sort({ outOfStock: 1, price: 1 })
       .lean();
 
+    // A public catalogue listing, identical for every visitor, so it can sit in
+    // the browser's own cache. Express already sends an ETag on this response;
+    // what was missing is a Cache-Control that makes the browser willing to
+    // revalidate against it, which turns a repeat visit into a 304 with no body
+    // instead of a fresh download of the whole list.
+    //
+    // 60 seconds matches the frontend's React Query staleTime, so the two
+    // layers expire together rather than one serving data the other considers
+    // stale. stale-while-revalidate lets a return visit paint instantly from
+    // cache while the refresh happens behind it — a price or stock edit is
+    // visible within about a minute, which is the same delay the app already
+    // accepts today.
+    res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
     res.status(200).json(products);
   } catch (error) {
     next(error);
