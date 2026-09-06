@@ -144,6 +144,30 @@ describe("getAdminProducts — the admin product-management pages' data source",
   });
 });
 
+describe("getProducts — the full catalogue endpoint", () => {
+  it("returns every variation", async () => {
+    const docs = [{ _id: "v1" }, { _id: "v2" }];
+    SingleVariation.find.mockReturnValue({ lean: async () => docs });
+
+    const res = makeRes();
+    await product.getProducts({}, res, jest.fn());
+
+    expect(res.body).toEqual(docs);
+  });
+
+  // This was the only controller in the codebase without a try/catch. A
+  // rejected query never reached the error middleware, so instead of a clean
+  // 500 the request hung until the client gave up.
+  it("passes errors to next() instead of leaving the request hanging", async () => {
+    SingleVariation.find.mockReturnValue({ lean: async () => { throw new Error("db down"); } });
+    const next = jest.fn();
+
+    await product.getProducts({}, makeRes(), next);
+
+    expect(next).toHaveBeenCalledWith(expect.any(Error));
+  });
+});
+
 describe("getRecommendedProducts — still groups (a small, separate use case)", () => {
   it("still collapses variations to one card per parent product", async () => {
     const variations = [

@@ -83,9 +83,13 @@ const groupProductCards = (products = []) => {
   return Array.from(map.values()).map(normalizeProductCard);
 };
 
-async function getProducts(req, res) {
-  const allProduct = await SingleVariation.find().lean();
-  res.json(allProduct);
+async function getProducts(req, res, next) {
+  try {
+    const allProduct = await SingleVariation.find().lean();
+    res.json(allProduct);
+  } catch (error) {
+    next(error);
+  }
 }
 
 // AllProduct and AddProduct both need the entire catalog in memory for
