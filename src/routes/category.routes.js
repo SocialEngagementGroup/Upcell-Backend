@@ -8,7 +8,6 @@ const {
   getCategoriesWithProductCounts,
   getCategoryById,
   getShopCategories,
-  getAvailableCategories,
   createCategory,
   createShopCategory,
   updateCategory,
@@ -24,7 +23,6 @@ router.get("/catagory", getCategories);
 router.get("/admin-catagory-counts", verifyToken, requireAdmin, getCategoriesWithProductCounts);
 router.get("/catagory/:id", validateObjectIdParam(), getCategoryById);
 router.get("/shop-categories", getShopCategories);
-router.get("/available-catagories", getAvailableCategories);
 router.post("/catagory", verifyToken, requireAdmin, validateRequest(categorySchema), createCategory);
 router.post("/shop-categories", verifyToken, requireAdmin, validateRequest(categorySchema), createShopCategory);
 router.patch(

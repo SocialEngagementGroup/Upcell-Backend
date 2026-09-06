@@ -4,7 +4,6 @@
 // These assert the shape of the declarations themselves, so a regression is a
 // failing test rather than a surprise the next time someone inserts a document.
 const NewsletterSubscriber = require("../src/models/newsletterSubscriber.model");
-const AvailableCatagories = require("../src/models/availableCategory.model");
 
 // schema.indexes() returns only the explicitly declared ones. Field-level
 // `unique: true` shows up on the path instead, which is exactly the difference
@@ -28,23 +27,5 @@ describe("NewsletterSubscriber — email uniqueness is declared exactly once", (
     const options = NewsletterSubscriber.schema.path("email").options;
     expect(options.required).toBe(true);
     expect(options.lowercase).toBe(true);
-  });
-});
-
-describe("AvailableCatagories — a singleton, not a set of unique strings", () => {
-  // `unique: true` on an array field builds a unique *multikey* index, which
-  // means no two documents may share even one category string. Every caller
-  // reads this collection as find() then [0], so uniqueness across documents
-  // was never the intent and would have failed pointing at the wrong cause.
-  it("does not put a unique constraint on the categories array", () => {
-    expect(AvailableCatagories.schema.path("categories").options.unique).toBeUndefined();
-
-    const uniqueOnCategories = declaredIndexes(AvailableCatagories)
-      .filter(([fields, options]) => fields.categories && options?.unique);
-    expect(uniqueOnCategories).toHaveLength(0);
-  });
-
-  it("still requires the categories list", () => {
-    expect(AvailableCatagories.schema.path("categories").options.required).toBe(true);
   });
 });

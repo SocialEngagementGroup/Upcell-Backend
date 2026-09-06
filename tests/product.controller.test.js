@@ -1,6 +1,5 @@
 jest.mock("../src/models/singleVariation.model");
 jest.mock("../src/models/parentProduct.model");
-jest.mock("../src/models/availableCategory.model");
 
 const SingleVariation = require("../src/models/singleVariation.model");
 const product = require("../src/controllers/product.controller");

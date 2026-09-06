@@ -1,6 +1,5 @@
 const ParentProduct = require("../models/parentProduct.model");
 const SingleVariation = require("../models/singleVariation.model");
-const AvailableCatagories = require("../models/availableCategory.model");
 
 // The shop sells devices. Accessories are real products so the cart and
 // checkout work on them, but they are offered on a device's own page and
@@ -321,13 +320,6 @@ async function createProduct(req, res, next) {
         }))
       );
 
-      const act = await AvailableCatagories.find();
-      if (act[0]?._id) {
-        await AvailableCatagories.findByIdAndUpdate(act[0]._id, {
-          $addToSet: { categories: productName },
-        });
-      }
-
       return res.status(wasExistingParent ? 200 : 201).json({
         parent,
         variants: createdVariants,
@@ -337,14 +329,6 @@ async function createProduct(req, res, next) {
     const product = req.body;
     const newProduct = new SingleVariation(product);
     await newProduct.save();
-
-    const act = await AvailableCatagories.find();
-    const idCtg = act[0]?._id;
-    if (idCtg) {
-      await AvailableCatagories.findByIdAndUpdate(idCtg, {
-        $addToSet: { categories: newProduct.productName },
-      });
-    }
 
     res.status(200).json(newProduct);
   } catch (error) {
@@ -398,23 +382,6 @@ async function getAccessories(req, res, next) {
   }
 }
 
-async function getRepresentativeProducts(req, res, next) {
-  try {
-    const availCatagoriesData = await AvailableCatagories.find();
-    if (!availCatagoriesData.length) return res.status(200).json([]);
-    const { categories } = availCatagoriesData[0];
-
-    const allMatches = await SingleVariation.find({ productName: { $in: categories } }).lean();
-
-    const products = categories
-      .map((name) => allMatches.find((p) => p.productName === name))
-      .filter(Boolean);
-
-    res.status(200).json(products);
-  } catch (error) {
-    next(error);
-  }
-}
 
 module.exports = {
   getProducts,
@@ -429,7 +396,6 @@ module.exports = {
   updateProduct,
   deleteProduct,
   deleteProductFamily,
-  getRepresentativeProducts,
   getAccessories,
 };
 

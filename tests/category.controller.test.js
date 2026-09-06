@@ -1,5 +1,4 @@
 jest.mock("../src/models/parentProduct.model");
-jest.mock("../src/models/availableCategory.model");
 jest.mock("../src/models/shopCategory.model");
 
 const ParentProduct = require("../src/models/parentProduct.model");

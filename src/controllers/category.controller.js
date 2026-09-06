@@ -1,5 +1,4 @@
 const ParentProduct = require("../models/parentProduct.model");
-const AvailableCatagories = require("../models/availableCategory.model");
 const ShopCategory = require("../models/shopCategory.model");
 const { SHOP_CATEGORY_DEFAULTS } = require("../constants/shopCategoryDefaults");
 
@@ -81,14 +80,6 @@ async function getShopCategories(req, res, next) {
   }
 }
 
-async function getAvailableCategories(req, res, next) {
-  try {
-    const availableCatagories = await AvailableCatagories.find();
-    res.status(200).json(availableCatagories);
-  } catch (error) {
-    next(error);
-  }
-}
 
 async function createCategory(req, res, next) {
   const { modelName, description, images } = req.body;
@@ -154,7 +145,6 @@ module.exports = {
   getCategoriesWithProductCounts,
   getCategoryById,
   getShopCategories,
-  getAvailableCategories,
   createCategory,
   createShopCategory,
   updateCategory,
