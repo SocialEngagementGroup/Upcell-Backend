@@ -160,6 +160,16 @@ const OrderSchema = new Schema(
       notes: String,
       approvedBy: String,
       approvedAt: Date,
+      // Recording a refund does not move any money — the amount still has to be
+      // typed into the Business Center by hand, because the Secure Acceptance
+      // keys cannot return funds. Until that happens the customer holds an
+      // email saying they were refunded and has nothing in their account.
+      //
+      // These two say whether that step was actually done. Without them the
+      // only record of it is in someone's memory, and "did anyone enter this?"
+      // has no answer.
+      enteredAtBankAt: Date,
+      enteredAtBankBy: String,
     },
   },
   { timestamps: true }

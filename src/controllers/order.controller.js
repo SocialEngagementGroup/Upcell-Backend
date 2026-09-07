@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const { Resend } = require("resend");
 const Order = require("../models/order.model");
 const AuditLog = require("../models/auditLog.model");
+const Notification = require("../models/notification.model");
 const { makeOrderObjAndTotal } = require("./checkout.controller");
 const {
   orderStatusEmail,
@@ -308,6 +309,24 @@ async function processRefund(req, res, next) {
       console.error("[audit] order.refund_processed log failed:", error);
     });
 
+    // The customer is told by email; without this the staff are not told at all.
+    // Recording a refund moves no money — someone still has to type the figure
+    // into the Business Center — so the one person who must not miss this is the
+    // one who has to act. A forgotten entry leaves the customer holding an email
+    // saying they were refunded and nothing in their account.
+    //
+    // Fire-and-forget like the audit log above: a notification that fails to
+    // write must not undo a refund that is already recorded.
+    Notification.create({
+      type: "order",
+      title: "Refund needs entering at the bank",
+      message: `$${refundAmount.toFixed(2)} approved by ${req.user?.email || "an admin"}. It is not paid until it is entered in the Business Center.`,
+      link: `/admin-secret/orders/${order._id}`,
+      relatedId: order._id,
+    }).catch((error) => {
+      console.error("[order] refund notification failed:", error?.message || error);
+    });
+
     // Fire-and-forget, matching sendPaymentReceiptEmail elsewhere — a slow or
     // failed send must not undo a refund that has already been recorded and
     // is waiting on a human to enter it at the bank.
@@ -408,12 +427,61 @@ async function notifyOrderPlaced(order) {
   await Promise.all(sends);
 }
 
+/**
+ * Marks a recorded refund as actually entered in the Business Center.
+ *
+ * The gap this closes: processRefund calculates the figure, tells the customer
+ * and sets the order to Refunded, but the money only moves when a person types
+ * that figure into the bank's portal. Nothing recorded whether they had. "Has
+ * this one been done?" could only be answered by asking around.
+ *
+ * Deliberately one-way. Unticking it would mean a refund that the bank has
+ * already been told about looks outstanding again, which is the more dangerous
+ * mistake of the two — it invites a second entry and a double refund.
+ */
+async function markRefundEnteredAtBank(req, res, next) {
+  try {
+    const order = await Order.findById(req.params.id || null);
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    if (!order.refund?.approvedAt) {
+      return res.status(400).json({ error: "This order has no recorded refund." });
+    }
+
+    if (order.refund.enteredAtBankAt) {
+      return res.status(400).json({ error: "This refund is already marked as entered at the bank." });
+    }
+
+    order.refund.enteredAtBankAt = new Date();
+    order.refund.enteredAtBankBy = req.user?.email;
+    await order.save();
+
+    AuditLog.create({
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      action: "order.refund_entered_at_bank",
+      targetType: "Order",
+      targetId: order._id,
+      metadata: { amount: order.refund.amount },
+    }).catch((error) => {
+      console.error("[audit] order.refund_entered_at_bank log failed:", error);
+    });
+
+    res.json({ refund: order.refund });
+  } catch (error) {
+    next(error);
+  }
+}
+
 module.exports = {
   getOrder,
   getAdminOrders,
   getAdminOrdersByDate,
   updateOrderStatus,
   processRefund,
+  markRefundEnteredAtBank,
   getClientOrders,
   createOrder,
 };

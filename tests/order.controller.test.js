@@ -6,12 +6,17 @@ jest.mock("resend", () => ({
 }));
 jest.mock("../src/models/order.model");
 jest.mock("../src/models/auditLog.model");
+// An explicit factory rather than the automock: the notification model is only
+// ever used here as Notification.create(...), and automocking it produced an
+// undefined create.
+jest.mock("../src/models/notification.model", () => ({ create: jest.fn() }));
 jest.mock("../src/controllers/checkout.controller", () => ({
   makeOrderObjAndTotal: jest.fn(),
 }));
 
 const Order = require("../src/models/order.model");
 const AuditLog = require("../src/models/auditLog.model");
+const Notification = require("../src/models/notification.model");
 const { makeOrderObjAndTotal } = require("../src/controllers/checkout.controller");
 const orderController = require("../src/controllers/order.controller");
 
@@ -35,7 +40,11 @@ function makeQueryChain(result) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // Both are called fire-and-forget as `.create(...).catch(...)`, so they have
+  // to hand back a promise. clearAllMocks drops the resolved value, hence
+  // re-setting it here rather than once at the top.
   AuditLog.create.mockResolvedValue({});
+  Notification.create.mockResolvedValue({});
 });
 
 describe("createOrder — always unpaid until the bank gateway confirms payment", () => {
@@ -551,5 +560,109 @@ describe("processRefund", () => {
     const body = res.json.mock.calls[0][0];
     expect(body.message).toContain("849.15");
     expect(body.message.toLowerCase()).toContain("enter");
+  });
+
+  // The customer is emailed automatically; the staff were told nothing. A
+  // forgotten portal entry left the customer holding an email saying they had
+  // been refunded, with no money.
+  it("tells the admin the refund still needs entering at the bank", async () => {
+    Notification.create.mockResolvedValue({});
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    await orderController.processRefund(req, res, jest.fn());
+
+    expect(Notification.create).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "order", relatedId: "order1" })
+    );
+    const notification = Notification.create.mock.calls[0][0];
+    expect(notification.message).toContain("849.15");
+    expect(notification.message).toContain("Business Center");
+  });
+
+  it("records the refund even when the notification cannot be written", async () => {
+    Notification.create.mockRejectedValue(new Error("mongo down"));
+    const order = paidOrder();
+    Order.findById.mockResolvedValue(order);
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    await orderController.processRefund(req, res, jest.fn());
+
+    expect(order.save).toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalled();
+  });
+});
+
+describe("markRefundEnteredAtBank — the manual step, recorded", () => {
+  const refundedOrder = (overrides = {}) => ({
+    _id: "order1",
+    refund: { amount: 849.15, approvedAt: new Date("2026-09-06T10:00:00Z") },
+    save: jest.fn().mockResolvedValue(true),
+    ...overrides,
+  });
+
+  it("404s for an order that does not exist", async () => {
+    Order.findById.mockResolvedValue(null);
+
+    const { req, res } = makeReqRes({}, { params: { id: "ghost" }, user: { email: "admin@upcellit.com" } });
+    await orderController.markRefundEnteredAtBank(req, res, jest.fn());
+
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("refuses an order that has no recorded refund", async () => {
+    Order.findById.mockResolvedValue(refundedOrder({ refund: undefined }));
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    await orderController.markRefundEnteredAtBank(req, res, jest.fn());
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("stamps who entered it and when", async () => {
+    const order = refundedOrder();
+    Order.findById.mockResolvedValue(order);
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "yasir@upcellit.com" } });
+    await orderController.markRefundEnteredAtBank(req, res, jest.fn());
+
+    expect(order.refund.enteredAtBankBy).toBe("yasir@upcellit.com");
+    expect(order.refund.enteredAtBankAt).toBeInstanceOf(Date);
+    expect(order.save).toHaveBeenCalled();
+  });
+
+  // Unticking would make a refund the bank already knows about look outstanding
+  // again, which invites a second entry and a double refund.
+  it("refuses to mark the same refund twice", async () => {
+    Order.findById.mockResolvedValue(
+      refundedOrder({
+        refund: {
+          amount: 849.15,
+          approvedAt: new Date(),
+          enteredAtBankAt: new Date(),
+          enteredAtBankBy: "yasir@upcellit.com",
+        },
+      })
+    );
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "raymond@upcellit.com" } });
+    await orderController.markRefundEnteredAtBank(req, res, jest.fn());
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("writes an audit entry naming who did it", async () => {
+    AuditLog.create.mockResolvedValue({});
+    Order.findById.mockResolvedValue(refundedOrder());
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "yasir@upcellit.com" } });
+    await orderController.markRefundEnteredAtBank(req, res, jest.fn());
+
+    expect(AuditLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "order.refund_entered_at_bank",
+        actorEmail: "yasir@upcellit.com",
+      })
+    );
   });
 });
