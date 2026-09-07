@@ -171,6 +171,14 @@ const OrderSchema = new Schema(
       enteredAtBankAt: Date,
       enteredAtBankBy: String,
     },
+    // When the customer actually received the order. The 30-day return window
+    // is counted from here, not from createdAt — an order placed on the 1st and
+    // delivered on the 10th gives the customer 30 days from the 10th.
+    //
+    // Set once, the first time the status becomes Delivered, and never moved
+    // afterwards: a status corrected back and forth must not quietly restart
+    // someone's return window.
+    deliveredAt: Date,
   },
   { timestamps: true }
 );

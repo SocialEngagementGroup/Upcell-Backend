@@ -306,6 +306,162 @@ function refundApprovedEmail({ orderId, itemNames, itemsTotal, restockingFee, re
   };
 }
 
+// ---------------------------------------------------------------------------
+// The refund request journey.
+//
+// Six emails, one per stage a customer would otherwise have to chase by phone.
+// The rule running through them: never claim more than has happened. A device
+// nobody has looked at yet is "received", not "approved"; money a person still
+// has to enter at the bank is "on its way", not "paid".
+// ---------------------------------------------------------------------------
+
+const itemNameRows = (itemNames = []) =>
+  itemNames
+    .map(
+      (name) =>
+        `<tr><td colspan="2" style="padding:5px 0;font-family:${FONT};font-size:13px;color:#C7C7C7;">${escapeHtml(name)}</td></tr>`
+    )
+    .join("");
+
+// Long free text written by staff — return addresses, packing notes. Newlines
+// are what they typed, so they have to survive into the HTML or the whole
+// thing arrives as one run-on paragraph.
+const paragraphs = (text) =>
+  String(text || "")
+    .split(/\n{2,}/)
+    .map(
+      (block) =>
+        `<tr><td colspan="2" style="padding:6px 0;font-family:${FONT};font-size:14px;line-height:22px;color:#C7C7C7;">${escapeHtml(block).replace(/\n/g, "<br />")}</td></tr>`
+    )
+    .join("");
+
+function refundRequestReceivedEmail({ requestId, orderId, itemNames }) {
+  const rows =
+    detailRow("Request ID", `#${escapeHtml(requestId)}`) +
+    detailRow("Order ID", `#${escapeHtml(orderId)}`) +
+    `<tr><td colspan="2" style="padding:12px 0 4px 0;font-family:${FONT};font-size:14px;color:#9A9A9A;">Items you want to return</td></tr>` +
+    itemNameRows(itemNames);
+
+  return {
+    subject: "We've received your return request",
+    html: emailShell({
+      preheader: `Your return request for order ${orderId} has been received.`,
+      badgeGlyph: "&#8617;",
+      headline: "Return request received",
+      // Says plainly that nothing has been agreed yet. A customer who reads
+      // this as approval will post a phone before being told where to send it.
+      subtext:
+        "Thanks — we have your request and will review it shortly. Please don't send anything back yet: we'll email you the return address and instructions once it's approved. A 15% restocking fee applies, and shipping is not refunded.",
+      detailRowsHtml: rows,
+      ctaLabel: "View Order",
+      ctaHref: ACCOUNT_URL,
+      footerNote: "You're receiving this because you asked to return an item.",
+    }),
+  };
+}
+
+function refundReturnInstructionsEmail({ requestId, orderId, itemNames, instructions }) {
+  const rows =
+    detailRow("Request ID", `#${escapeHtml(requestId)}`) +
+    detailRow("Order ID", `#${escapeHtml(orderId)}`) +
+    `<tr><td colspan="2" style="padding:12px 0 4px 0;font-family:${FONT};font-size:14px;color:#9A9A9A;">Items to return</td></tr>` +
+    itemNameRows(itemNames) +
+    `<tr><td colspan="2" style="padding:16px 0 4px 0;font-family:${FONT};font-size:14px;color:#9A9A9A;">How to return it</td></tr>` +
+    paragraphs(instructions);
+
+  return {
+    subject: "Return approved — how to send your device back",
+    html: emailShell({
+      preheader: "Your return has been approved. Here's where to send it.",
+      badgeGlyph: "&#8599;",
+      headline: "Return approved",
+      subtext:
+        "Please follow the instructions below to send your device back. Your refund is worked out once it arrives and has been checked.",
+      detailRowsHtml: rows,
+      ctaLabel: "View Order",
+      ctaHref: ACCOUNT_URL,
+      footerNote: "Questions about your return? Reply to this email.",
+    }),
+  };
+}
+
+function refundDeviceReceivedEmail({ requestId, orderId }) {
+  const rows =
+    detailRow("Request ID", `#${escapeHtml(requestId)}`) +
+    detailRow("Order ID", `#${escapeHtml(orderId)}`);
+
+  return {
+    subject: "We've received your device",
+    html: emailShell({
+      preheader: "Your returned device has arrived with us.",
+      badgeGlyph: "&#10003;",
+      headline: "Device received",
+      // The reassurance email. Its whole job is to stop the customer wondering
+      // whether the parcel arrived, which is the point they usually call.
+      subtext:
+        "Your device has arrived and is waiting to be checked. We'll email you as soon as that's done — usually within a couple of working days.",
+      detailRowsHtml: rows,
+      ctaLabel: "View Order",
+      ctaHref: ACCOUNT_URL,
+      footerNote: "You're receiving this because you returned an item to UpCell.",
+    }),
+  };
+}
+
+function refundRejectedEmail({ requestId, orderId, rejectionReason }) {
+  const rows =
+    detailRow("Request ID", `#${escapeHtml(requestId)}`) +
+    detailRow("Order ID", `#${escapeHtml(orderId)}`) +
+    `<tr><td colspan="2" style="padding:16px 0 4px 0;font-family:${FONT};font-size:14px;color:#9A9A9A;">Reason</td></tr>` +
+    paragraphs(rejectionReason);
+
+  return {
+    subject: "About your return request",
+    html: emailShell({
+      preheader: `We couldn't approve the return for order ${orderId}.`,
+      badgeGlyph: "&#33;",
+      // Neutral subject and headline on purpose. "Refund rejected" in an inbox
+      // reads as an accusation before the reason has been read.
+      headline: "We couldn't approve this return",
+      subtext:
+        "We've looked at your request and can't approve it. The reason is below. If you think this is wrong, reply to this email and a person will look again.",
+      detailRowsHtml: rows,
+      ctaLabel: "Contact Support",
+      ctaHref: ACCOUNT_URL,
+      footerNote: "You're receiving this because you asked to return an item.",
+    }),
+  };
+}
+
+function refundMoneySentEmail({ requestId, orderId, refundAmount }) {
+  const rows =
+    detailRow("Request ID", `#${escapeHtml(requestId)}`) +
+    detailRow("Order ID", `#${escapeHtml(orderId)}`) +
+    detailRow("Refund amount", money(refundAmount), {
+      bordered: false,
+      valueColor: "#FFFFFF",
+      valueWeight: 800,
+    });
+
+  return {
+    subject: "Your refund is on its way",
+    html: emailShell({
+      preheader: `${money(refundAmount)} has been sent back to your card.`,
+      badgeGlyph: "&#10003;",
+      headline: "Refund sent",
+      // The one email that was missing. Until now the customer was told
+      // "approved" and heard nothing again, while the money sat waiting for
+      // someone to enter it at the bank.
+      subtext:
+        "Your refund has been sent to your bank. It usually appears on your original payment method within 2 business days, depending on your bank.",
+      detailRowsHtml: rows,
+      ctaLabel: "View Order",
+      ctaHref: ACCOUNT_URL,
+      footerNote: "You're receiving this because you returned an item to UpCell.",
+    }),
+  };
+}
+
 function adminNewTradeInEmail({ name, email, phone, modelTitle, storage, estimate, requestId }) {
   const rows =
     detailRow("Device", escapeHtml(modelTitle)) +
@@ -481,6 +637,11 @@ module.exports = {
   orderStatusEmail,
   paymentReceiptEmail,
   refundApprovedEmail,
+  refundRequestReceivedEmail,
+  refundReturnInstructionsEmail,
+  refundDeviceReceivedEmail,
+  refundRejectedEmail,
+  refundMoneySentEmail,
   adminErrorAlertEmail,
   adminNewTradeInEmail,
   adminTradeInStatusEmail,

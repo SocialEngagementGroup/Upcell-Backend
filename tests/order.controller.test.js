@@ -9,14 +9,14 @@ jest.mock("../src/models/auditLog.model");
 // An explicit factory rather than the automock: the notification model is only
 // ever used here as Notification.create(...), and automocking it produced an
 // undefined create.
-jest.mock("../src/models/notification.model", () => ({ create: jest.fn() }));
+jest.mock("../src/models/notification.model", () => ({ Notification: { create: jest.fn() } }));
 jest.mock("../src/controllers/checkout.controller", () => ({
   makeOrderObjAndTotal: jest.fn(),
 }));
 
 const Order = require("../src/models/order.model");
 const AuditLog = require("../src/models/auditLog.model");
-const Notification = require("../src/models/notification.model");
+const { Notification } = require("../src/models/notification.model");
 const { makeOrderObjAndTotal } = require("../src/controllers/checkout.controller");
 const orderController = require("../src/controllers/order.controller");
 

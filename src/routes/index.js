@@ -14,6 +14,7 @@ const emailConfigRoutes = require("./emailConfig.routes");
 const notificationRoutes = require("./notification.routes");
 const auditLogRoutes = require("./auditLog.routes");
 const uploadRoutes = require("./upload.routes");
+const refundRequestRoutes = require("./refundRequest.routes");
 const bankOfAmericaRoutes = require("./bankOfAmerica.routes");
 const reconciliationRoutes = require("./reconciliation.routes");
 
@@ -33,5 +34,6 @@ router.use("/", notificationRoutes);
 router.use("/", auditLogRoutes);
 router.use("/", reconciliationRoutes);
 router.use("/", uploadRoutes);
+router.use("/", refundRequestRoutes);
 
 module.exports = router;

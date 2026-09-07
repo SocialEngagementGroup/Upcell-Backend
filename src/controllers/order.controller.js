@@ -2,7 +2,7 @@ const mongoose = require("mongoose");
 const { Resend } = require("resend");
 const Order = require("../models/order.model");
 const AuditLog = require("../models/auditLog.model");
-const Notification = require("../models/notification.model");
+const { Notification } = require("../models/notification.model");
 const { makeOrderObjAndTotal } = require("./checkout.controller");
 const {
   orderStatusEmail,
@@ -171,6 +171,7 @@ const ORDER_STATUS_VALUES = ["pending_payment", "under_review", "Processing", "S
 // under_review belongs here: the bank has not settled it, so treating it as
 // paid would put revenue on the dashboard that may never arrive.
 const UNPAID_STATUSES = ["pending_payment", "under_review", "payment failed"];
+const DELIVERED_STATUS = "Delivered";
 
 async function updateOrderStatus(req, res, next) {
   const { orderId, status } = req.body;
@@ -196,6 +197,14 @@ async function updateOrderStatus(req, res, next) {
     // customer's own order list, which filters on paid:true in
     // getClientOrders below.
     order.paid = !UNPAID_STATUSES.includes(status);
+
+    // Stamped the first time an order reaches Delivered, and left alone after.
+    // The 30-day return window counts from this date, so a status set back to
+    // Shipped and forward to Delivered again must not hand the customer a fresh
+    // 30 days.
+    if (status === DELIVERED_STATUS && !order.deliveredAt) {
+      order.deliveredAt = new Date();
+    }
 
     await order.save();
 

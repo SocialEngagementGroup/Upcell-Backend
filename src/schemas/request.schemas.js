@@ -207,6 +207,36 @@ const contactSubmissionSchema = z.object({
 // A waived fee always carries a reason, enforced here rather than only in the
 // controller — a request that fails validation never reaches business logic
 // that could act on half-checked input.
+// What a customer submits. reason is required and has a floor: "broken" tells
+// staff nothing they can act on before the device has even been sent back.
+const refundRequestCreateSchema = z.object({
+  orderId: objectIdField,
+  itemIds: z.array(objectIdField).min(1, "Choose at least one item to return").max(50),
+  reason: z
+    .string()
+    .trim()
+    .min(10, "Please describe the problem in a little more detail")
+    .max(2000, "Reason must be 2000 characters or fewer"),
+});
+
+// What staff send when moving a request along. Every field is optional here
+// because which ones are required depends on the destination status — the
+// controller enforces that, since only it knows where the request is coming
+// from.
+const refundRequestStatusSchema = z
+  .object({
+    status: z.enum(["ReturnApproved", "DeviceReceived", "Approved", "Refunded", "Rejected"]),
+    returnInstructions: z.string().trim().max(4000).optional(),
+    rejectionReason: z.string().trim().max(1000).optional(),
+    inspectionNotes: z.string().trim().max(2000).optional(),
+    waiveRestockingFee: z.boolean().optional().default(false),
+    waiveReason: z.string().trim().max(500).optional(),
+  })
+  .refine((data) => !data.waiveRestockingFee || Boolean(data.waiveReason), {
+    message: "A reason is required to waive the restocking fee.",
+    path: ["waiveReason"],
+  });
+
 const refundSchema = z
   .object({
     itemIds: z.array(objectIdField).max(50).optional(),
@@ -263,6 +293,8 @@ module.exports = {
   contactSubmissionSchema,
   analyticsEventSchema,
   refundSchema,
+  refundRequestCreateSchema,
+  refundRequestStatusSchema,
   monthlySellSchema,
   cartLookupSchema,
 };
