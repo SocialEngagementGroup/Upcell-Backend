@@ -2,13 +2,16 @@ const mongoose = require("mongoose");
 const { Resend } = require("resend");
 const Order = require("../models/order.model");
 const AuditLog = require("../models/auditLog.model");
+const { Notification } = require("../models/notification.model");
 const { makeOrderObjAndTotal } = require("./checkout.controller");
 const {
   orderStatusEmail,
   orderPlacedEmail,
   adminOrderStatusEmail,
   adminNewOrderEmail,
+  refundApprovedEmail,
 } = require("../services/emailTemplates");
+const { calculateRefund } = require("../services/refund");
 const {
   getAdminListPagination,
   emptyPaginatedResponse,
@@ -19,8 +22,18 @@ const resend = new Resend(process.env.RESEND_KEY);
 const orderEmailFrom = process.env.EMAIL_FROM;
 const adminNotificationEmail = process.env.ADMIN_NOTIFICATION_EMAIL;
 
+// Mongo ObjectId as it appears in a URL. Checking the shape before querying
+// keeps a malformed id (a "/order/undefined" from a page loaded without its
+// query string, a crawler, a probe) a plain 404 instead of a CastError — which
+// the global handler would turn into a 500 and page the admin over.
+const OBJECT_ID_PATTERN = /^[0-9a-fA-F]{24}$/;
+
 async function getOrder(req, res, next) {
   try {
+    if (!OBJECT_ID_PATTERN.test(req.params.id || "")) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ error: "Order not found" });
 
@@ -99,25 +112,66 @@ async function getAdminOrdersByDate(req, res, next) {
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
 
-    const [tDay, tWeek, tMonth] = await Promise.all([
-      Order.find({ createdAt: { $gte: thisDay } }),
-      Order.find({ createdAt: { $gte: thisWeekStart } }),
-      Order.find({ createdAt: { $gte: monthStart, $lt: monthEnd } }),
+    // Only paid orders count. A checkout someone started and abandoned is not
+    // a sale, and counting one would overstate both order volume and revenue.
+    //
+    // The filtering used to happen in the browser, which meant every abandoned
+    // checkout was sent over the wire first — name, email, phone and full
+    // address for orders that were then discarded on arrival. Counting in the
+    // database sends numbers instead of customer records, and makes the rule
+    // part of the data rather than part of one page's rendering code.
+    const summarise = async (range) => {
+      const [result] = await Order.aggregate([
+        { $match: { paid: true, createdAt: range } },
+        // Prefers the stored totalCents (see Backend/src/utils/orderItems.js)
+        // over re-summing line_items — orders that predate it fall back to
+        // the same live sum this pipeline always did. No $unwind/regroup
+        // needed either way: Mongo's dot-notation through an array of
+        // subdocuments already yields an array of totalPaid values, which
+        // $sum totals directly.
+        {
+          $addFields: {
+            orderTotal: {
+              $cond: [
+                { $ifNull: ["$totalCents", false] },
+                { $divide: ["$totalCents", 100] },
+                { $sum: "$line_items.price_data.product_data.metadata.totalPaid" },
+              ],
+            },
+          },
+        },
+        { $group: { _id: null, amount: { $sum: 1 }, money: { $sum: "$orderTotal" } } },
+      ]);
+
+      return {
+        amount: result?.amount || 0,
+        money: Number((result?.money || 0).toFixed(2)),
+      };
+    };
+
+    const [today, thisWeek, thisMonth] = await Promise.all([
+      summarise({ $gte: thisDay }),
+      summarise({ $gte: thisWeekStart }),
+      summarise({ $gte: monthStart, $lt: monthEnd }),
     ]);
 
-    res.status(200).json({ today: tDay, thisWeek: tWeek, thisMonth: tMonth });
+    res.status(200).json({ today, thisWeek, thisMonth });
   } catch (error) {
     next(error);
   }
 }
 
-const ORDER_STATUS_VALUES = ["pending_payment", "Processing", "Shipped", "Delivered", "Returned", "Refunded", "payment failed"];
+const ORDER_STATUS_VALUES = ["pending_payment", "under_review", "Processing", "Shipped", "Delivered", "Returned", "Refunded", "payment failed"];
 
 // Statuses that mean no money has been received. Everything else implies a
 // confirmed payment — including Returned and Refunded, where the payment did
 // happen and was reversed afterwards, so those orders must stay visible to the
 // customer rather than dropping off their order list.
-const UNPAID_STATUSES = ["pending_payment", "payment failed"];
+//
+// under_review belongs here: the bank has not settled it, so treating it as
+// paid would put revenue on the dashboard that may never arrive.
+const UNPAID_STATUSES = ["pending_payment", "under_review", "payment failed"];
+const DELIVERED_STATUS = "Delivered";
 
 async function updateOrderStatus(req, res, next) {
   const { orderId, status } = req.body;
@@ -143,6 +197,14 @@ async function updateOrderStatus(req, res, next) {
     // customer's own order list, which filters on paid:true in
     // getClientOrders below.
     order.paid = !UNPAID_STATUSES.includes(status);
+
+    // Stamped the first time an order reaches Delivered, and left alone after.
+    // The 30-day return window counts from this date, so a status set back to
+    // Shipped and forward to Delivered again must not hand the customer a fresh
+    // 30 days.
+    if (status === DELIVERED_STATUS && !order.deliveredAt) {
+      order.deliveredAt = new Date();
+    }
 
     await order.save();
 
@@ -188,6 +250,123 @@ async function updateOrderStatus(req, res, next) {
   }
 }
 
+/**
+ * Record a refund and email the customer. This never contacts the bank —
+ * UpCell has no refund API credentials, so Raymond or Yasir still enter the
+ * exact figure into the Business Center by hand. What this does is the part
+ * that was entirely manual before: calculating the right number under the
+ * client's own 15% restocking-fee rule, keeping a record of who approved it
+ * and why a fee was or was not waived, and telling the customer.
+ */
+async function processRefund(req, res, next) {
+  const { itemIds, waiveRestockingFee, waiveReason, notes } = req.body;
+
+  try {
+    const order = await Order.findById(req.params.id || null);
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    if (!order.paid) {
+      return res.status(400).json({ error: "This order has not been paid, so there is nothing to refund." });
+    }
+
+    if (order.refund?.approvedAt) {
+      return res.status(400).json({ error: "This order has already been refunded." });
+    }
+
+    const result = calculateRefund(order, {
+      itemIds,
+      waiveRestockingFee: Boolean(waiveRestockingFee),
+      waiveReason,
+    });
+
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error });
+    }
+
+    const { refundableItems, itemsTotal, restockingFee, restockingFeeWaived, refundAmount } = result;
+    const refundedProductIds = refundableItems.map(
+      (item) => item.price_data.product_data.metadata.productId
+    );
+
+    order.refund = {
+      itemsTotal,
+      restockingFee,
+      restockingFeeWaived,
+      waiveReason: restockingFeeWaived ? waiveReason : undefined,
+      amount: refundAmount,
+      itemIds: refundedProductIds,
+      notes,
+      approvedBy: req.user?.email,
+      approvedAt: new Date(),
+    };
+    // Refunded stays paid:true — the charge did happen. This is a record of
+    // it being reversed, not proof that it was never real, and a customer
+    // must still be able to find the order in their own account afterward.
+    order.status = "Refunded";
+    await order.save();
+
+    AuditLog.create({
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      action: "order.refund_processed",
+      targetType: "Order",
+      targetId: order._id,
+      metadata: { itemsTotal, restockingFee, restockingFeeWaived, refundAmount, itemIds: refundedProductIds },
+    }).catch((error) => {
+      console.error("[audit] order.refund_processed log failed:", error);
+    });
+
+    // The customer is told by email; without this the staff are not told at all.
+    // Recording a refund moves no money — someone still has to type the figure
+    // into the Business Center — so the one person who must not miss this is the
+    // one who has to act. A forgotten entry leaves the customer holding an email
+    // saying they were refunded and nothing in their account.
+    //
+    // Fire-and-forget like the audit log above: a notification that fails to
+    // write must not undo a refund that is already recorded.
+    Notification.create({
+      type: "order",
+      title: "Refund needs entering at the bank",
+      message: `$${refundAmount.toFixed(2)} approved by ${req.user?.email || "an admin"}. It is not paid until it is entered in the Business Center.`,
+      link: `/admin-secret/orders/${order._id}`,
+      relatedId: order._id,
+    }).catch((error) => {
+      console.error("[order] refund notification failed:", error?.message || error);
+    });
+
+    // Fire-and-forget, matching sendPaymentReceiptEmail elsewhere — a slow or
+    // failed send must not undo a refund that has already been recorded and
+    // is waiting on a human to enter it at the bank.
+    if (order.email) {
+      const itemNames = refundableItems.map((item) => item.price_data.product_data.name);
+      const { subject, html } = refundApprovedEmail({
+        orderId: order._id,
+        itemNames,
+        itemsTotal,
+        restockingFee,
+        refundAmount,
+      });
+      resend.emails
+        .send({ from: orderEmailFrom, to: [order.email], subject, html })
+        .catch((error) => {
+          console.error("[order] refund email failed:", error);
+        });
+    }
+
+    res.json({
+      refund: order.refund,
+      // Said once, plainly, in the response the admin UI reads directly —
+      // this is the number that goes in the Business Center, not a
+      // confirmation that money already moved.
+      message: `Refund of $${refundAmount.toFixed(2)} recorded. Enter this exact amount in the Bank of America Business Center to complete it.`,
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 async function getClientOrders(req, res, next) {
   const email = req.params.email;
 
@@ -196,7 +375,15 @@ async function getClientOrders(req, res, next) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    const orders = await Order.find({ email, paid: true }).sort({
+    // Match on the Clerk user id first, falling back to the email. Email alone
+    // was the only link before userId existed, so the fallback keeps historical
+    // orders visible; the userId arm is what makes an order findable when the
+    // customer typed a different address into the checkout form than the one
+    // on their account.
+    const ownership = [{ email }];
+    if (req.user?.id) ownership.push({ userId: req.user.id });
+
+    const orders = await Order.find({ $or: ownership, paid: true }).sort({
       updatedAt: -1,
     });
     res.json(orders);
@@ -249,11 +436,61 @@ async function notifyOrderPlaced(order) {
   await Promise.all(sends);
 }
 
+/**
+ * Marks a recorded refund as actually entered in the Business Center.
+ *
+ * The gap this closes: processRefund calculates the figure, tells the customer
+ * and sets the order to Refunded, but the money only moves when a person types
+ * that figure into the bank's portal. Nothing recorded whether they had. "Has
+ * this one been done?" could only be answered by asking around.
+ *
+ * Deliberately one-way. Unticking it would mean a refund that the bank has
+ * already been told about looks outstanding again, which is the more dangerous
+ * mistake of the two — it invites a second entry and a double refund.
+ */
+async function markRefundEnteredAtBank(req, res, next) {
+  try {
+    const order = await Order.findById(req.params.id || null);
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    if (!order.refund?.approvedAt) {
+      return res.status(400).json({ error: "This order has no recorded refund." });
+    }
+
+    if (order.refund.enteredAtBankAt) {
+      return res.status(400).json({ error: "This refund is already marked as entered at the bank." });
+    }
+
+    order.refund.enteredAtBankAt = new Date();
+    order.refund.enteredAtBankBy = req.user?.email;
+    await order.save();
+
+    AuditLog.create({
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      action: "order.refund_entered_at_bank",
+      targetType: "Order",
+      targetId: order._id,
+      metadata: { amount: order.refund.amount },
+    }).catch((error) => {
+      console.error("[audit] order.refund_entered_at_bank log failed:", error);
+    });
+
+    res.json({ refund: order.refund });
+  } catch (error) {
+    next(error);
+  }
+}
+
 module.exports = {
   getOrder,
   getAdminOrders,
   getAdminOrdersByDate,
   updateOrderStatus,
+  processRefund,
+  markRefundEnteredAtBank,
   getClientOrders,
   createOrder,
 };

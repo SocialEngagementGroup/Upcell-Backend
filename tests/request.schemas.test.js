@@ -1,7 +1,6 @@
 const {
   productFilterSchema,
   wholesaleFormSchema,
-  captureSchema,
   orderSchema,
   categorySchema,
   productSchema,
@@ -10,6 +9,8 @@ const {
   newsletterSubscriberSchema,
   contactSubmissionSchema,
   analyticsEventSchema,
+  monthlySellSchema,
+  cartLookupSchema,
 } = require("../src/schemas/request.schemas");
 
 describe("productFilterSchema (NoSQL injection fix — POST /products/:n/:skip)", () => {
@@ -83,24 +84,6 @@ describe("wholesaleFormSchema (mass-assignment fix)", () => {
   });
 });
 
-describe("captureSchema (PayPal order id validation)", () => {
-  it("accepts a realistic PayPal order id", () => {
-    expect(captureSchema.parse({ orderID: "8U481631H66031715" }).orderID).toBe("8U481631H66031715");
-  });
-
-  it("rejects an object payload (NoSQL injection attempt via orderID)", () => {
-    expect(() => captureSchema.parse({ orderID: { $ne: null } })).toThrow();
-  });
-
-  it("rejects a garbage/oversized string", () => {
-    expect(() => captureSchema.parse({ orderID: "a".repeat(200) })).toThrow();
-  });
-
-  it("rejects an empty string", () => {
-    expect(() => captureSchema.parse({ orderID: "" })).toThrow();
-  });
-});
-
 describe("orderSchema.idempotencyKey", () => {
   const base = {
     name: "Jane Doe",
@@ -132,6 +115,17 @@ describe("orderSchema.idempotencyKey", () => {
 
   it("rejects a shipping tier outside the enum", () => {
     expect(() => orderSchema.parse({ ...base, shipping: "overnight-drone" })).toThrow();
+  });
+
+  it("rejects an orders array longer than a real cart could be", () => {
+    // One entry per unit on a public endpoint that drives a Mongo $in and a
+    // per-id scan — without a ceiling a single request can carry hundreds of
+    // thousands of ids.
+    const tooMany = Array(101).fill("507f1f77bcf86cd799439011");
+    expect(() => orderSchema.parse({ ...base, orders: tooMany })).toThrow();
+    expect(() =>
+      orderSchema.parse({ ...base, orders: tooMany.slice(0, 100) })
+    ).not.toThrow();
   });
 
   it("rejects an empty orders array — a checkout needs at least one item", () => {
@@ -292,34 +286,25 @@ describe("orderSchema — missing fields, wrong types, injection shapes", () => 
     expect(() => orderSchema.parse({ ...base, paidWith: "Cash" })).toThrow();
   });
 
-  it.each(["Stripe", "Paypal", "Card", "Manual"])("accepts paidWith value '%s'", (paidWith) => {
-    expect(() => orderSchema.parse({ ...base, paidWith })).not.toThrow();
-  });
+  // The full accepted set. Stripe and Paypal were dropped with their gateways;
+  // BankOfAmerica is the live one and belongs here explicitly, so a future edit
+  // to the enum cannot quietly stop accepting the only gateway that works.
+  it.each(["BankOfAmerica", "Card", "Manual"])(
+    "accepts paidWith value '%s'",
+    (paidWith) => {
+      expect(() => orderSchema.parse({ ...base, paidWith })).not.toThrow();
+    }
+  );
+
+  it.each(["Stripe", "Paypal"])(
+    "rejects retired gateway '%s'",
+    (paidWith) => {
+      expect(() => orderSchema.parse({ ...base, paidWith })).toThrow();
+    }
+  );
 
   it("rejects an idempotencyKey over the 100-character limit", () => {
     expect(() => orderSchema.parse({ ...base, idempotencyKey: "x".repeat(101) })).toThrow();
-  });
-});
-
-describe("captureSchema — additional boundary/type cases", () => {
-  it("rejects a missing orderID", () => {
-    expect(() => captureSchema.parse({})).toThrow();
-  });
-
-  it("rejects a lowercase orderID (PayPal ids are uppercase)", () => {
-    expect(() => captureSchema.parse({ orderID: "8u481631h66031715" })).toThrow();
-  });
-
-  it("rejects a numeric orderID (wrong type)", () => {
-    expect(() => captureSchema.parse({ orderID: 8481631 })).toThrow();
-  });
-
-  it("accepts an orderID at the 10-character minimum boundary", () => {
-    expect(() => captureSchema.parse({ orderID: "AB12345678" })).not.toThrow();
-  });
-
-  it("rejects an orderID one character below the minimum boundary", () => {
-    expect(() => captureSchema.parse({ orderID: "AB1234567" })).toThrow();
   });
 });
 
@@ -614,5 +599,47 @@ describe("analyticsEventSchema — enums and nested metadata record", () => {
   it("rejects a missing required name", () => {
     const { name: _omit, ...rest } = base;
     expect(() => analyticsEventSchema.parse(rest)).toThrow();
+  });
+});
+
+describe("monthlySellSchema (NoSQL injection fix — POST /monthly-sell)", () => {
+  it("accepts a well-formed name and amount", () => {
+    const result = monthlySellSchema.parse({ name: "gt-sells", amount: 1234.5 });
+    expect(result).toEqual({ name: "gt-sells", amount: 1234.5 });
+  });
+
+  it("rejects an operator object in place of name (the actual injection vector)", () => {
+    // Before the fix, name went straight into MonthlySell.findOne({ name }) —
+    // an object like this would have been interpreted as a query operator.
+    expect(() => monthlySellSchema.parse({ name: { $ne: null }, amount: 1 })).toThrow();
+  });
+
+  it("rejects a non-numeric amount", () => {
+    expect(() => monthlySellSchema.parse({ name: "gt-sells", amount: "not a number" })).toThrow();
+  });
+
+  it("rejects a blank name", () => {
+    expect(() => monthlySellSchema.parse({ name: "   ", amount: 1 })).toThrow();
+  });
+});
+
+describe("cartLookupSchema (POST /cart)", () => {
+  it("accepts a list of well-formed product ids", () => {
+    const result = cartLookupSchema.parse({ ids: ["6a79f7298341f33d9a65b0b7"] });
+    expect(result.ids).toEqual(["6a79f7298341f33d9a65b0b7"]);
+  });
+
+  it("defaults to an empty list when ids is omitted", () => {
+    expect(cartLookupSchema.parse({}).ids).toEqual([]);
+  });
+
+  it("rejects a malformed id instead of letting it reach Mongo as a bad $in entry", () => {
+    expect(() => cartLookupSchema.parse({ ids: ["not-an-object-id"] })).toThrow();
+  });
+
+  it("rejects ids that isn't an array at all", () => {
+    // The original bug: a non-array ids throws an unhandled CastError deep in
+    // the driver, which the global handler turns into a 500.
+    expect(() => cartLookupSchema.parse({ ids: { $ne: null } })).toThrow();
   });
 });

@@ -1,8 +1,22 @@
 const ParentProduct = require("../models/parentProduct.model");
 const SingleVariation = require("../models/singleVariation.model");
-const AvailableCatagories = require("../models/availableCategory.model");
+
+// The shop sells devices. Accessories are real products so the cart and
+// checkout work on them, but they are offered on a device's own page and
+// must never appear in a listing, a search, a filter, or as a variant of a
+// phone. Lookups by id deliberately do not use this.
+const BROWSABLE = { isAccessory: { $ne: true } };
 
 const productCardFields = "parentCatagory productName categoryName description storage color price image outOfStock";
+
+// The fields the admin product-management pages (AllProduct, AddProduct)
+// actually render or edit — confirmed by grepping SingleProductGroup.jsx and
+// ProductBatchForm.jsx field-by-field, not assumed. Deliberately includes
+// discountPrice/originalPrice, which the customer-facing productCardFields
+// above does not, and deliberately has no BROWSABLE filter — staff manage
+// accessory pricing/stock here too, unlike the public shop listing.
+const adminProductFields =
+  "parentCatagory productName categoryName storage color price discountPrice originalPrice outOfStock image";
 
 const normalizeProductCard = (product) => ({
   ...product,
@@ -68,9 +82,29 @@ const groupProductCards = (products = []) => {
   return Array.from(map.values()).map(normalizeProductCard);
 };
 
-async function getProducts(req, res) {
-  const allProduct = await SingleVariation.find().lean();
-  res.json(allProduct);
+async function getProducts(req, res, next) {
+  try {
+    const allProduct = await SingleVariation.find().lean();
+    res.json(allProduct);
+  } catch (error) {
+    next(error);
+  }
+}
+
+// AllProduct and AddProduct both need the entire catalog in memory for
+// instant client-side search and duplicate-name detection while typing — the
+// same reasoning that kept the shop page's own filtering client-side (see
+// getShopProducts). This is that same fix applied here: same ungrouped,
+// unfiltered variation list, only the fields these two admin pages actually
+// use. No BROWSABLE filter — unlike the public shop, admin tooling must
+// still manage accessory pricing and stock.
+async function getAdminProducts(req, res, next) {
+  try {
+    const products = await SingleVariation.find({}, adminProductFields).lean();
+    res.status(200).json(products);
+  } catch (error) {
+    next(error);
+  }
 }
 
 async function getProduct(req, res, next) {
@@ -86,20 +120,39 @@ async function getProduct(req, res, next) {
 async function getProductsByParent(req, res, next) {
   try {
     const id = req.params.parentId;
-    const product = await SingleVariation.find({ parentCatagory: id }).lean();
+    const product = await SingleVariation.find({ parentCatagory: id, ...BROWSABLE }).lean();
     res.status(200).json(product);
   } catch (error) {
     next(error);
   }
 }
 
+// Deliberately returns individual variations, not grouped cards — grouping,
+// filtering and search are the shop page's own job, done client-side against
+// this same data, so results stay instant with no network round trip per
+// click. This endpoint's only job is to hand that page a small enough
+// payload to start with: only the fields a listing card needs, browsable
+// products only, no accessories. See Frontend/src/pages/Shop/ShopPage.jsx.
 async function getShopProducts(req, res, next) {
   try {
-    const products = await SingleVariation.find({}, productCardFields)
+    const products = await SingleVariation.find(BROWSABLE, productCardFields)
       .sort({ outOfStock: 1, price: 1 })
       .lean();
 
-    res.status(200).json(groupProductCards(products));
+    // A public catalogue listing, identical for every visitor, so it can sit in
+    // the browser's own cache. Express already sends an ETag on this response;
+    // what was missing is a Cache-Control that makes the browser willing to
+    // revalidate against it, which turns a repeat visit into a 304 with no body
+    // instead of a fresh download of the whole list.
+    //
+    // 60 seconds matches the frontend's React Query staleTime, so the two
+    // layers expire together rather than one serving data the other considers
+    // stale. stale-while-revalidate lets a return visit paint instantly from
+    // cache while the refresh happens behind it — a price or stock edit is
+    // visible within about a minute, which is the same delay the app already
+    // accepts today.
+    res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
+    res.status(200).json(products);
   } catch (error) {
     next(error);
   }
@@ -108,7 +161,9 @@ async function getShopProducts(req, res, next) {
 async function getRecommendedProducts(req, res, next) {
   try {
     const { excludeParentId, limit = 4 } = req.query;
-    const query = excludeParentId ? { parentCatagory: { $ne: excludeParentId } } : {};
+    const query = excludeParentId
+      ? { parentCatagory: { $ne: excludeParentId }, ...BROWSABLE }
+      : { ...BROWSABLE };
     const maxResults = Math.min(Number(limit) || 4, 12);
 
     const products = await SingleVariation.find(query, productCardFields)
@@ -116,31 +171,6 @@ async function getRecommendedProducts(req, res, next) {
       .lean();
 
     res.status(200).json(groupProductCards(products).slice(0, maxResults));
-  } catch (error) {
-    next(error);
-  }
-}
-
-async function searchProducts(req, res, next) {
-  const query = req.query.search;
-
-  if (!query) return res.status(200).json([]);
-
-  const searchTerms = query.split(" ");
-
-  try {
-    const filterredWord = searchTerms
-      .filter((word) => !/^iphone$/i.test(word))
-      .join(" ");
-
-    const escaped = filterredWord.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const regex = new RegExp(escaped, "i");
-
-    const result = await SingleVariation.find({
-      $or: [{ productName: { $regex: regex } }],
-    }).lean();
-
-    res.status(200).json(result);
   } catch (error) {
     next(error);
   }
@@ -156,7 +186,7 @@ async function getProductSuggestions(req, res, next) {
 
     // Light projection + sorted so the best representative (in-stock, cheapest) comes first.
     const matches = await SingleVariation.find(
-      { $or: [{ productName: regex }, { categoryName: regex }] },
+      { $or: [{ productName: regex }, { categoryName: regex }], ...BROWSABLE },
       "productName parentCatagory categoryName image price outOfStock"
     )
       .sort({ outOfStock: 1, price: 1 })
@@ -204,6 +234,7 @@ async function getFilteredProducts(req, res, next) {
       "color.name": color.length ? { $in: color } : { $exists: true },
       condition: condition.length ? { $in: condition } : { $exists: true },
       price: { $gte: price[0], $lte: price[1] },
+      ...BROWSABLE,
     };
 
     const products = await SingleVariation.find(searchQuery)
@@ -289,13 +320,6 @@ async function createProduct(req, res, next) {
         }))
       );
 
-      const act = await AvailableCatagories.find();
-      if (act[0]?._id) {
-        await AvailableCatagories.findByIdAndUpdate(act[0]._id, {
-          $addToSet: { categories: productName },
-        });
-      }
-
       return res.status(wasExistingParent ? 200 : 201).json({
         parent,
         variants: createdVariants,
@@ -305,14 +329,6 @@ async function createProduct(req, res, next) {
     const product = req.body;
     const newProduct = new SingleVariation(product);
     await newProduct.save();
-
-    const act = await AvailableCatagories.find();
-    const idCtg = act[0]?._id;
-    if (idCtg) {
-      await AvailableCatagories.findByIdAndUpdate(idCtg, {
-        $addToSet: { categories: newProduct.productName },
-      });
-    }
 
     res.status(200).json(newProduct);
   } catch (error) {
@@ -348,37 +364,38 @@ async function deleteProductFamily(req, res, next) {
   }
 }
 
-async function getRepresentativeProducts(req, res, next) {
+// The accessories offered alongside a device on its product page. Returned as
+// real products with real ids, so adding one to the cart goes through exactly
+// the same path as adding a phone — no special handling anywhere downstream.
+async function getAccessories(req, res, next) {
   try {
-    const availCatagoriesData = await AvailableCatagories.find();
-    if (!availCatagoriesData.length) return res.status(200).json([]);
-    const { categories } = availCatagoriesData[0];
+    const accessories = await SingleVariation.find(
+      { isAccessory: true, outOfStock: { $ne: true } },
+      "productName description price image storage color condition"
+    )
+      .sort({ price: 1 })
+      .lean();
 
-    const allMatches = await SingleVariation.find({ productName: { $in: categories } }).lean();
-
-    const products = categories
-      .map((name) => allMatches.find((p) => p.productName === name))
-      .filter(Boolean);
-
-    res.status(200).json(products);
+    res.status(200).json(accessories);
   } catch (error) {
     next(error);
   }
 }
 
+
 module.exports = {
   getProducts,
+  getAdminProducts,
   getProduct,
   getProductsByParent,
   getShopProducts,
   getRecommendedProducts,
-  searchProducts,
   getProductSuggestions,
   getFilteredProducts,
   createProduct,
   updateProduct,
   deleteProduct,
   deleteProductFamily,
-  getRepresentativeProducts,
+  getAccessories,
 };
 

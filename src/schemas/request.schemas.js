@@ -95,7 +95,7 @@ const productFilterSchema = z.object({
 // We ship to US addresses only (see Delivery Policy §2 "Shipping Destinations
 // and Export"). The checkout form sends a fixed "United States", but the
 // schema is the actual gate — it's shared by all three order-creation routes
-// (POST /orders, /checkout-stripe, /checkoutcustomer), so a request crafted
+// (currently POST /orders and /boa/prepare-payment), so a request crafted
 // outside the form can't slip a foreign destination past it either. Accepts
 // the handful of spellings a customer or an autofill might supply and
 // normalises them, so downstream code and the admin view see one value.
@@ -115,17 +115,54 @@ const usOnlyCountryField = trimmedString("Country", 2, 120)
   )
   .transform(() => "United States");
 
+// 50 states, DC, and the US territories the postal service delivers to — the
+// set the card networks accept for a US address.
+const US_STATE_CODES = new Set(
+  ("AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO " +
+   "MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY " +
+   "DC AS GU MP PR VI AA AE AP").split(" ")
+);
+
 const orderSchema = z.object({
   name: trimmedString("Name", 2, 120),
   email: emailField,
   phone: phoneField,
   city: trimmedString("City", 2, 120),
-  postal: trimmedString("Postal code", 3, 20),
+  // Two-letter US state code. The bank compares this against the card issuer's
+  // records (AVS) and the profile is set to reverse the authorisation when that
+  // check fails — so a missing or malformed state silently costs a sale.
+  // Optional here because the manual-order path predates it and older clients
+  // still post without it.
+  // "FD" is two letters and passed the old length check, but it is not a state
+  // — the issuer's address check fails and the sale is lost. Match against the
+  // real list instead of just counting characters.
+  state: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .refine((value) => US_STATE_CODES.has(value), "Enter a valid 2-letter US state code")
+    .optional(),
+  // A real US ZIP, not "121" or "121212". The gateway rejects a malformed
+  // postal code outright (reason code 102), and a valid-but-wrong one fails
+  // the issuer's address check — either way the customer sees "payment failed"
+  // with no clue that a typo in this box caused it. Catching it at the form is
+  // the only place the customer can actually fix it.
+  postal: z
+    .string()
+    .trim()
+    .regex(/^\d{5}(-\d{4})?$/, "Enter a 5-digit ZIP code, e.g. 94043"),
   street: trimmedString("Street", 5, 200),
   country: usOnlyCountryField,
-  orders: z.array(z.string().regex(/^[0-9a-fA-F]{24}$/)).min(1, "At least one product is required"),
+  // The max matters as much as the min: this array is one entry per unit, it
+  // reaches an unauthenticated-until-now endpoint, and it drives both a Mongo
+  // $in and a per-id scan. Without a ceiling a single request could carry
+  // hundreds of thousands of ids. 100 units is far above any real cart.
+  orders: z
+    .array(z.string().regex(/^[0-9a-fA-F]{24}$/))
+    .min(1, "At least one product is required")
+    .max(100, "Too many items in one order"),
   shipping: z.enum(["standard", "priority", "express"]).default("standard"),
-  paidWith: z.enum(["Stripe", "Paypal", "Card", "Manual"]).optional(),
+  paidWith: z.enum(["Card", "Manual", "BankOfAmerica"]).optional(),
   // Client-generated, once per checkout attempt — forwarded as the
   // PayPal-Request-Id / Stripe idempotencyKey on the outbound gateway call
   // so a retried request lands on the original transaction. Optional since
@@ -133,12 +170,6 @@ const orderSchema = z.object({
   idempotencyKey: z.string().trim().max(100).optional(),
 });
 
-const captureSchema = z.object({
-  // PayPal order IDs are uppercase alphanumeric, ~17 chars in practice, but
-  // PayPal doesn't guarantee an exact length — this just blocks obviously
-  // malformed/garbage input before it's used to build the PayPal API URL.
-  orderID: z.string().trim().regex(/^[A-Z0-9]{10,30}$/, "Invalid PayPal order ID"),
-});
 
 const tradeInRequestSchema = z.object({
   device: trimmedString("Device", 1, 60),
@@ -173,6 +204,51 @@ const contactSubmissionSchema = z.object({
   message: trimmedString("Message", 10, 3000),
 });
 
+// A waived fee always carries a reason, enforced here rather than only in the
+// controller — a request that fails validation never reaches business logic
+// that could act on half-checked input.
+// What a customer submits. reason is required and has a floor: "broken" tells
+// staff nothing they can act on before the device has even been sent back.
+const refundRequestCreateSchema = z.object({
+  orderId: objectIdField,
+  itemIds: z.array(objectIdField).min(1, "Choose at least one item to return").max(50),
+  reason: z
+    .string()
+    .trim()
+    .min(10, "Please describe the problem in a little more detail")
+    .max(2000, "Reason must be 2000 characters or fewer"),
+});
+
+// What staff send when moving a request along. Every field is optional here
+// because which ones are required depends on the destination status — the
+// controller enforces that, since only it knows where the request is coming
+// from.
+const refundRequestStatusSchema = z
+  .object({
+    status: z.enum(["ReturnApproved", "DeviceReceived", "Approved", "Refunded", "Rejected"]),
+    returnInstructions: z.string().trim().max(4000).optional(),
+    rejectionReason: z.string().trim().max(1000).optional(),
+    inspectionNotes: z.string().trim().max(2000).optional(),
+    waiveRestockingFee: z.boolean().optional().default(false),
+    waiveReason: z.string().trim().max(500).optional(),
+  })
+  .refine((data) => !data.waiveRestockingFee || Boolean(data.waiveReason), {
+    message: "A reason is required to waive the restocking fee.",
+    path: ["waiveReason"],
+  });
+
+const refundSchema = z
+  .object({
+    itemIds: z.array(objectIdField).max(50).optional(),
+    waiveRestockingFee: z.boolean().optional().default(false),
+    waiveReason: z.string().trim().max(500, "Reason must be 500 characters or fewer").optional(),
+    notes: z.string().trim().max(1000, "Notes must be 1000 characters or fewer").optional(),
+  })
+  .refine((data) => !data.waiveRestockingFee || Boolean(data.waiveReason), {
+    message: "A reason is required to waive the restocking fee.",
+    path: ["waiveReason"],
+  });
+
 const analyticsEventSchema = z.object({
   category: z.enum(["form_submit", "form_dropoff", "form_engagement", "admin_api_error"]),
   name: trimmedString("Event name", 1, 120),
@@ -184,16 +260,41 @@ const analyticsEventSchema = z.object({
   metadata: z.record(z.string(), z.any()).optional().default({}),
 });
 
+// ids went straight into SingleVariation.find({ _id: { $in: ids || [] } })
+// with no shape check. A Mongo operator object can't smuggle itself in
+// through an array element of $in, so this was never truly exploitable — but
+// a non-array ids (an object, a bare string) throws a CastError with no
+// .status, which the global handler turns into a 500 and pages the admin
+// over what is really just a malformed request.
+const cartLookupSchema = z.object({
+  ids: z.array(z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid product id")).default([]),
+});
+
+// name was being read straight into a Mongo filter (MonthlySell.findOne({
+// name })) with no shape check — a non-string value (an object such as
+// {"$ne": null}) would be interpreted as a query operator rather than a
+// literal to match. Admin-only, so not attacker-reachable from outside, but
+// a real injection pattern regardless of who can trigger it.
+const monthlySellSchema = z.object({
+  name: trimmedString("Name", 1, 60),
+  amount: z.number().finite("Amount must be a number"),
+});
+
 module.exports = {
+  US_STATE_CODES,
   categorySchema,
   productCreateSchema,
   productSchema,
   orderSchema,
-  captureSchema,
   productFilterSchema,
   wholesaleFormSchema,
   tradeInRequestSchema,
   newsletterSubscriberSchema,
   contactSubmissionSchema,
   analyticsEventSchema,
+  refundSchema,
+  refundRequestCreateSchema,
+  refundRequestStatusSchema,
+  monthlySellSchema,
+  cartLookupSchema,
 };

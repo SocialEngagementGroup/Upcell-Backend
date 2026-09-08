@@ -1,0 +1,742 @@
+const crypto = require("crypto");
+const Order = require("../models/order.model");
+const { scrubPayload } = require("../utils/scrubPayload");
+const { US_STATE_CODES } = require("../schemas/request.schemas");
+const { round2 } = require("../utils/money");
+const {
+  reserveVariations,
+  releaseReservation,
+  soldAway,
+  markSold,
+  variationIdsFromOrder,
+} = require("../services/inventory");
+const { sendOpsAlert } = require("../services/alertService");
+const {
+  makeOrderObjAndTotal,
+  hasPendingCheckout,
+  logPaymentEvent,
+  orderTotal,
+  sendPaymentReceiptEmail,
+  sendAdminNewOrderEmail,
+} = require("./checkout.controller");
+
+const GATEWAY = "BankOfAmerica";
+
+const accessKey = process.env.BOA_ACCESS_KEY;
+const secretKey = process.env.BOA_SECRET_KEY;
+const profileId = process.env.BOA_PROFILE_ID;
+const endpoint = process.env.BOA_ENDPOINT;
+const frontendUrl = process.env.FRONTEND_URL;
+
+// Secure Acceptance signs a flat "k=v,k=v" string built from the field names
+// listed in signed_field_names, in exactly that order — not the JSON body and
+// not a sorted key list. Rebuilding it the same way on both sides is the whole
+// contract, so this helper is the single place that knows the format.
+const buildDataToSign = (fields, fieldNames) =>
+  fieldNames.map((name) => `${name}=${fields[name] ?? ""}`).join(",");
+
+const hmac = (data) =>
+  crypto.createHmac("sha256", secretKey).update(data, "utf8").digest("base64");
+
+// signed_field_names lists itself, which reads oddly but is required: without
+// it, an attacker could drop a field from the list and from the payload and
+// still produce a signature that verified.
+exports.buildSignedFields = (fields) => {
+  const fieldNames = [...Object.keys(fields), "signed_field_names"];
+  const withNames = { ...fields, signed_field_names: fieldNames.join(",") };
+  return { ...withNames, signature: hmac(buildDataToSign(withNames, fieldNames)) };
+};
+
+// Constant-time comparison. A plain === leaks how many leading characters
+// matched through response timing, which is enough to forge a signature one
+// character at a time given enough attempts.
+exports.verifySignature = (body) => {
+  if (!body?.signature || !body?.signed_field_names) return false;
+
+  const fieldNames = String(body.signed_field_names).split(",");
+  const expected = Buffer.from(hmac(buildDataToSign(body, fieldNames)));
+  const received = Buffer.from(String(body.signature));
+
+  if (expected.length !== received.length) return false;
+  return crypto.timingSafeEqual(expected, received);
+};
+
+// The gateway wants a 2-letter ISO country code. Our checkout form collects
+// free text, so "United States" arrives where "US" is expected. We only ship
+// within the US (see Delivery Policy), so anything unrecognised falls back to
+// US rather than failing the payment over a formatting difference.
+const toCountryCode = (value) => {
+  const raw = String(value || "").trim();
+  if (raw.length === 2) return raw.toUpperCase();
+  if (/united\s*states|^usa$|^u\.s\.?a?\.?$/i.test(raw)) return "US";
+  return "US";
+};
+
+// Secure Acceptance wants "2026-09-01T14:32:05Z" — ISO 8601 with no
+// milliseconds. toISOString() includes them, which the gateway rejects.
+const signedDateTime = () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+
+// The checkout form collects one "Name" field, but the gateway wants forename
+// and surname separately and validates both.
+//
+// A single-word name used to send surname="-", which Secure Acceptance rejects
+// as invalid field data — reason code 102, the whole transaction declined. Any
+// customer entering just their first name hit it, and the error they saw said
+// nothing about a name. Repeating the one word they gave us is valid data and
+// costs nothing: AVS checks street and postal code, never the name.
+const splitName = (fullName) => {
+  const parts = String(fullName || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { forename: "Customer", surname: "Customer" };
+  if (parts.length === 1) return { forename: parts[0], surname: parts[0] };
+  return { forename: parts[0], surname: parts.slice(1).join(" ") };
+};
+
+// Secure Acceptance rejects a phone containing anything but digits — the
+// "(313) 288-8312" a customer naturally types is invalid field data, again
+// reason code 102. Strip to digits and cap at the gateway's 15-character
+// limit; an empty result means send nothing rather than send garbage.
+const toGatewayPhone = (value) => String(value || "").replace(/\D/g, "").slice(0, 15);
+
+const OBJECT_ID_PATTERN = /^[0-9a-fA-F]{24}$/;
+
+// Secure Acceptance echoes every field we sent back with a "req_" prefix:
+// req_reference_number, req_amount, req_transaction_uuid. Only values the
+// gateway itself produces (decision, transaction_id, auth_amount) come back
+// unprefixed.
+//
+// Reading the unprefixed name for an echoed field silently yields undefined,
+// which is exactly how two ACCEPTed payments on 2026-09-01 were verified,
+// logged, and then dropped: findById(undefined) returned null and the handler
+// answered 200. The unprefixed fallback is kept only so a replayed older
+// payload still resolves.
+const echoed = (body, name) => body[`req_${name}`] ?? body[name];
+
+// The amount is inside the signed field set, so a mismatch is not tampering —
+// it means the bank authorised a different figure than the order is worth
+// (a partial authorisation, or a bug on our side re-pricing between hand-off
+// and confirmation). Either way that is not a payment we should mark complete
+// without a human looking at it.
+const AMOUNT_TOLERANCE = 0.01;
+
+// On a rejection the gateway names every field it objected to, as invalidField_0,
+// invalidField_1, ... Nothing read them, so a reason-102 decline ("one or more
+// fields contain invalid data") arrived with the diagnosis attached and we threw
+// it away — the cause had to be reconstructed by diffing paid against failed
+// orders in the database. Capture them so the log says which field was wrong.
+const invalidFields = (body) =>
+  Object.keys(body)
+    .filter((key) => /^invalidField_\d+$/.test(key))
+    .sort((a, b) => Number(a.split("_")[1]) - Number(b.split("_")[1]))
+    .map((key) => body[key]);
+
+// Step 1 of the flow. The order is written before signing so its _id can be
+// the reference_number — that _id is the only thing tying the bank's later
+// confirmation back to an order.
+exports.preparePayment = async (req, res, next) => {
+  try {
+    if (!accessKey || !secretKey || !endpoint || !profileId) {
+      logPaymentEvent({
+        gateway: GATEWAY,
+        eventType: "config_error",
+        metadata: {
+          missing: [
+            !accessKey && "BOA_ACCESS_KEY",
+            !secretKey && "BOA_SECRET_KEY",
+            !endpoint && "BOA_ENDPOINT",
+            !profileId && "BOA_PROFILE_ID",
+          ].filter(Boolean),
+        },
+      });
+      return res.status(500).json({ error: "Payment is not configured." });
+    }
+
+    // orderSchema leaves state optional, deliberately: the admin-created Manual
+    // path predates the field and does not go through a gateway at all. This
+    // path does, and the hosted page collects no billing information — so a
+    // checkout without a state posts an empty bill_to_address_state, the
+    // issuer's address check has nothing to compare, and the profile's
+    // "reverse on failed AVS" rule turns that into a reversed authorisation.
+    // The customer sees an unexplained failure and no field on any form that
+    // would have told them why.
+    //
+    // Refused here rather than sent empty. A 400 the customer can act on beats
+    // a decline nobody can explain, and this is checked before anything is
+    // reserved or written so a rejected attempt leaves no order and no hold.
+    const state = String(req.body?.state || "").trim().toUpperCase();
+    if (!US_STATE_CODES.has(state)) {
+      return res.status(400).json({
+        error: "Enter a valid 2-letter US state code so the bank can verify your billing address.",
+      });
+    }
+
+    if (await hasPendingCheckout(req.body?.email)) {
+      return res
+        .status(409)
+        .json({ error: "A checkout for this email is already in progress." });
+    }
+
+    const { order, totalPrice } = await makeOrderObjAndTotal({
+      req,
+      paidWith: GATEWAY,
+    });
+
+    const transactionUuid = crypto.randomUUID();
+
+    // Hold the devices before the customer leaves for the bank. Every device is
+    // a single unit, so without this two people can be authorised for the same
+    // phone and one has to be refunded by hand. Reserved before the order is
+    // written so a customer who cannot be served does not leave an order behind.
+    const reservation = await reserveVariations(
+      variationIdsFromOrder({ line_items: order.line_items }),
+      transactionUuid
+    );
+
+    if (!reservation.ok) {
+      const error = new Error(
+        "Some items in your cart are no longer available. Please review your cart and try again."
+      );
+      error.status = 409;
+      error.details = reservation.unavailable;
+      throw error;
+    }
+
+    let newOrder;
+    try {
+      newOrder = await Order.create({
+        ...order,
+        boaTransactionUuid: transactionUuid,
+        // The immutable record of what was actually signed and sent to the
+        // bank. merchantPost verifies against this rather than only ever
+        // re-summing line_items at confirmation time — see the comment there.
+        signedAmount: round2(totalPrice),
+      });
+    } catch (error) {
+      // Never leave stock held for an order that was never created.
+      await releaseReservation(transactionUuid);
+      throw error;
+    }
+
+    const { forename, surname } = splitName(newOrder.name);
+
+    // authorization, not sale: devices ship after checkout, so the money is
+    // only captured at dispatch. A sale here would take payment for something
+    // still sitting on the shelf.
+    const fields = exports.buildSignedFields({
+      access_key: accessKey,
+      // Identifies which Secure Acceptance profile to run this through. Without
+      // it the gateway can't resolve the configuration and rejects the whole
+      // request with a 403 "not authorized" before processing anything.
+      profile_id: profileId,
+      transaction_uuid: transactionUuid,
+      signed_date_time: signedDateTime(),
+      locale: "en",
+      transaction_type: "authorization",
+      reference_number: newOrder._id.toString(),
+      amount: totalPrice.toFixed(2),
+      currency: "usd",
+      // Billing Information is switched off on the hosted payment form, so the
+      // bank has no other source for these. Without them AVS has nothing to
+      // check against and the "reverse on failed AVS" rule misfires.
+      bill_to_forename: forename,
+      bill_to_surname: surname,
+      bill_to_email: newOrder.email,
+      bill_to_phone: toGatewayPhone(newOrder.phone),
+      bill_to_address_line1: newOrder.street,
+      bill_to_address_city: newOrder.city,
+      // The normalised value from the guard above, not newOrder.state.
+      // Never `|| ""`: an empty state passes the gateway's own field check and
+      // then fails the issuer's address check, which under this profile
+      // reverses the authorisation. Taking it from the guard also means the
+      // uppercasing does not depend on the validation middleware having run
+      // first — the bank gets "NY" whether the customer typed "ny" or not.
+      bill_to_address_state: state,
+      bill_to_address_postal_code: newOrder.postal,
+      bill_to_address_country: toCountryCode(newOrder.country),
+    });
+
+    res.json({ endpoint, fields, orderId: newOrder._id });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Every answer the gateway can give, each mapped deliberately.
+//
+// REVIEW was missing, and an unmapped decision fell through to
+// "pending_payment" — which meant a payment a person at the bank was still
+// checking released the device back on sale immediately and was then swept away
+// as an abandoned cart twelve hours later, while the customer could still be
+// charged. It needs a state of its own precisely because it is neither settled
+// nor abandoned.
+const DECISION_STATUS = {
+  ACCEPT: "Processing",
+  REVIEW: "under_review",
+  DECLINE: "payment failed",
+  ERROR: "payment failed",
+  CANCEL: "payment failed",
+};
+
+const REVIEW_STATUS = "under_review";
+const REVIEW_STATUS_DECISION = "REVIEW";
+
+// A decision the gateway has never sent us before. Treated as unsettled and
+// reported rather than guessed at — assuming "failed" would release a device
+// for a payment that may have succeeded, and assuming "paid" is worse.
+const UNKNOWN_DECISION_STATUS = "pending_payment";
+
+// Step 2. This is the only thing that marks an order paid — the customer's
+// browser coming back proves nothing, since anyone can request that URL.
+exports.merchantPost = async (req, res, next) => {
+  try {
+    const body = req.body || {};
+
+    if (!exports.verifySignature(body)) {
+      logPaymentEvent({
+        gateway: GATEWAY,
+        eventType: "signature_rejected",
+        gatewayReference: body.transaction_id,
+        metadata: { reference_number: echoed(body, "reference_number") ?? null },
+      });
+      // 200 on purpose. A 4xx tells the bank "delivery failed, retry", and
+      // retrying a forged request achieves nothing. Repeated rejections are a
+      // security signal to investigate, not a delivery problem to solve.
+      return res.sendStatus(200);
+    }
+
+    const referenceNumber = echoed(body, "reference_number");
+
+    const rejectedFields = invalidFields(body);
+
+    logPaymentEvent({
+      gateway: GATEWAY,
+      eventType: "webhook_received",
+      gatewayReference: body.transaction_id,
+      metadata: {
+        decision: body.decision,
+        reference_number: referenceNumber,
+        reason_code: body.reason_code,
+        message: body.message,
+        // Present only on a rejection, and the single most useful thing in the
+        // payload when one happens.
+        ...(rejectedFields.length ? { invalid_fields: rejectedFields } : {}),
+        // The bank's own account of the transaction, card data removed. This
+        // is the only independent evidence we hold if a customer later
+        // disputes a charge — the summary fields above are what we chose to
+        // keep, which is worth nothing when the question is what the bank
+        // actually said.
+        payload: scrubPayload(body),
+      },
+    });
+
+    // A confirmation whose reference we can't resolve means the bank believes
+    // money moved against an order we cannot find. Never silently 200 that
+    // away — it is the one event worth waking someone for.
+    if (!OBJECT_ID_PATTERN.test(referenceNumber || "")) {
+      logPaymentEvent({
+        gateway: GATEWAY,
+        eventType: "unmatched_confirmation",
+        gatewayReference: body.transaction_id,
+        metadata: {
+          reason: "missing_or_malformed_reference",
+          reference_number: referenceNumber ?? null,
+          decision: body.decision,
+        },
+      });
+      return res.sendStatus(200);
+    }
+
+    const order = await Order.findById(referenceNumber);
+    if (!order) {
+      logPaymentEvent({
+        gateway: GATEWAY,
+        eventType: "unmatched_confirmation",
+        gatewayReference: body.transaction_id,
+        metadata: {
+          reason: "no_such_order",
+          reference_number: referenceNumber,
+          decision: body.decision,
+        },
+      });
+      return res.sendStatus(200);
+    }
+
+    const knownDecision = Object.prototype.hasOwnProperty.call(
+      DECISION_STATUS,
+      body.decision
+    );
+
+    // A decision we have no mapping for is a gap in this handler, not a normal
+    // outcome. Silently filing it as pending is how it would stay a gap.
+    if (!knownDecision) {
+      logPaymentEvent({
+        gateway: GATEWAY,
+        eventType: "unknown_decision",
+        orderId: order._id,
+        gatewayReference: body.transaction_id,
+        metadata: { decision: body.decision ?? null, reason_code: body.reason_code },
+      });
+    }
+
+    let status = knownDecision ? DECISION_STATUS[body.decision] : UNKNOWN_DECISION_STATUS;
+    let paid = status === "Processing";
+
+    // The bank's own figure for this confirmation, read once and reused below
+    // both for the check and for what gets persisted on the order.
+    const authorisedAmount = Number(body.auth_amount ?? echoed(body, "amount"));
+
+    // Confirm the bank authorised what was actually signed and sent at
+    // checkout, not merely what the order happens to total right now.
+    // signedAmount is the immutable record written in preparePayment;
+    // orders created before that field existed fall back to a live
+    // recomputation, same as this check always worked before.
+    if (paid) {
+      const expected = order.signedAmount ?? orderTotal(order);
+      const currency = String(echoed(body, "currency") || "").toLowerCase();
+      const amountOk =
+        Number.isFinite(authorisedAmount) &&
+        Math.abs(authorisedAmount - expected) < AMOUNT_TOLERANCE;
+
+      if (!amountOk || (currency && currency !== "usd")) {
+        paid = false;
+        status = "pending_payment";
+        logPaymentEvent({
+          gateway: GATEWAY,
+          eventType: "amount_mismatch",
+          orderId: order._id,
+          gatewayReference: body.transaction_id,
+          metadata: { expected, authorised: authorisedAmount, currency: currency || null },
+        });
+      }
+    }
+
+    // The one hole the claim below cannot close on its own.
+    //
+    // An order under review is deliberately claimable a second time, because a
+    // review ends with the bank sending a follow-up carrying the real decision.
+    // That reopening is what makes a redelivered REVIEW — the same message, not
+    // a follow-up — pass straight through it and run the review branch again:
+    // a second entered_review event and, worse, a second urgent alert about a
+    // situation that has not changed. Render's cold start makes redelivery
+    // likely rather than theoretical, so this is a duplicate the team would
+    // actually see.
+    //
+    // Matching on the decision as well as the transaction id is what keeps the
+    // legitimate follow-up working. The bank may reuse the same transaction id
+    // when it settles a review, so transaction id alone would refuse the very
+    // message this reopening exists to accept.
+    const isRedeliveredReview =
+      order.status === REVIEW_STATUS &&
+      status === REVIEW_STATUS &&
+      order.boaTransactionId === body.transaction_id;
+
+    if (isRedeliveredReview) {
+      logPaymentEvent({
+        gateway: GATEWAY,
+        eventType: "duplicate_confirmation",
+        orderId: order._id,
+        gatewayReference: body.transaction_id,
+        metadata: { decision: body.decision, reason: "review_redelivered" },
+      });
+      return res.sendStatus(200);
+    }
+
+    // Claim the order atomically. The previous read-then-save left a window
+    // where two retried confirmations both passed the "already handled?" check
+    // and both sent the customer a receipt. The filter only matches an order
+    // that has not been claimed yet, so exactly one writer wins — and in Mongo
+    // `field: null` also matches documents where the field is absent.
+    //
+    // An order under review is claimable again, and it has to be. A review ends
+    // with the bank sending a second message carrying the real decision, and
+    // the first message already filled in boaTransactionId — so on the
+    // unclaimed-only filter that follow-up looked like a duplicate and was
+    // dropped. The customer would have been charged and the order left sitting
+    // in review for ever. Settled orders stay closed: only under_review reopens.
+    const claimed = await Order.findOneAndUpdate(
+      {
+        _id: order._id,
+        $or: [{ boaTransactionId: { $in: [null, ""] } }, { status: REVIEW_STATUS }],
+      },
+      {
+        $set: {
+          status,
+          paid,
+          boaTransactionId: body.transaction_id,
+          // The gateway's own decision string and its supporting detail,
+          // verbatim — Decision Manager is live, and until now a REVIEW had
+          // nowhere to record reason code, AVS, or CVN result.
+          boaDecision: body.decision,
+          reasonCode: body.reason_code || undefined,
+          avsResult: body.auth_avs_code || undefined,
+          cvnResult: body.auth_cv_result || undefined,
+          // Only set once the payment is actually confirmed — an
+          // authorisation that never clears is not "authorised at" anything.
+          ...(paid ? { authorizedAmount: authorisedAmount, authorizedAt: new Date() } : {}),
+          // Brand and last four only — enough to answer a customer's question,
+          // useless to anyone who breaches the database.
+          cardBrand: body.card_type_name || body.req_card_type,
+          cardLast4: String(body.req_card_number || "").slice(-4) || undefined,
+        },
+      },
+      { new: true }
+    );
+
+    if (!claimed) {
+      logPaymentEvent({
+        gateway: GATEWAY,
+        eventType: "duplicate_confirmation",
+        orderId: order._id,
+        gatewayReference: body.transaction_id,
+      });
+      return res.sendStatus(200);
+    }
+
+    const variationIds = variationIdsFromOrder(claimed);
+    // The status the order held *before* this message claimed it. A review that
+    // comes back settled arrives as a second confirmation, and it is the only
+    // way to tell "paid straight through" from "paid after a review" — which
+    // are different problems, because only the second one can have lost its
+    // devices to another customer in the meantime.
+    const wasUnderReview = order.status === REVIEW_STATUS;
+
+    if (claimed.paid) {
+      // A review no longer holds stock (see inventory.js), so between REVIEW
+      // and ACCEPT the twenty-minute hold expired and the device may have sold
+      // to somebody else. Check before selling it a second time.
+      const gone = wasUnderReview
+        ? await soldAway(variationIds).catch((error) => {
+            console.error("[boa] failed to re-check stock after review:", error);
+            // Unknown is not the same as fine. Treat a failed check as a
+            // collision so a person looks, rather than fulfilling blind.
+            return variationIds;
+          })
+        : [];
+
+      if (gone.length) {
+        // Money has moved and there is nothing to ship. Do not mark anything
+        // sold — the devices already belong to whoever bought them — and do
+        // not let this pass as an ordinary order.
+        await Order.updateOne(
+          { _id: claimed._id },
+          {
+            $set: {
+              fulfilmentBlocked: true,
+              fulfilmentBlockReason:
+                "Review accepted after the device had already sold to another customer. " +
+                "Contact the customer and reverse the authorisation in the Business Center.",
+            },
+          }
+        ).catch((error) => {
+          console.error("[boa] failed to flag an oversell collision:", error);
+        });
+
+        logPaymentEvent({
+          gateway: GATEWAY,
+          eventType: "oversell_collision",
+          orderId: claimed._id,
+          gatewayReference: body.transaction_id,
+          metadata: { soldAway: gone },
+        });
+
+        sendOpsAlert({
+          kind: "oversell_collision",
+          title: "Paid order with no device to ship",
+          summary:
+            "A payment under review was accepted after the device had already sold to " +
+            "another customer. The money has been taken and there is nothing to fulfil.",
+          lines: [
+            `Order ${claimed._id} (${claimed.email})`,
+            `Bank transaction ${body.transaction_id}`,
+            `Devices already sold: ${gone.join(", ")}`,
+            "Contact the customer today, and reverse the authorisation in the Business Center — the code cannot.",
+          ],
+          urgent: true,
+        }).catch((error) => {
+          console.error("[boa] oversell alert failed:", error);
+        });
+
+        // Still send the receipt. The customer has been charged, and a silent
+        // charge is worse than a receipt a person has to follow up.
+        sendPaymentReceiptEmail(claimed);
+        sendAdminNewOrderEmail(claimed);
+        return res.sendStatus(200);
+      }
+
+      // The money is confirmed, so the devices are sold. Nothing did this
+      // before: outOfStock could only be set by hand, so every sale depended on
+      // someone remembering to take that device off the shop afterwards.
+      await markSold(variationIds).catch((error) => {
+        console.error("[boa] failed to mark devices sold:", error);
+      });
+
+      logPaymentEvent({
+        gateway: GATEWAY,
+        eventType: "marked_paid",
+        orderId: claimed._id,
+        gatewayReference: body.transaction_id,
+      });
+      sendPaymentReceiptEmail(claimed);
+      sendAdminNewOrderEmail(claimed);
+    } else if (claimed.status === REVIEW_STATUS) {
+      // Undecided, not refused. Nothing is paid, nothing is marked sold, and —
+      // by decision — nothing extends the stock hold either. The ordinary
+      // twenty minutes run out and the device returns to sale, because
+      // inventory is never held waiting for a person at the bank.
+      //
+      // That is why this alert is urgent and not throttled: the review is now
+      // racing a timer nobody can pause, and the sooner somebody looks at it in
+      // the Business Center the smaller the chance of an oversell collision.
+      logPaymentEvent({
+        gateway: GATEWAY,
+        eventType: "entered_review",
+        orderId: claimed._id,
+        gatewayReference: body.transaction_id,
+        metadata: { reason_code: body.reason_code, message: body.message },
+      });
+
+      sendOpsAlert({
+        kind: "payment_review",
+        title: "Payment held for review by the bank",
+        summary:
+          "The bank has not settled this payment yet. The devices stay on the ordinary " +
+          "twenty-minute hold and will return to sale when it expires.",
+        lines: [
+          `Order ${claimed._id} (${claimed.email})`,
+          `Bank transaction ${body.transaction_id}`,
+          `Reason code ${body.reason_code || "not given"}: ${body.message || "no message"}`,
+          "Resolve it in the Business Center. It auto-rejects if nobody actions it.",
+        ],
+        urgent: true,
+      }).catch((error) => {
+        console.error("[boa] review alert failed:", error);
+      });
+    } else {
+      // A confirmed decline means these devices are free again. Waiting for the
+      // hold to expire would keep sellable stock off the shop for no reason.
+      await releaseReservation(claimed.boaTransactionUuid).catch((error) => {
+        console.error("[boa] failed to release reservation:", error);
+      });
+    }
+
+    res.sendStatus(200);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Step 3. Where the customer's browser lands. It verifies the signature only
+// so we don't redirect on a forged response — it never writes payment status.
+exports.paymentResponse = async (req, res) => {
+  const body = req.body || {};
+  const valid = exports.verifySignature(body);
+  const referenceNumber = echoed(body, "reference_number");
+
+  // A forged response and a valid one we can't read are different problems —
+  // the first is someone probing us, the second is a bug on our side. Logging
+  // both as "signature_rejected" is what hid the req_ prefix mismatch: the
+  // signature was fine every time, only the reference was unreadable.
+  if (!valid) {
+    logPaymentEvent({
+      gateway: GATEWAY,
+      eventType: "signature_rejected",
+      metadata: { source: "customer_response", reference_number: referenceNumber ?? null },
+    });
+    return res.redirect(`${frontendUrl}/cart`);
+  }
+
+  // Guard the shape as well as the signature. Redirecting with a missing
+  // reference_number would send the customer to /succeed?order_id=undefined,
+  // and the thank-you page would then ask the API for an order called
+  // "undefined".
+  if (!OBJECT_ID_PATTERN.test(referenceNumber || "")) {
+    logPaymentEvent({
+      gateway: GATEWAY,
+      eventType: "unmatched_confirmation",
+      metadata: {
+        source: "customer_response",
+        reason: "missing_or_malformed_reference",
+        reference_number: referenceNumber ?? null,
+      },
+    });
+    return res.redirect(`${frontendUrl}/cart`);
+  }
+
+  const orderId = referenceNumber;
+
+  // Only ACCEPT has actually taken the money, so only ACCEPT may see "Order
+  // confirmed." A review in particular must not: the bank is still deciding,
+  // and showing a confirmation for a payment that can still be refused is the
+  // kind of promise a shop cannot take back.
+  if (body.decision === REVIEW_STATUS_DECISION) {
+    return res.redirect(`${frontendUrl}/cart?payment=review`);
+  }
+
+  // A customer who clicks Cancel on the hosted page — often before ever
+  // entering a card number — may never generate a merchant POST at all, since
+  // there is no completed transaction for the bank to confirm server-to-server.
+  // Without this, the device they were looking at stays held for the full
+  // twenty minutes for nobody. The signature was already verified above, which
+  // is what makes it safe to act on this browser-only request: a forged CANCEL
+  // cannot release a hold that belongs to somebody else's checkout.
+  if (body.decision === "CANCEL") {
+    const transactionUuid = echoed(body, "transaction_uuid");
+
+    releaseReservation(transactionUuid).catch((error) => {
+      console.error("[boa] failed to release reservation on customer cancel:", error);
+    });
+
+    logPaymentEvent({
+      gateway: GATEWAY,
+      eventType: "customer_cancelled",
+      orderId,
+      metadata: { source: "customer_response" },
+    });
+
+    return res.redirect(`${frontendUrl}/cart?payment=cancelled`);
+  }
+
+  // DECLINE and ERROR are not the same thing to the person standing there, and
+  // this route used to tell them both the same story. A decline is the card
+  // being refused: the useful action is another card. An ERROR is the payment
+  // never having been attempted properly — a gateway fault, a malformed field,
+  // a timeout — where changing card achieves nothing and the honest advice is
+  // to try again. Sending an errored customer off to find a different card is
+  // a wasted trip and reads as though their bank refused them when it did not.
+  //
+  // Anything the gateway sends that is neither ACCEPT, REVIEW, CANCEL nor
+  // DECLINE lands here too, deliberately: an outcome this handler has no
+  // opinion about is closer to a fault than to a refusal.
+  if (body.decision !== "ACCEPT") {
+    const declined = body.decision === "DECLINE";
+
+    // The customer gets a flag and nothing else. Reason codes and gateway
+    // messages stay on this side — they mean nothing to a buyer, and
+    // `invalidField_0` in a URL is the kind of detail that turns a failed
+    // payment into a support ticket about the website being broken.
+    //
+    // Logged rather than dropped, because until now a customer landing on a
+    // decline left no server-side trace at all: the merchant POST records what
+    // the bank decided, but nothing recorded what the customer was actually
+    // shown, which is the first question asked when one of them writes in.
+    logPaymentEvent({
+      gateway: GATEWAY,
+      eventType: "webhook_received",
+      orderId,
+      gatewayReference: body.transaction_id,
+      metadata: {
+        source: "customer_response",
+        decision: body.decision ?? null,
+        reason_code: body.reason_code ?? null,
+        message: body.message ?? null,
+        invalid_fields: invalidFields(body),
+        shown_to_customer: declined ? "declined" : "error",
+      },
+    });
+
+    return res.redirect(
+      `${frontendUrl}/cart?payment=${declined ? "declined" : "error"}`
+    );
+  }
+
+  res.redirect(`${frontendUrl}/succeed?order_id=${orderId}`);
+};

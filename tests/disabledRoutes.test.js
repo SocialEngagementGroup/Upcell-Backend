@@ -37,7 +37,12 @@ function postStatus(path) {
   });
 }
 
-describe("Stripe/PayPal routes — disabled per client decision, bank gateway replaces them", () => {
+// The Stripe and PayPal code has been deleted, not just unmounted. This suite
+// is kept because it is now stronger than it was: it proves the endpoints stay
+// gone, so a future change cannot quietly revive a payment path nobody
+// maintains any more. Recover the implementations from git history if the
+// client ever asks for those gateways back.
+describe("Stripe/PayPal routes — removed, bank gateway replaces them", () => {
   it("returns 404 for /checkout-stripe", async () => {
     expect(await postStatus("/checkout-stripe")).toBe(404);
   });

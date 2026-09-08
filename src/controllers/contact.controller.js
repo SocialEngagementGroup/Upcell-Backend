@@ -4,11 +4,67 @@ const {
   sendPaginatedResults,
 } = require("../utils/pagination");
 const { escapeRegex } = require("../utils/regex");
+const { Notification } = require("../models/notification.model");
+const { EmailConfig } = require("../models/emailConfig.model");
+const { sendMail } = require("../services/mailService");
+const { adminNewContactEmail } = require("../services/emailTemplates");
+
+const adminNotificationEmail = process.env.ADMIN_NOTIFICATION_EMAIL;
+const contactEmailFrom = process.env.EMAIL_FROM;
+
+// Tell the admin a message arrived, by email and in the dashboard bell.
+//
+// Nothing did this before: a contact submission was written to the database and
+// no one was informed, so a customer's message sat unread until somebody
+// happened to open the contact page. The notification type "contact" was
+// already in the model's enum, waiting for this.
+//
+// Fire-and-forget, and never allowed to reject. The customer's message is
+// already saved by the time this runs, so a mail outage must not turn a
+// successful submission into an error on their screen.
+async function notifyNewContact(submission) {
+  try {
+    const config = await EmailConfig.findOne().lean();
+
+    // Same switch that mutes trade-in admin mail, so one control silences
+    // outbound noise while someone is testing.
+    if (adminNotificationEmail && contactEmailFrom && config?.enableAdminEmails !== false) {
+      const { subject, html } = adminNewContactEmail({
+        name: submission.name,
+        email: submission.email,
+        subject: submission.subject,
+        message: submission.message,
+        submissionId: submission._id,
+      });
+
+      await sendMail({
+        from: contactEmailFrom,
+        to: adminNotificationEmail,
+        subject,
+        html,
+      });
+    }
+
+    await Notification.create({
+      type: "contact",
+      title: "New contact message",
+      message: `${submission.name} sent a message: ${submission.subject}`,
+      link: "/admin-secret/contact",
+      relatedId: submission._id,
+    });
+  } catch (error) {
+    console.error("[contact] failed to notify admin:", error?.message || error);
+  }
+}
 
 async function createContactSubmission(req, res, next) {
   try {
     const submission = await ContactSubmission.create(req.body);
     res.status(201).json(submission);
+
+    // After responding, deliberately. The customer should not wait on our
+    // outbound email, and should not see a failure if it does not send.
+    notifyNewContact(submission);
   } catch (error) {
     next(error);
   }

@@ -6,12 +6,17 @@ jest.mock("resend", () => ({
 }));
 jest.mock("../src/models/order.model");
 jest.mock("../src/models/auditLog.model");
+// An explicit factory rather than the automock: the notification model is only
+// ever used here as Notification.create(...), and automocking it produced an
+// undefined create.
+jest.mock("../src/models/notification.model", () => ({ Notification: { create: jest.fn() } }));
 jest.mock("../src/controllers/checkout.controller", () => ({
   makeOrderObjAndTotal: jest.fn(),
 }));
 
 const Order = require("../src/models/order.model");
 const AuditLog = require("../src/models/auditLog.model");
+const { Notification } = require("../src/models/notification.model");
 const { makeOrderObjAndTotal } = require("../src/controllers/checkout.controller");
 const orderController = require("../src/controllers/order.controller");
 
@@ -35,7 +40,11 @@ function makeQueryChain(result) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // Both are called fire-and-forget as `.create(...).catch(...)`, so they have
+  // to hand back a promise. clearAllMocks drops the resolved value, hence
+  // re-setting it here rather than once at the top.
   AuditLog.create.mockResolvedValue({});
+  Notification.create.mockResolvedValue({});
 });
 
 describe("createOrder — always unpaid until the bank gateway confirms payment", () => {
@@ -202,7 +211,7 @@ describe("getOrder — PII exposure guard", () => {
   it("returns the full order (including PII) to its owner", async () => {
     Order.findById.mockResolvedValue({ ...fullOrder, toObject: () => fullOrder });
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "buyer@example.com" } });
+    const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" }, user: { email: "buyer@example.com" } });
     await orderController.getOrder(req, res, jest.fn());
 
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ email: "buyer@example.com", name: "Jane Doe" }));
@@ -211,7 +220,7 @@ describe("getOrder — PII exposure guard", () => {
   it("returns the full order to an admin regardless of email match", async () => {
     Order.findById.mockResolvedValue({ ...fullOrder, toObject: () => fullOrder });
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { role: "admin", email: "admin@upcell.com" } });
+    const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" }, user: { role: "admin", email: "admin@upcell.com" } });
     await orderController.getOrder(req, res, jest.fn());
 
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ email: "buyer@example.com" }));
@@ -220,7 +229,7 @@ describe("getOrder — PII exposure guard", () => {
   it("strips name/email/phone/address for a non-owner (or anonymous) viewer", async () => {
     Order.findById.mockResolvedValue({ ...fullOrder, toObject: () => fullOrder });
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" } }); // no req.user at all — anonymous viewer
+    const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" } }); // no req.user at all — anonymous viewer
     await orderController.getOrder(req, res, jest.fn());
 
     const returned = res.json.mock.calls[0][0];
@@ -236,7 +245,7 @@ describe("getOrder — PII exposure guard", () => {
   it("strips PII for a logged-in user who owns a different order", async () => {
     Order.findById.mockResolvedValue({ ...fullOrder, toObject: () => fullOrder });
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "someone-else@example.com" } });
+    const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" }, user: { email: "someone-else@example.com" } });
     await orderController.getOrder(req, res, jest.fn());
 
     expect(res.json.mock.calls[0][0].email).toBeUndefined();
@@ -245,7 +254,7 @@ describe("getOrder — PII exposure guard", () => {
   it("returns 404 for a non-existent order", async () => {
     Order.findById.mockResolvedValue(null);
 
-    const { req, res } = makeReqRes({}, { params: { id: "does-not-exist" } });
+    const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0ff" } });
     await orderController.getOrder(req, res, jest.fn());
 
     expect(res.statusCode).toBe(404);
@@ -296,27 +305,54 @@ describe("getAdminOrders — status/byEmail/byOrderId lookup", () => {
   });
 });
 
-describe("getAdminOrdersByDate — today/this-week/this-month buckets", () => {
-  it("returns three buckets from three separate queries", async () => {
-    Order.find
-      .mockResolvedValueOnce([{ _id: "today-order" }])
-      .mockResolvedValueOnce([{ _id: "today-order" }, { _id: "week-order" }])
-      .mockResolvedValueOnce([{ _id: "month-order" }]);
+describe("getAdminOrdersByDate — today/this-week/this-month totals", () => {
+  it("returns counts and revenue for each period", async () => {
+    Order.aggregate
+      .mockResolvedValueOnce([{ amount: 1, money: 529 }])
+      .mockResolvedValueOnce([{ amount: 3, money: 1587.5 }])
+      .mockResolvedValueOnce([{ amount: 9, money: 8213.25 }]);
 
     const { req, res } = makeReqRes({}, { params: {}, query: {} });
     await orderController.getAdminOrdersByDate(req, res, jest.fn());
 
-    expect(Order.find).toHaveBeenCalledTimes(3);
+    expect(Order.aggregate).toHaveBeenCalledTimes(3);
     expect(res.json).toHaveBeenCalledWith({
-      today: [{ _id: "today-order" }],
-      thisWeek: [{ _id: "today-order" }, { _id: "week-order" }],
-      thisMonth: [{ _id: "month-order" }],
+      today: { amount: 1, money: 529 },
+      thisWeek: { amount: 3, money: 1587.5 },
+      thisMonth: { amount: 9, money: 8213.25 },
+    });
+  });
+
+  it("counts only paid orders, so abandoned checkouts are not sales", async () => {
+    Order.aggregate.mockResolvedValue([{ amount: 0, money: 0 }]);
+
+    const { req, res } = makeReqRes({}, { params: {}, query: {} });
+    await orderController.getAdminOrdersByDate(req, res, jest.fn());
+
+    // The rule belongs in the query. It used to live in the dashboard's own
+    // rendering code, which meant every abandoned checkout — with the
+    // customer's name, email, phone and address — was sent to the browser
+    // just to be discarded there.
+    const [pipeline] = Order.aggregate.mock.calls[0];
+    expect(pipeline[0].$match.paid).toBe(true);
+  });
+
+  it("reports zero rather than undefined when a period has no orders", async () => {
+    Order.aggregate.mockResolvedValue([]);
+
+    const { req, res } = makeReqRes({}, { params: {}, query: {} });
+    await orderController.getAdminOrdersByDate(req, res, jest.fn());
+
+    expect(res.json).toHaveBeenCalledWith({
+      today: { amount: 0, money: 0 },
+      thisWeek: { amount: 0, money: 0 },
+      thisMonth: { amount: 0, money: 0 },
     });
   });
 
   it("routes a DB failure through next(error) instead of crashing", async () => {
     const dbError = new Error("Mongo is down");
-    Order.find.mockRejectedValue(dbError);
+    Order.aggregate.mockRejectedValue(dbError);
 
     const { req, res, next } = makeReqRes({}, { params: {}, query: {} });
     await orderController.getAdminOrdersByDate(req, res, next);
@@ -346,7 +382,30 @@ describe("getClientOrders — email ownership check", () => {
     );
     await orderController.getClientOrders(req, res, jest.fn());
 
-    expect(Order.find).toHaveBeenCalledWith({ email: "buyer@example.com", paid: true });
+    expect(Order.find).toHaveBeenCalledWith({
+      $or: [{ email: "buyer@example.com" }],
+      paid: true,
+    });
+  });
+
+  it("also matches orders placed under a different email by the same account", async () => {
+    Order.find.mockReturnValue({ sort: jest.fn().mockResolvedValue([]) });
+
+    const { req, res } = makeReqRes(
+      {},
+      {
+        params: { email: "buyer@example.com" },
+        user: { id: "user_abc", email: "buyer@example.com", role: "customer" },
+      }
+    );
+    await orderController.getClientOrders(req, res, jest.fn());
+
+    // The email arm keeps pre-userId orders visible; the userId arm is what
+    // finds an order the customer placed while typing another address.
+    expect(Order.find).toHaveBeenCalledWith({
+      $or: [{ email: "buyer@example.com" }, { userId: "user_abc" }],
+      paid: true,
+    });
   });
 
   it("allows an admin to view any customer's orders", async () => {
@@ -359,5 +418,251 @@ describe("getClientOrders — email ownership check", () => {
     await orderController.getClientOrders(req, res, jest.fn());
 
     expect(res.statusCode).toBe(200);
+  });
+});
+
+describe("getOrder — malformed id handling", () => {
+  it("returns 404 rather than throwing when the id is not an ObjectId", async () => {
+    const { req, res, next } = makeReqRes({}, { params: { id: "undefined" } });
+
+    await orderController.getOrder(req, res, next);
+
+    expect(res.statusCode).toBe(404);
+    expect(next).not.toHaveBeenCalled();
+    // Never reaches the database — a CastError there becomes a 500 and pages
+    // the admin over what is really just a bad URL.
+    expect(Order.findById).not.toHaveBeenCalled();
+  });
+});
+
+// This never calls the bank — UpCell has no refund API credentials, so
+// Raymond or Yasir still type the amount into the Business Center by hand.
+// The controller's job is the calculation, the record, and the customer email.
+describe("processRefund", () => {
+  const deviceLine = (productId, name, totalPaid) => ({
+    quantity: 1,
+    price_data: { product_data: { name, metadata: { productId, quantity: 1, totalPaid } } },
+  });
+
+  const paidOrder = (overrides = {}) => ({
+    _id: "order1",
+    email: "buyer@example.com",
+    paid: true,
+    status: "Processing",
+    line_items: [deviceLine("p1", "iPhone 17", 999)],
+    save: jest.fn().mockResolvedValue(true),
+    ...overrides,
+  });
+
+  it("404s for an order that does not exist", async () => {
+    Order.findById.mockResolvedValue(null);
+
+    const { req, res } = makeReqRes({}, { params: { id: "ghost" }, user: { email: "admin@upcellit.com" } });
+    await orderController.processRefund(req, res, jest.fn());
+
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("refuses to refund an order that was never paid", async () => {
+    Order.findById.mockResolvedValue(paidOrder({ paid: false }));
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    await orderController.processRefund(req, res, jest.fn());
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("refuses a second refund on an order already refunded", async () => {
+    const order = paidOrder({ refund: { approvedAt: new Date(), amount: 849.15 } });
+    Order.findById.mockResolvedValue(order);
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    await orderController.processRefund(req, res, jest.fn());
+
+    expect(res.statusCode).toBe(400);
+    expect(order.save).not.toHaveBeenCalled();
+  });
+
+  it("records the refund, sets status Refunded, and keeps paid true", async () => {
+    const order = paidOrder();
+    Order.findById.mockResolvedValue(order);
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { id: "u1", email: "admin@upcellit.com" } });
+    await orderController.processRefund(req, res, jest.fn());
+
+    expect(res.statusCode).toBe(200);
+    expect(order.status).toBe("Refunded");
+    expect(order.paid).toBe(true);
+    expect(order.refund.amount).toBe(849.15);
+    expect(order.refund.restockingFee).toBe(149.85);
+    expect(order.refund.approvedBy).toBe("admin@upcellit.com");
+    expect(order.refund.approvedAt).toBeInstanceOf(Date);
+    expect(order.save).toHaveBeenCalled();
+  });
+
+  it("writes an audit log entry with the actual figures", async () => {
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { id: "u1", email: "admin@upcellit.com" } });
+    await orderController.processRefund(req, res, jest.fn());
+
+    expect(AuditLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "order.refund_processed",
+        metadata: expect.objectContaining({ refundAmount: 849.15, itemsTotal: 999 }),
+      })
+    );
+  });
+
+  it("refunds only the named item on a multi-item order", async () => {
+    const order = paidOrder({
+      line_items: [deviceLine("p1", "iPhone 17", 999), deviceLine("p2", "Clear Case", 39)],
+    });
+    Order.findById.mockResolvedValue(order);
+
+    const { req, res } = makeReqRes({ itemIds: ["p2"] }, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    await orderController.processRefund(req, res, jest.fn());
+
+    expect(order.refund.itemsTotal).toBe(39);
+    expect(order.refund.itemIds).toEqual(["p2"]);
+  });
+
+  it("waives the fee only with a reason recorded on the order", async () => {
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res } = makeReqRes(
+      { waiveRestockingFee: true, waiveReason: "Confirmed faulty screen" },
+      { params: { id: "order1" }, user: { email: "admin@upcellit.com" } }
+    );
+    await orderController.processRefund(req, res, jest.fn());
+
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("400s a request that names no real item on this order", async () => {
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res } = makeReqRes(
+      { itemIds: ["does-not-exist"] },
+      { params: { id: "order1" }, user: { email: "admin@upcellit.com" } }
+    );
+    await orderController.processRefund(req, res, jest.fn());
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("the response is the number a human enters at the bank, not a claim that money moved", async () => {
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    await orderController.processRefund(req, res, jest.fn());
+
+    const body = res.json.mock.calls[0][0];
+    expect(body.message).toContain("849.15");
+    expect(body.message.toLowerCase()).toContain("enter");
+  });
+
+  // The customer is emailed automatically; the staff were told nothing. A
+  // forgotten portal entry left the customer holding an email saying they had
+  // been refunded, with no money.
+  it("tells the admin the refund still needs entering at the bank", async () => {
+    Notification.create.mockResolvedValue({});
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    await orderController.processRefund(req, res, jest.fn());
+
+    expect(Notification.create).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "order", relatedId: "order1" })
+    );
+    const notification = Notification.create.mock.calls[0][0];
+    expect(notification.message).toContain("849.15");
+    expect(notification.message).toContain("Business Center");
+  });
+
+  it("records the refund even when the notification cannot be written", async () => {
+    Notification.create.mockRejectedValue(new Error("mongo down"));
+    const order = paidOrder();
+    Order.findById.mockResolvedValue(order);
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    await orderController.processRefund(req, res, jest.fn());
+
+    expect(order.save).toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalled();
+  });
+});
+
+describe("markRefundEnteredAtBank — the manual step, recorded", () => {
+  const refundedOrder = (overrides = {}) => ({
+    _id: "order1",
+    refund: { amount: 849.15, approvedAt: new Date("2026-09-06T10:00:00Z") },
+    save: jest.fn().mockResolvedValue(true),
+    ...overrides,
+  });
+
+  it("404s for an order that does not exist", async () => {
+    Order.findById.mockResolvedValue(null);
+
+    const { req, res } = makeReqRes({}, { params: { id: "ghost" }, user: { email: "admin@upcellit.com" } });
+    await orderController.markRefundEnteredAtBank(req, res, jest.fn());
+
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("refuses an order that has no recorded refund", async () => {
+    Order.findById.mockResolvedValue(refundedOrder({ refund: undefined }));
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    await orderController.markRefundEnteredAtBank(req, res, jest.fn());
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("stamps who entered it and when", async () => {
+    const order = refundedOrder();
+    Order.findById.mockResolvedValue(order);
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "yasir@upcellit.com" } });
+    await orderController.markRefundEnteredAtBank(req, res, jest.fn());
+
+    expect(order.refund.enteredAtBankBy).toBe("yasir@upcellit.com");
+    expect(order.refund.enteredAtBankAt).toBeInstanceOf(Date);
+    expect(order.save).toHaveBeenCalled();
+  });
+
+  // Unticking would make a refund the bank already knows about look outstanding
+  // again, which invites a second entry and a double refund.
+  it("refuses to mark the same refund twice", async () => {
+    Order.findById.mockResolvedValue(
+      refundedOrder({
+        refund: {
+          amount: 849.15,
+          approvedAt: new Date(),
+          enteredAtBankAt: new Date(),
+          enteredAtBankBy: "yasir@upcellit.com",
+        },
+      })
+    );
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "raymond@upcellit.com" } });
+    await orderController.markRefundEnteredAtBank(req, res, jest.fn());
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("writes an audit entry naming who did it", async () => {
+    AuditLog.create.mockResolvedValue({});
+    Order.findById.mockResolvedValue(refundedOrder());
+
+    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "yasir@upcellit.com" } });
+    await orderController.markRefundEnteredAtBank(req, res, jest.fn());
+
+    expect(AuditLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "order.refund_entered_at_bank",
+        actorEmail: "yasir@upcellit.com",
+      })
+    );
   });
 });

@@ -14,6 +14,16 @@ jest.mock("@clerk/express", () => ({
 
 process.env.CLERK_SECRET_KEY = "sk_test_fake";
 
+// requireAdmin wraps a real express-rate-limit instance internally (see
+// auth.middleware.js), which needs a fuller req/res shape than the bare
+// {headers} mock this file uses — req.ip, res.setHeader, etc. Mocked here as
+// a transparent pass-through so these tests keep verifying requireAdmin's own
+// role-check logic, not express-rate-limit's internals, which is a separate,
+// already-trusted library with its own test suite.
+jest.mock("../src/middleware/rateLimit.middleware", () => ({
+  adminLimiter: jest.fn((req, res, next) => next()),
+}));
+
 const { verifyToken, requireAdmin, optionalAuth } = require("../src/middleware/auth.middleware");
 
 const makeReqRes = (authorization) => {
@@ -306,6 +316,29 @@ describe("requireAdmin", () => {
     const { res, next } = runWith({ id: "user_123", role: "ADMIN" });
     expect(res.statusCode).toBe(403);
     expect(next).not.toHaveBeenCalled();
+  });
+
+  it("runs every request through adminLimiter before checking the role", () => {
+    const { adminLimiter } = require("../src/middleware/rateLimit.middleware");
+    adminLimiter.mockClear();
+
+    runWith({ id: "user_123", role: "admin" });
+
+    expect(adminLimiter).toHaveBeenCalledTimes(1);
+    const [req] = adminLimiter.mock.calls[0];
+    expect(req.user).toEqual({ id: "user_123", role: "admin" });
+  });
+
+  it("propagates a rate-limit rejection to next(err) instead of falling through to the role check", () => {
+    const { adminLimiter } = require("../src/middleware/rateLimit.middleware");
+    adminLimiter.mockImplementationOnce((req, res, next) => next(new Error("Too many requests")));
+
+    const { res, next } = runWith({ id: "user_123", role: "admin" });
+
+    expect(next).toHaveBeenCalledWith(expect.any(Error));
+    // Never reaches the 403/next() role-check branch at all — the error
+    // short-circuits before either one runs.
+    expect(res.statusCode).toBeNull();
   });
 });
 
