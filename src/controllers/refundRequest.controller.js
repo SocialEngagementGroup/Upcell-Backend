@@ -297,6 +297,10 @@ async function updateRefundRequestStatus(req, res, next) {
 
       const result = calculateRefund(order, {
         itemIds: request.itemIds,
+        // The reason the customer gave when they asked. It decides whether the
+        // 15% restocking fee applies at all — a faulty device is never charged
+        // it. Staff can still waive it on top for a change-of-mind return.
+        reasonCode: request.reasonCode,
         waiveRestockingFee: Boolean(waiveRestockingFee),
         waiveReason,
       });

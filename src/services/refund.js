@@ -16,6 +16,8 @@
 
 const { round2 } = require("../utils/money");
 
+const { restockingFeeApplies } = require("../constants/returnReasons");
+
 const RESTOCKING_FEE_RATE = 0.15;
 
 // Tax and shipping lines carry no productId — only real devices and
@@ -40,12 +42,16 @@ const totalPaidOf = (items) =>
  * @param {object} order            the order document (or a plain object with line_items)
  * @param {object} options
  * @param {string[]} [options.itemIds]      productIds to refund; omitted or empty means every item
- * @param {boolean} [options.waiveRestockingFee]
+ * @param {string}  [options.reasonCode]  why it is coming back; decides whether
+ *                                        the restocking fee applies at all
+ * @param {boolean} [options.waiveRestockingFee]  staff override, on top of the
+ *                                        reason - only meaningful when the
+ *                                        reason would otherwise charge the fee
  * @param {string}  [options.waiveReason]   required when waiving the fee
  * @returns {{ok: true, refundableItems, itemsTotal, restockingFee, restockingFeeWaived, taxRefunded, refundAmount}
  *          | {ok: false, error: string}}
  */
-function calculateRefund(order, { itemIds, waiveRestockingFee = false, waiveReason } = {}) {
+function calculateRefund(order, { itemIds, reasonCode, waiveRestockingFee = false, waiveReason } = {}) {
   const lines = order?.line_items || [];
   const productLines = lines.filter(isRefundableLine);
 
@@ -67,7 +73,23 @@ function calculateRefund(order, { itemIds, waiveRestockingFee = false, waiveReas
 
   const itemsTotal = totalPaidOf(refundableItems);
 
-  const restockingFee = waiveRestockingFee ? 0 : round2(itemsTotal * RESTOCKING_FEE_RATE);
+  // The fee is only for a customer who changed their mind.
+  //
+  // It used to be charged on every return unless a staff member remembered to
+  // waive it by hand, which meant a customer returning a device that would not
+  // power on was billed 15% for UpCell's own fault unless somebody caught it.
+  // Now the reason decides: PREFERENCE pays it, FULFILMENT, PRODUCT_FAULT and
+  // LOGISTICS never do.
+  //
+  // A reason that is absent or unrecognised charges nothing. That is the safe
+  // direction to be wrong in - it errs toward the customer, and a staff member
+  // reading the note can still apply the fee deliberately. Silently taking 15%
+  // from someone because a code did not parse is not recoverable once the money
+  // has moved.
+  const feeAppliesToReason = reasonCode ? restockingFeeApplies(reasonCode) : false;
+  const restockingFee = (!feeAppliesToReason || waiveRestockingFee)
+    ? 0
+    : round2(itemsTotal * RESTOCKING_FEE_RATE);
 
   // Tax is shared out by what the returned items cost, not recalculated as 8%
   // of them. Two reasons: a full return then hands back exactly the figure that

@@ -259,7 +259,7 @@ async function updateOrderStatus(req, res, next) {
  * and why a fee was or was not waived, and telling the customer.
  */
 async function processRefund(req, res, next) {
-  const { itemIds, waiveRestockingFee, waiveReason, notes } = req.body;
+  const { itemIds, reasonCode, waiveRestockingFee, waiveReason, notes } = req.body;
 
   try {
     const order = await Order.findById(req.params.id || null);
@@ -277,6 +277,11 @@ async function processRefund(req, res, next) {
 
     const result = calculateRefund(order, {
       itemIds,
+      // Refunding an order directly, with no return request behind it, so the
+      // admin says why. Without a reason no restocking fee is charged, which is
+      // the right way round: a fee taken by accident is not recoverable once
+      // the money has gone, and a fee missed can still be applied by hand.
+      reasonCode,
       waiveRestockingFee: Boolean(waiveRestockingFee),
       waiveReason,
     });

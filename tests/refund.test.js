@@ -35,7 +35,7 @@ describe("calculateRefund — the client's confirmed rule, exactly", () => {
       ],
     };
 
-    const result = calculateRefund(order, {});
+    const result = calculateRefund(order, { reasonCode: "CHANGED_MIND" });
 
     expect(result.ok).toBe(true);
     expect(result.itemsTotal).toBe(2198);
@@ -52,7 +52,7 @@ describe("calculateRefund — the client's confirmed rule, exactly", () => {
       line_items: [deviceLine("p1", "iPhone 17", 999), taxLine(79.92), shippingLine(25)],
     };
 
-    const result = calculateRefund(order, {});
+    const result = calculateRefund(order, { reasonCode: "CHANGED_MIND" });
 
     expect(result.itemsTotal).toBe(999);
     expect(result.taxRefunded).toBe(79.92);
@@ -65,7 +65,7 @@ describe("calculateRefund — the client's confirmed rule, exactly", () => {
     // never paid.
     const order = { line_items: [deviceLine("p1", "iPhone 17", 999), shippingLine(10.5)] };
 
-    const result = calculateRefund(order, {});
+    const result = calculateRefund(order, { reasonCode: "CHANGED_MIND" });
 
     expect(result.taxRefunded).toBe(0);
     expect(result.refundAmount).toBe(849.15);
@@ -75,7 +75,7 @@ describe("calculateRefund — the client's confirmed rule, exactly", () => {
     // $1,000 of goods, $80 of tax. The fee is $150, not $162.
     const order = { line_items: [deviceLine("p1", "iPad", 1000), taxLine(80)] };
 
-    const result = calculateRefund(order, {});
+    const result = calculateRefund(order, { reasonCode: "CHANGED_MIND" });
 
     expect(result.restockingFee).toBe(150);
     expect(result.refundAmount).toBe(930);
@@ -90,7 +90,7 @@ describe("calculateRefund — the client's confirmed rule, exactly", () => {
       ],
     };
 
-    const result = calculateRefund(order, { itemIds: ["p2"] });
+    const result = calculateRefund(order, { itemIds: ["p2"], reasonCode: "CHANGED_MIND" });
 
     expect(result.itemsTotal).toBe(39);
     expect(result.restockingFee).toBe(5.85);
@@ -106,7 +106,7 @@ describe("calculateRefund — the client's confirmed rule, exactly", () => {
       line_items: [deviceLine("p1", "iPhone 17", 999), deviceLine("p2", "Clear Case", 39)],
     };
 
-    const result = calculateRefund(order, {});
+    const result = calculateRefund(order, { reasonCode: "CHANGED_MIND" });
 
     expect(result.itemsTotal).toBe(1038);
   });
@@ -114,13 +114,13 @@ describe("calculateRefund — the client's confirmed rule, exactly", () => {
   it("waives the fee only with a reason, and takes it at zero", () => {
     const order = { line_items: [deviceLine("p1", "iPhone 17", 999)] };
 
-    const waived = calculateRefund(order, { waiveRestockingFee: true, waiveReason: "Confirmed faulty screen" });
+    const waived = calculateRefund(order, { reasonCode: "CHANGED_MIND", waiveRestockingFee: true, waiveReason: "Confirmed faulty screen" });
     expect(waived.ok).toBe(true);
     expect(waived.restockingFee).toBe(0);
     expect(waived.restockingFeeWaived).toBe(true);
     expect(waived.refundAmount).toBe(999);
 
-    const noReason = calculateRefund(order, { waiveRestockingFee: true });
+    const noReason = calculateRefund(order, { reasonCode: "CHANGED_MIND", waiveRestockingFee: true });
     expect(noReason.ok).toBe(false);
     expect(noReason.error).toContain("reason");
   });
@@ -128,7 +128,7 @@ describe("calculateRefund — the client's confirmed rule, exactly", () => {
   it("refuses a request naming no item on the order", () => {
     const order = { line_items: [deviceLine("p1", "iPhone 17", 999)] };
 
-    const result = calculateRefund(order, { itemIds: ["does-not-exist"] });
+    const result = calculateRefund(order, { itemIds: ["does-not-exist"], reasonCode: "CHANGED_MIND" });
 
     expect(result.ok).toBe(false);
     expect(result.error).toContain("No matching items");
@@ -137,7 +137,7 @@ describe("calculateRefund — the client's confirmed rule, exactly", () => {
   it("refuses an order with nothing refundable — tax and shipping alone", () => {
     const order = { line_items: [taxLine(80), shippingLine(10)] };
 
-    const result = calculateRefund(order, {});
+    const result = calculateRefund(order, { reasonCode: "CHANGED_MIND" });
 
     expect(result.ok).toBe(false);
   });
@@ -147,7 +147,7 @@ describe("calculateRefund — the client's confirmed rule, exactly", () => {
     // checkout) — the calculation must not multiply it again.
     const order = { line_items: [deviceLine("p1", "iPhone 16", 1998, 2)] };
 
-    const result = calculateRefund(order, {});
+    const result = calculateRefund(order, { reasonCode: "CHANGED_MIND" });
 
     expect(result.itemsTotal).toBe(1998);
     expect(result.restockingFee).toBe(299.7);
@@ -156,7 +156,7 @@ describe("calculateRefund — the client's confirmed rule, exactly", () => {
   it("rounds to the cent on a figure that does not divide evenly", () => {
     // 33.33 * 0.15 = 4.9995 — must round to a real number of cents, not carry
     // a third decimal into a dollar figure a human has to type by hand.
-    const result = calculateRefund({ line_items: [deviceLine("p1", "iPad", 33.33)] }, {});
+    const result = calculateRefund({ line_items: [deviceLine("p1", "iPad", 33.33)] }, { reasonCode: "CHANGED_MIND" });
 
     expect(result.restockingFee).toBe(5);
     expect(result.refundAmount).toBe(28.33);
@@ -164,5 +164,61 @@ describe("calculateRefund — the client's confirmed rule, exactly", () => {
 
   it("15% is the actual rate constant, not a copy of it", () => {
     expect(RESTOCKING_FEE_RATE).toBe(0.15);
+  });
+});
+
+describe("the restocking fee follows the reason, not the staff member's memory", () => {
+  // The order shape these use is the same one the tests above build.
+  const order = { line_items: [deviceLine("p1", "iPhone 15", 1000)] };
+
+  it("charges 15% when the customer simply changed their mind", () => {
+    const result = calculateRefund(order, { reasonCode: "CHANGED_MIND" });
+
+    expect(result.restockingFee).toBe(150);
+  });
+
+  it("charges nothing when the device would not power on", () => {
+    // The bug this replaces: the fee was charged on everything unless a staff
+    // member remembered to waive it, so UpCell billed customers 15% for its
+    // own faulty devices.
+    const result = calculateRefund(order, { reasonCode: "WONT_POWER_ON" });
+
+    expect(result.restockingFee).toBe(0);
+    expect(result.refundAmount).toBe(1000);
+  });
+
+  it("charges nothing when UpCell sent the wrong device", () => {
+    expect(calculateRefund(order, { reasonCode: "WRONG_MODEL" }).restockingFee).toBe(0);
+  });
+
+  it("charges nothing when the parcel never arrived", () => {
+    expect(calculateRefund(order, { reasonCode: "NEVER_ARRIVED" }).restockingFee).toBe(0);
+  });
+
+  it("charges nothing when no reason was given at all", () => {
+    // Erring toward the customer is recoverable; taking 15% by accident is not,
+    // once the money has moved.
+    expect(calculateRefund(order, {}).restockingFee).toBe(0);
+  });
+
+  it("charges nothing for an unrecognised code", () => {
+    expect(calculateRefund(order, { reasonCode: "MADE_UP" }).restockingFee).toBe(0);
+  });
+
+  it("still lets staff waive the fee on a change-of-mind return", () => {
+    const result = calculateRefund(order, {
+      reasonCode: "CHANGED_MIND",
+      waiveRestockingFee: true,
+      waiveReason: "Goodwill — long-standing customer",
+    });
+
+    expect(result.restockingFee).toBe(0);
+    expect(result.restockingFeeWaived).toBe(true);
+  });
+
+  it("still demands a reason to waive it", () => {
+    const result = calculateRefund(order, { reasonCode: "CHANGED_MIND", waiveRestockingFee: true });
+
+    expect(result.ok).toBe(false);
   });
 });

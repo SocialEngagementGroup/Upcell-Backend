@@ -65,6 +65,9 @@ const requestDoc = (overrides = {}) => ({
   userId: "user_1",
   email: "buyer@example.com",
   itemIds: ["p1"],
+  // The reason decides whether the 15% restocking fee applies. These tests
+  // assert 849.15 — 999 minus the fee — so they are change-of-mind returns.
+  reasonCode: "CHANGED_MIND",
   status: "Submitted",
   save: jest.fn().mockResolvedValue(true),
   ...overrides,

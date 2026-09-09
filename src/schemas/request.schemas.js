@@ -1,4 +1,5 @@
 const { z } = require("zod");
+const { RETURN_REASON_CODES } = require("../constants/returnReasons");
 
 const numericField = z.preprocess((value) => {
   if (value === "" || value === null || typeof value === "undefined") return undefined;
@@ -326,6 +327,11 @@ const refundRequestStatusSchema = z
 const refundSchema = z
   .object({
     itemIds: z.array(objectIdField).max(50).optional(),
+    // Why the order is being refunded. Decides whether the 15% restocking fee
+    // applies - see src/constants/returnReasons.js. Optional, and omitting it
+    // charges no fee, which is the safe direction for a figure that cannot be
+    // taken back once it has been paid.
+    reasonCode: z.enum(RETURN_REASON_CODES).optional(),
     waiveRestockingFee: z.boolean().optional().default(false),
     waiveReason: z.string().trim().max(500, "Reason must be 500 characters or fewer").optional(),
     notes: z.string().trim().max(1000, "Notes must be 1000 characters or fewer").optional(),

@@ -466,7 +466,7 @@ describe("processRefund", () => {
   it("refuses to refund an order that was never paid", async () => {
     Order.findById.mockResolvedValue(paidOrder({ paid: false }));
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    const { req, res } = makeReqRes({ reasonCode: "CHANGED_MIND" }, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
     await orderController.processRefund(req, res, jest.fn());
 
     expect(res.statusCode).toBe(400);
@@ -476,7 +476,7 @@ describe("processRefund", () => {
     const order = paidOrder({ refund: { approvedAt: new Date(), amount: 849.15 } });
     Order.findById.mockResolvedValue(order);
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    const { req, res } = makeReqRes({ reasonCode: "CHANGED_MIND" }, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
     await orderController.processRefund(req, res, jest.fn());
 
     expect(res.statusCode).toBe(400);
@@ -487,7 +487,7 @@ describe("processRefund", () => {
     const order = paidOrder();
     Order.findById.mockResolvedValue(order);
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { id: "u1", email: "admin@upcellit.com" } });
+    const { req, res } = makeReqRes({ reasonCode: "CHANGED_MIND" }, { params: { id: "order1" }, user: { id: "u1", email: "admin@upcellit.com" } });
     await orderController.processRefund(req, res, jest.fn());
 
     expect(res.statusCode).toBe(200);
@@ -503,7 +503,7 @@ describe("processRefund", () => {
   it("writes an audit log entry with the actual figures", async () => {
     Order.findById.mockResolvedValue(paidOrder());
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { id: "u1", email: "admin@upcellit.com" } });
+    const { req, res } = makeReqRes({ reasonCode: "CHANGED_MIND" }, { params: { id: "order1" }, user: { id: "u1", email: "admin@upcellit.com" } });
     await orderController.processRefund(req, res, jest.fn());
 
     expect(AuditLog.create).toHaveBeenCalledWith(
@@ -554,7 +554,7 @@ describe("processRefund", () => {
   it("the response is the number a human enters at the bank, not a claim that money moved", async () => {
     Order.findById.mockResolvedValue(paidOrder());
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    const { req, res } = makeReqRes({ reasonCode: "CHANGED_MIND" }, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
     await orderController.processRefund(req, res, jest.fn());
 
     const body = res.json.mock.calls[0][0];
@@ -569,7 +569,7 @@ describe("processRefund", () => {
     Notification.create.mockResolvedValue({});
     Order.findById.mockResolvedValue(paidOrder());
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    const { req, res } = makeReqRes({ reasonCode: "CHANGED_MIND" }, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
     await orderController.processRefund(req, res, jest.fn());
 
     expect(Notification.create).toHaveBeenCalledWith(
@@ -585,7 +585,7 @@ describe("processRefund", () => {
     const order = paidOrder();
     Order.findById.mockResolvedValue(order);
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    const { req, res } = makeReqRes({ reasonCode: "CHANGED_MIND" }, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
     await orderController.processRefund(req, res, jest.fn());
 
     expect(order.save).toHaveBeenCalled();
@@ -613,7 +613,7 @@ describe("markRefundEnteredAtBank — the manual step, recorded", () => {
   it("refuses an order that has no recorded refund", async () => {
     Order.findById.mockResolvedValue(refundedOrder({ refund: undefined }));
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    const { req, res } = makeReqRes({ reasonCode: "CHANGED_MIND" }, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
     await orderController.markRefundEnteredAtBank(req, res, jest.fn());
 
     expect(res.statusCode).toBe(400);
