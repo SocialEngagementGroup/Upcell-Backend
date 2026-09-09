@@ -1244,3 +1244,210 @@ describe("respondToRevisedOffer", () => {
     expect(res.statusCode).toBe(400);
   });
 });
+
+// R.8 — the clock, and money actually leaving.
+describe("the SLA clock follows the status", () => {
+  const { CHECKLIST_ITEMS } = require("../src/constants/inspectionChecklist");
+  const allPass = (overrides = {}) =>
+    CHECKLIST_ITEMS.map((item) => ({ key: item.key, result: overrides[item.key] || "pass" }));
+  const fivePhotos = Array.from({ length: 5 }, (_, i) => ({
+    url: `https://cdn/p${i}.jpg`, publicId: `upcell/returns/p${i}`,
+  }));
+
+  const inspect = async (request, checklist = allPass()) => {
+    RefundRequest.findById.mockResolvedValue(request);
+    Order.findById.mockResolvedValue(paidOrder());
+    const { req, res, next } = makeReqRes(
+      { checklist, photos: fivePhotos },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.submitInspection(req, res, next);
+    return res;
+  };
+
+  it("starts when inspection begins, not when the device arrived", async () => {
+    // The promise is two business days from knowing what is owed.
+    const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+
+    await inspect(request);
+
+    expect(request.sla.clockStartedAt).toBeInstanceOf(Date);
+    expect(request.sla.dueAt).toBeInstanceOf(Date);
+  });
+
+  it("pauses when a locked device puts the ball back with the customer", async () => {
+    const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+
+    await inspect(request, allPass({ activation_lock: "fail" }));
+
+    expect(request.status).toBe("ActionRequired");
+    expect(request.sla.clockPausedAt).toBeInstanceOf(Date);
+  });
+
+  it("does not pause while UpCell is the one working", async () => {
+    const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+
+    await inspect(request);
+
+    expect(request.sla.clockPausedAt).toBeUndefined();
+  });
+});
+
+describe("settleRefundRequest", () => {
+  const approved = (overrides = {}) => requestDoc({
+    status: "Approved",
+    rmaNumber: "RMA-2026-00412",
+    calculatedAmount: 849.15,
+    timeline: [],
+    ...overrides,
+  });
+
+  const settle = async (request, body = {}) => {
+    RefundRequest.findById.mockResolvedValue(request);
+    Order.findById.mockResolvedValue(paidOrder());
+    const { req, res, next } = makeReqRes(
+      { method: "BANK_TRANSFER", amount: 849.15, reference: "TRF-99182", ...body },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.settleRefundRequest(req, res, next);
+    return { res, request };
+  };
+
+  it("records the payment and closes the return as Refunded", async () => {
+    const request = approved();
+
+    const { res } = await settle(request);
+
+    expect(res.statusCode).toBe(200);
+    expect(request.status).toBe("Refunded");
+    expect(request.resolution.settlementAmount).toBe(849.15);
+    expect(request.resolution.settledBy).toBe(STAFF.email);
+  });
+
+  it("insists on a signed receipt for cash", async () => {
+    // No bank record stands behind a handover; the receipt is the only proof.
+    const request = approved();
+
+    const { res } = await settle(request, { method: "CASH", receiptUrl: undefined, reference: undefined });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/signed receipt/i);
+    expect(request.status).toBe("Approved");
+  });
+
+  it("accepts cash with one", async () => {
+    const request = approved();
+
+    const { res } = await settle(request, {
+      method: "CASH", receiptUrl: "https://cdn/receipt.jpg", reference: undefined,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(request.resolution.receiptUrl).toBe("https://cdn/receipt.jpg");
+  });
+
+  it("insists on a bank reference for a transfer", async () => {
+    const request = approved();
+
+    const { res } = await settle(request, { reference: "" });
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("refuses to pay more than was agreed", async () => {
+    const request = approved();
+
+    const { res } = await settle(request, { amount: 5000 });
+
+    expect(res.statusCode).toBe(400);
+    expect(request.status).toBe("Approved");
+  });
+
+  it("checks against the revised amount when there was an offer", async () => {
+    const request = approved({
+      calculatedAmount: 849.15,
+      refundBreakdown: { offeredAmount: 700, finalAmount: 700 },
+    });
+
+    const { res } = await settle(request, { amount: 800 });
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("will not settle a return that has not been approved", async () => {
+    const request = approved({ status: "InInspection" });
+
+    const { res } = await settle(request);
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("records the outcome as a partial acceptance when an offer was accepted", async () => {
+    const request = approved({
+      timeline: [{ event: "revised_offer_accepted" }],
+      refundBreakdown: { offeredAmount: 700, finalAmount: 700 },
+    });
+
+    await settle(request, { amount: 700 });
+
+    expect(request.resolution.outcome).toBe("PARTIAL_ACCEPTED");
+  });
+});
+
+describe("getReturnsDashboard", () => {
+  const dashboard = async (statuses, live = []) => {
+    RefundRequest.aggregate.mockResolvedValue(statuses);
+    RefundRequest.find.mockReturnValue({ select: () => ({ lean: async () => live }) });
+
+    const { req, res, next } = makeReqRes({}, { user: STAFF });
+    await controller.getReturnsDashboard(req, res, next);
+    return res.json.mock.calls[0][0];
+  };
+
+  it("counts each queue a staff member works", async () => {
+    const body = await dashboard([
+      { _id: "Submitted", count: 3 },
+      { _id: "DeviceReceived", count: 2 },
+      { _id: "Approved", count: 1 },
+      { _id: "LabelIssued", count: 4 },
+    ]);
+
+    expect(body.queues).toMatchObject({
+      awaitingApproval: 3,
+      awaitingInspection: 2,
+      awaitingSettlement: 1,
+      inTransit: 4,
+    });
+  });
+
+  it("lists what is already late, worst first", async () => {
+    const hoursAgo = (n) => new Date(Date.now() - n * 60 * 60 * 1000);
+    const body = await dashboard([], [
+      { _id: "a", rmaNumber: "RMA-1", status: "Approved", sla: { dueAt: hoursAgo(2) } },
+      { _id: "b", rmaNumber: "RMA-2", status: "Approved", sla: { dueAt: hoursAgo(30) } },
+    ]);
+
+    expect(body.queues.overdue).toBe(2);
+    expect(body.overdue.map((entry) => entry.rmaNumber)).toEqual(["RMA-2", "RMA-1"]);
+  });
+
+  it("does not count a paused return as late", async () => {
+    // The ball is with the customer, so it is not UpCell failing to act.
+    const body = await dashboard([], [{
+      _id: "a", status: "RevisedOffer",
+      sla: { dueAt: new Date(Date.now() - 100000), clockPausedAt: new Date() },
+    }]);
+
+    expect(body.queues.overdue).toBe(0);
+  });
+
+  it("separates what is waiting on the customer from what is waiting on us", async () => {
+    const body = await dashboard([
+      { _id: "ActionRequired", count: 2 },
+      { _id: "RevisedOffer", count: 1 },
+    ]);
+
+    expect(body.queues.waitingOnCustomer).toBe(3);
+    expect(body.queues.overdue).toBe(0);
+  });
+});

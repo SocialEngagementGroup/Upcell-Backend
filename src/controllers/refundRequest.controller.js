@@ -34,6 +34,12 @@ const {
   offerHasExpired,
 } = require("../services/revisedOffer");
 const { createAccessToken, tokensMatch } = require("../utils/accessToken");
+const { startClock, syncClockToStatus, isOverdue, hoursRemaining } = require("../services/returnSla");
+const {
+  defaultMethodFor,
+  validateSettlement,
+  outcomeFor,
+} = require("../services/returnSettlement");
 const {
   checkReturnEligibility,
   checkSelectedItems,
@@ -525,7 +531,7 @@ async function updateRefundRequestStatus(req, res, next) {
     // already checked above; applyTransition re-checks it and writes the
     // timeline entry in the same step, so a status can never change without a
     // record of who changed it. That log is what answers a disputed return.
-    const moved = applyTransition(request, status, {
+    const moved = moveStatus(request, status, {
       actor: req.user?.email || req.user?.id,
       actorType: "staff",
       meta: {
@@ -635,7 +641,7 @@ async function recordReturnLabel(req, res, next) {
     // corrected label onto a request already in LabelIssued should replace the
     // file, not fail because the transition is illegal.
     if (request.status === "ReturnApproved") {
-      const moved = applyTransition(request, "LabelIssued", {
+      const moved = moveStatus(request, "LabelIssued", {
         actor: req.user?.email || req.user?.id,
         actorType: "staff",
         meta: { carrier: shipment.carrier, trackingNumber: shipment.trackingNumber },
@@ -817,7 +823,7 @@ async function submitInspection(req, res, next) {
     // inspection having started rather than a device jumping from a shelf to a
     // verdict.
     if (request.status === "DeviceReceived") {
-      const opened = applyTransition(request, "InInspection", {
+      const opened = moveStatus(request, "InInspection", {
         actor: req.user?.email || req.user?.id,
         actorType: "staff",
         event: "inspection_started",
@@ -837,7 +843,7 @@ async function submitInspection(req, res, next) {
     }[outcome.outcome];
 
     if (nextStatus && nextStatus !== request.status) {
-      const moved = applyTransition(request, nextStatus, {
+      const moved = moveStatus(request, nextStatus, {
         actor: req.user?.email || req.user?.id,
         actorType: "staff",
         event: "inspection_completed",
@@ -882,6 +888,21 @@ async function submitInspection(req, res, next) {
 // Where the customer answers an offer. Built here so the links in the email and
 // the routes that serve them cannot drift apart.
 const SITE_URL = process.env.FRONTEND_URL || process.env.SITE_URL || "";
+
+// Every status change goes through here so the SLA clock cannot fall out of
+// step with the status. A rule applied by hand in six controllers is a rule
+// that is wrong in one of them.
+function moveStatus(request, to, options) {
+  const result = applyTransition(request, to, options);
+  if (!result.ok) return result;
+
+  // The promise starts when UpCell knows what it owes, which is the end of
+  // inspection — not when the device arrived, and not when it was requested.
+  if (to === "InInspection" && !request.sla?.clockStartedAt) startClock(request);
+
+  syncClockToStatus(request, to);
+  return result;
+}
 const offerLink = (request, action) =>
   `${SITE_URL}/returns/${request._id}/${action}?token=${request.accessToken}`;
 
@@ -943,7 +964,7 @@ async function offerRevisedRefund(req, res, next) {
     if (!request.accessToken) request.accessToken = createAccessToken();
 
     if (request.status !== "RevisedOffer") {
-      const moved = applyTransition(request, "RevisedOffer", {
+      const moved = moveStatus(request, "RevisedOffer", {
         actor: req.user?.email || req.user?.id,
         actorType: "staff",
         event: "revised_offer_sent",
@@ -1040,7 +1061,7 @@ async function respondToRevisedOffer(req, res, next) {
       request.rejectionReason = "The customer declined the revised refund offer.";
     }
 
-    const moved = applyTransition(request, target, {
+    const moved = moveStatus(request, target, {
       // The customer, not a staff member. Which of the two answered is the
       // first thing anyone asks when an offer is later disputed.
       actor: request.userId || request.email,
@@ -1072,6 +1093,144 @@ async function respondToRevisedOffer(req, res, next) {
   }
 }
 
+/**
+ * Records that the customer has actually been paid.
+ *
+ * Nothing here moves money. UpCell pays by bank transfer or by handing over
+ * cash, both of which happen outside this system; this is the record that it
+ * happened, and it insists on being good enough to answer "who was paid, how
+ * much, by whom, and what is the proof". An order status that says Refunded
+ * with nothing behind it is indistinguishable from a mistake.
+ */
+async function settleRefundRequest(req, res, next) {
+  try {
+    const { method, amount, reference, receiptUrl, notes } = req.body || {};
+
+    const request = await RefundRequest.findById(req.params.id || null);
+    if (!request) return res.status(404).json({ error: "Refund request not found" });
+
+    if (request.status !== "Approved") {
+      return res.status(400).json({
+        error: `Only an approved return can be settled. This one is ${request.status}.`,
+      });
+    }
+
+    const order = await Order.findById(request.orderId);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+
+    const settlement = validateSettlement({
+      method: method || defaultMethodFor(order),
+      amount,
+      reference,
+      receiptUrl,
+      // What was agreed — the revised amount where there was an offer, and the
+      // calculated refund otherwise.
+      expectedAmount: request.refundBreakdown?.finalAmount
+        ?? request.refundBreakdown?.offeredAmount
+        ?? request.calculatedAmount,
+    });
+
+    if (!settlement.ok) return res.status(400).json({ error: settlement.error });
+
+    const moved = moveStatus(request, "Refunded", {
+      actor: req.user?.email || req.user?.id,
+      actorType: "staff",
+      event: "settled",
+      meta: {
+        method: settlement.settlement.settlementMethod,
+        amount: settlement.settlement.settlementAmount,
+      },
+    });
+
+    if (!moved.ok) return res.status(400).json({ error: moved.error, allowed: moved.allowed });
+
+    request.resolution = {
+      ...(request.resolution || {}),
+      ...settlement.settlement,
+      outcome: outcomeFor(request),
+      settledAt: new Date(),
+      settledBy: req.user?.email,
+    };
+    request.refundBreakdown = {
+      ...(request.refundBreakdown || {}),
+      finalAmount: settlement.settlement.settlementAmount,
+    };
+    if (notes) request.inspectionNotes = notes;
+
+    await request.save();
+
+    AuditLog.create({
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      action: "refund_request.settled",
+      targetType: "RefundRequest",
+      targetId: String(request._id),
+      metadata: {
+        rmaNumber: request.rmaNumber,
+        method: settlement.settlement.settlementMethod,
+        amount: settlement.settlement.settlementAmount,
+        reference: settlement.settlement.settlementRef,
+      },
+    }).catch(() => {});
+
+    return res.status(200).json({
+      ok: true,
+      status: request.status,
+      resolution: request.resolution,
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+/**
+ * The counters at the top of the returns dashboard.
+ *
+ * Answers "what is waiting on us, and what have we already missed" in one
+ * request. Overdue is the one that matters: a promise nobody is measuring is
+ * not a promise.
+ */
+async function getReturnsDashboard(req, res, next) {
+  try {
+    const [counts, live] = await Promise.all([
+      RefundRequest.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
+      // Only the ones that can still be late. A settled return cannot become
+      // overdue, however long ago its deadline was.
+      RefundRequest.find({ status: { $in: ACTIVE_STATUSES } })
+        .select("status sla rmaNumber email createdAt")
+        .lean(),
+    ]);
+
+    const byStatus = Object.fromEntries(counts.map((row) => [row._id, row.count]));
+    const overdue = live.filter((request) => isOverdue(request));
+
+    return res.status(200).json({
+      byStatus,
+      queues: {
+        awaitingApproval: byStatus.Submitted || 0,
+        inTransit: (byStatus.LabelIssued || 0) + (byStatus.InTransit || 0) + (byStatus.Delivered || 0),
+        awaitingInspection: byStatus.DeviceReceived || 0,
+        // Paused, so not late — but still someone's job to chase.
+        waitingOnCustomer: (byStatus.ActionRequired || 0) + (byStatus.RevisedOffer || 0),
+        awaitingSettlement: byStatus.Approved || 0,
+        overdue: overdue.length,
+      },
+      overdue: overdue
+        .map((request) => ({
+          _id: request._id,
+          rmaNumber: request.rmaNumber,
+          status: request.status,
+          dueAt: request.sla?.dueAt,
+          hoursLate: -(hoursRemaining(request) || 0),
+        }))
+        // Worst first: the one that has been late longest is the one to do now.
+        .sort((left, right) => right.hoursLate - left.hoursLate),
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 module.exports = {
   getRefundableItems,
   createRefundRequest,
@@ -1084,4 +1243,6 @@ module.exports = {
   submitInspection,
   offerRevisedRefund,
   respondToRevisedOffer,
+  settleRefundRequest,
+  getReturnsDashboard,
 };

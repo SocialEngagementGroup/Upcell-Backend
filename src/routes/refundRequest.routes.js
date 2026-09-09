@@ -9,6 +9,7 @@ const {
   returnLabelSchema,
   inspectionSubmitSchema,
   revisedOfferSchema,
+  settlementSchema,
 } = require("../schemas/request.schemas");
 const {
   getRefundableItems,
@@ -22,6 +23,8 @@ const {
   submitInspection,
   offerRevisedRefund,
   respondToRevisedOffer,
+  settleRefundRequest,
+  getReturnsDashboard,
 } = require("../controllers/refundRequest.controller");
 
 // Customer. Signed in only — guest returns by order id and email come later,
@@ -94,6 +97,18 @@ router.post(
   publicFormLimiter,
   validateObjectIdParam(),
   respondToRevisedOffer
+);
+
+// What is waiting on us, and what we have already missed.
+router.get("/admin-returns-dashboard", verifyToken, requireAdmin, getReturnsDashboard);
+
+router.patch(
+  "/admin-refund-requests/:id/settle",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  validateRequest(settlementSchema),
+  settleRefundRequest
 );
 
 module.exports = router;

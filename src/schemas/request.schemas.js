@@ -296,6 +296,21 @@ const contactSubmissionSchema = z.object({
 // that could act on half-checked input.
 // What a customer submits. reason is required and has a floor: "broken" tells
 // staff nothing they can act on before the device has even been sent back.
+// Recording that the customer has been paid.
+//
+// Nothing here moves money - it is the record that a person did. Which fields
+// are required depends on the method, and services/returnSettlement.js enforces
+// that: cash needs the signed receipt, a transfer needs the bank reference.
+const settlementSchema = z.object({
+  method: z.enum(["CASH", "BANK_TRANSFER", "ORIGINAL_PAYMENT"]).optional(),
+  amount: numericField.refine((value) => value > 0, "Enter the amount that was paid"),
+  reference: z.string().trim().max(120).optional(),
+  // A photo of the signed receipt. Required for cash, where there is no bank
+  // record behind the handover.
+  receiptUrl: z.string().trim().url().optional(),
+  notes: z.string().trim().max(1000).optional(),
+});
+
 // A revised refund offer.
 //
 // Amounts are staff judgement - how much a scuffed back is worth is not
@@ -476,6 +491,7 @@ module.exports = {
   returnLabelSchema,
   inspectionSubmitSchema,
   revisedOfferSchema,
+  settlementSchema,
   monthlySellSchema,
   cartLookupSchema,
 };
