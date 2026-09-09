@@ -7,7 +7,13 @@ const { calculateRefund } = require("../services/refund");
 const { applyTransition, recordEvent } = require("../services/returnTimeline");
 const { summariseForQueue } = require("../services/returnRiskFlags");
 const { issueRmaNumber } = require("../utils/rma");
-const { reasonCategory, faultAttributionFor } = require("../constants/returnReasons");
+const {
+  reasonCategory,
+  faultAttributionFor,
+  returnPolicyFor,
+  RETURN_REASONS,
+  RETURN_REASON_CODES,
+} = require("../constants/returnReasons");
 const { issueRma } = require("../services/returnAuthorisation");
 const {
   checkReturnEligibility,
@@ -80,7 +86,12 @@ async function getRefundableItems(req, res, next) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    const eligibility = checkReturnEligibility(order);
+    // The window depends on why it is coming back - 14 days for a change of
+    // mind, 30 for a fault - so the form passes the chosen reason back as the
+    // customer picks it. Without one, the longest window applies, which is what
+    // an order-history page wants before anything has been chosen.
+    const reasonCode = req.query?.reasonCode;
+    const eligibility = checkReturnEligibility(order, { reasonCode });
     if (!eligibility.ok) {
       return res.status(200).json({ ok: false, reason: eligibility.reason, message: eligibility.message });
     }
@@ -100,21 +111,75 @@ async function getRefundableItems(req, res, next) {
       });
     }
 
+    const items = eligibility.items.map((item) => ({
+      productId: item.price_data.product_data.metadata.productId,
+      name: item.price_data.product_data.name,
+      image: item.price_data.product_data.images?.[0],
+      paid: item.price_data.product_data.metadata.totalPaid,
+    }));
+
+    // What the customer is choosing between, and what each choice costs them.
+    // Sent as data rather than hard-coded in the form so the window, the
+    // postage and the fee can never say one thing on screen and another in the
+    // calculation.
+    const reasons = RETURN_REASON_CODES.map((code) => {
+      const policy = returnPolicyFor(code);
+      return {
+        code,
+        label: RETURN_REASONS[code].label,
+        category: policy.category,
+        windowDays: policy.windowDays,
+        customerPaysPostage: policy.customerPaysPostage,
+        restockingFee: policy.restockingFee,
+        requiresNote: policy.requiresNote,
+      };
+    });
+
+    // An estimate, once the customer has picked a reason and some items.
+    //
+    // Calculated here rather than in the browser, on the same code path that
+    // produces the real figure at approval - so the number quoted before they
+    // commit and the number they are actually paid are arrived at the same way,
+    // and cannot drift apart. It is still an estimate: inspection can change
+    // the reason, and a device in worse condition than described gets a revised
+    // offer instead.
+    const selected = req.query?.itemIds
+      ? String(req.query.itemIds).split(",").map((id) => id.trim()).filter(Boolean)
+      : null;
+
+    let estimate = null;
+    if (reasonCode) {
+      const result = calculateRefund(order, {
+        itemIds: selected && selected.length ? selected : undefined,
+        reasonCode,
+      });
+
+      if (result.ok) {
+        estimate = {
+          itemsTotal: result.itemsTotal,
+          restockingFee: result.restockingFee,
+          taxRefunded: result.taxRefunded,
+          refundAmount: result.refundAmount,
+          // Postage is not deducted here. UpCell issues the label and the cost
+          // is known when it is bought, not now - so quoting a number for it
+          // would be inventing one. The form says who pays instead.
+          customerPaysPostage: returnPolicyFor(reasonCode).customerPaysPostage,
+        };
+      }
+    }
+
     res.status(200).json({
       ok: true,
       closesAt: eligibility.closesAt,
-      // Only what the form needs to draw a row per item.
-      items: eligibility.items.map((item) => ({
-        productId: item.price_data.product_data.metadata.productId,
-        name: item.price_data.product_data.name,
-        image: item.price_data.product_data.images?.[0],
-        paid: item.price_data.product_data.metadata.totalPaid,
-      })),
-      // Stated, not calculated. The exact figure depends on what staff decide
-      // about the fee after inspection, and quoting it now would read as a
-      // promise.
-      feeNotice:
-        "A 15% restocking fee applies. The sales tax you paid on returned items is refunded; shipping is not.",
+      windowDays: eligibility.windowDays,
+      items,
+      reasons,
+      estimate,
+      // Only true for a change of mind now. It used to say this for every
+      // return, including a device that would not power on.
+      feeNotice: reasonCode && !returnPolicyFor(reasonCode).restockingFee
+        ? "No restocking fee applies to this return, and UpCell pays the return postage. The sales tax you paid is refunded in full."
+        : "A 15% restocking fee applies to change-of-mind returns, and you pay the return postage. The sales tax you paid on returned items is refunded; shipping is not.",
     });
   } catch (error) {
     next(error);
@@ -132,7 +197,10 @@ async function createRefundRequest(req, res, next) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    const eligibility = checkReturnEligibility(order);
+    // Checked against the reason the customer actually chose, not the longest
+    // window. Otherwise a change-of-mind return submitted on day 20 would pass
+    // here after the form had already told them it was out of time.
+    const eligibility = checkReturnEligibility(order, { reasonCode });
     if (!eligibility.ok) {
       return res.status(400).json({ error: eligibility.message });
     }

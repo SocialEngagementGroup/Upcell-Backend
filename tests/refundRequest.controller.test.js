@@ -607,3 +607,80 @@ describe("the approval queue carries the numbers staff read", () => {
     expect(Array.isArray(body.items)).toBe(true);
   });
 });
+
+// R.2 — what the customer is told before they commit.
+describe("the return form is told the policy for the reason it picked", () => {
+  const ask = async (query = {}) => {
+    Order.findById.mockResolvedValue(paidOrder());
+    const { req, res, next } = makeReqRes(
+      {},
+      { params: { id: "a".repeat(24) }, query, user: CUSTOMER }
+    );
+    await controller.getRefundableItems(req, res, next);
+    return res.json.mock.calls[0][0];
+  };
+
+  it("sends the whole reason list, so the form is never out of step with the rules", async () => {
+    const body = await ask();
+
+    expect(body.reasons.length).toBeGreaterThan(10);
+    const changedMind = body.reasons.find((entry) => entry.code === "CHANGED_MIND");
+    expect(changedMind).toMatchObject({
+      windowDays: 14,
+      customerPaysPostage: true,
+      restockingFee: true,
+    });
+  });
+
+  it("marks a faulty device as free to return, with the longer window", async () => {
+    const body = await ask();
+
+    expect(body.reasons.find((entry) => entry.code === "WONT_POWER_ON")).toMatchObject({
+      windowDays: 30,
+      customerPaysPostage: false,
+      restockingFee: false,
+    });
+  });
+
+  it("marks OTHER as needing a written note", async () => {
+    const body = await ask();
+
+    expect(body.reasons.find((entry) => entry.code === "OTHER").requiresNote).toBe(true);
+  });
+
+  it("gives no estimate until a reason is chosen", async () => {
+    expect((await ask()).estimate).toBeNull();
+  });
+
+  it("deducts the fee on a change-of-mind return", async () => {
+    const body = await ask({ reasonCode: "CHANGED_MIND" });
+
+    expect(body.estimate.restockingFee).toBeGreaterThan(0);
+    expect(body.estimate.customerPaysPostage).toBe(true);
+  });
+
+  it("deducts nothing when the device is faulty", async () => {
+    // The number the customer is quoted has to match what they are actually
+    // paid, and a faulty device is never charged the fee.
+    const body = await ask({ reasonCode: "WONT_POWER_ON" });
+
+    expect(body.estimate.restockingFee).toBe(0);
+    expect(body.estimate.customerPaysPostage).toBe(false);
+  });
+
+  it("stops promising a fee that no longer applies to every return", async () => {
+    const body = await ask({ reasonCode: "WONT_POWER_ON" });
+
+    expect(body.feeNotice).toMatch(/No restocking fee/i);
+  });
+
+  it("shortens the window when the reason is a change of mind", async () => {
+    const changeOfMind = await ask({ reasonCode: "CHANGED_MIND" });
+    const faulty = await ask({ reasonCode: "WONT_POWER_ON" });
+
+    expect(changeOfMind.windowDays).toBe(14);
+    expect(faulty.windowDays).toBe(30);
+    expect(new Date(changeOfMind.closesAt).getTime())
+      .toBeLessThan(new Date(faulty.closesAt).getTime());
+  });
+});
