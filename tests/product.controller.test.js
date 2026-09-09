@@ -57,9 +57,10 @@ describe("getShopProducts — the shop page's data source", () => {
     const res = makeRes();
     await product.getShopProducts({}, res, jest.fn());
 
-    // public — identical for every visitor, nothing per-user in it.
-    // max-age matches the frontend's React Query staleTime of 60s.
-    expect(res.headers["Cache-Control"]).toBe("public, max-age=60, stale-while-revalidate=300");
+    // public — identical for every visitor, nothing per-user in it. Short,
+    // because a listing that lags by minutes shows prices an admin has already
+    // corrected. The product page itself uses no-cache for the same reason.
+    expect(res.headers["Cache-Control"]).toBe("public, max-age=30, stale-while-revalidate=60");
   });
 
   it("only asks for browsable products — accessories are excluded", async () => {
@@ -359,5 +360,82 @@ describe("createProduct — the admin Save product button", () => {
 
     expect(savedVariants()[0].image).toBe(req.body.image);
     expect(savedVariants()[0].imagePublicId).toBeUndefined();
+  });
+});
+
+describe("cache headers — a price must never be served stale", () => {
+  it("getProductBySlug always revalidates, so a corrected price is never shown", async () => {
+    const ParentProduct = require("../src/models/parentProduct.model");
+    SingleVariation.findOne.mockReturnValue({
+      lean: async () => ({ _id: "v1", slug: "x", parentCatagory: "p1", price: 111 }),
+    });
+    SingleVariation.find.mockReturnValue({ lean: async () => [] });
+    ParentProduct.findById.mockReturnValue({ select: () => ({ lean: async () => ({ modelName: "X" }) }) });
+
+    const res = makeRes();
+    await product.getProductBySlug({ params: { slug: "x" } }, res, jest.fn());
+
+    // no-cache means "ask first", not "do not store" — Express's ETag turns an
+    // unchanged product into a 304 with no body.
+    expect(res.headers["Cache-Control"]).toBe("no-cache");
+  });
+});
+
+describe("createProduct — a photo per variant", () => {
+  const ParentProduct = require("../src/models/parentProduct.model");
+
+  const images = [
+    { url: "https://cdn/one.jpg", publicId: "upcell/products/other/one--aaa" },
+    { url: "https://cdn/two.jpg", publicId: "upcell/products/other/two--bbb" },
+  ];
+
+  const makeReq = (variants) => ({
+    body: {
+      productName: "Add product",
+      categoryName: "Add cat",
+      image: images[0].url,
+      images,
+      variants,
+    },
+  });
+
+  beforeEach(() => {
+    ParentProduct.findById.mockResolvedValue(null);
+    ParentProduct.findOne.mockResolvedValue(null);
+    ParentProduct.exists.mockResolvedValue(false);
+    ParentProduct.create.mockImplementation(async (doc) => ({ _id: "parent1", ...doc }));
+    SingleVariation.exists.mockResolvedValue(false);
+    SingleVariation.insertMany.mockImplementation(async (docs) => docs);
+  });
+
+  const saved = () => SingleVariation.insertMany.mock.calls[0][0];
+
+  it("gives each variant the photo it was assigned", async () => {
+    await product.createProduct(makeReq([
+      { storage: "64GB", color: { name: "Blue" }, price: 111, imagePublicId: images[0].publicId },
+      { storage: "512GB", color: { name: "Natural" }, price: 222, imagePublicId: images[1].publicId },
+    ]), makeRes(), jest.fn());
+
+    expect(saved()[0].imagePublicId).toBe(images[0].publicId);
+    expect(saved()[0].image).toBe(images[0].url);
+    expect(saved()[1].imagePublicId).toBe(images[1].publicId);
+    expect(saved()[1].image).toBe(images[1].url);
+  });
+
+  it("falls back to the primary photo when a variant chose none", async () => {
+    await product.createProduct(makeReq([
+      { storage: "64GB", color: { name: "Blue" }, price: 111 },
+    ]), makeRes(), jest.fn());
+
+    expect(saved()[0].imagePublicId).toBe(images[0].publicId);
+  });
+
+  it("ignores a photo that is not one of this product's own", async () => {
+    // Otherwise a variant could be pointed at any asset in the account.
+    await product.createProduct(makeReq([
+      { storage: "64GB", color: { name: "Blue" }, price: 111, imagePublicId: "upcell/static/someone-elses" },
+    ]), makeRes(), jest.fn());
+
+    expect(saved()[0].imagePublicId).toBe(images[0].publicId);
   });
 });

@@ -78,6 +78,15 @@ const productVariantSchema = z.object({
   discountPrice: optionalNumericField,
   originalPrice: optionalNumericField,
   outOfStock: z.boolean().optional().default(false),
+  // Which of the product's uploaded photos shows this exact variant. Carried
+  // as the Cloudinary public_id rather than an index into the images array,
+  // because an index silently points at a different photo the moment the admin
+  // reorders or removes one.
+  //
+  // Optional: a product photographed once still works, and every variant falls
+  // back to the first photo. Server-side the id is looked up in the product's
+  // own images, so a caller cannot point a variant at an arbitrary asset.
+  imagePublicId: trimmedString("Variant image", 1, 300).optional(),
 });
 
 const productBatchSchema = z.object({

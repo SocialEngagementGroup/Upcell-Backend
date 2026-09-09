@@ -136,7 +136,12 @@ async function getProductsByParent(req, res, next) {
     // A family's variants change only when staff edit the catalogue, so the same
     // 60 seconds the shop listing uses applies here — and this is the request a
     // customer waits on when they open a product.
-    res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
+    // The price next to Add to cart. no-cache does not mean "do not cache" —
+    // it means "always ask first". Express sends an ETag, so an unchanged
+    // product answers 304 with no body, which is nearly as cheap as a hit
+    // and is never wrong. max-age=60 meant an admin could correct a price
+    // and a customer would still be shown, and offered, the old one.
+    res.set("Cache-Control", "no-cache");
     res.status(200).json(product);
   } catch (error) {
     next(error);
@@ -177,10 +182,15 @@ async function getProductBySlug(req, res, next) {
         { parentCatagory: product.parentCatagory, ...BROWSABLE },
         productDetailFields
       ).lean(),
-      ParentProduct.findById(product.parentCatagory).select("modelName slug description").lean(),
+      ParentProduct.findById(product.parentCatagory).select("modelName slug description images").lean(),
     ]);
 
-    res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
+    // The price next to Add to cart. no-cache does not mean "do not cache" —
+    // it means "always ask first". Express sends an ETag, so an unchanged
+    // product answers 304 with no body, which is nearly as cheap as a hit
+    // and is never wrong. max-age=60 meant an admin could correct a price
+    // and a customer would still be shown, and offered, the old one.
+    res.set("Cache-Control", "no-cache");
     res.status(200).json({ product, family, parent });
   } catch (error) {
     next(error);
@@ -211,7 +221,10 @@ async function getShopProducts(req, res, next) {
     // cache while the refresh happens behind it — a price or stock edit is
     // visible within about a minute, which is the same delay the app already
     // accepts today.
-    res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
+    // A listing can lag briefly — nobody buys from it directly — but 60s of
+    // hard caching plus 300s of stale-while-revalidate meant an edit took
+    // minutes to surface, and showed the old data once even after a reload.
+    res.set("Cache-Control", "public, max-age=30, stale-while-revalidate=60");
     res.status(200).json(products);
   } catch (error) {
     next(error);
@@ -300,7 +313,10 @@ async function getRecommendedProducts(req, res, next) {
 
     // Identical for every visitor looking at the same product, and it changes
     // only when the catalogue does.
-    res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
+    // A listing can lag briefly — nobody buys from it directly — but 60s of
+    // hard caching plus 300s of stale-while-revalidate meant an edit took
+    // minutes to surface, and showed the old data once even after a reload.
+    res.set("Cache-Control", "public, max-age=30, stale-while-revalidate=60");
     res.status(200).json(cards);
   } catch (error) {
     next(error);
@@ -454,8 +470,22 @@ async function createProduct(req, res, next) {
       // Built in sequence rather than with Promise.all: two variants of the
       // same product can produce the same base slug, and each needs to see the
       // one before it to pick the next free suffix.
+      // The photo an admin picked for this variant, looked up in the product's
+      // own images so a variant can only ever point at one of them. Falls back
+      // to the primary photo, which is what every variant used to get.
+      const imageForVariant = (variant) => {
+        const chosen = variant.imagePublicId
+          ? parentImages.find((ref) => ref?.publicId === variant.imagePublicId)
+          : null;
+        return {
+          variantImage: chosen?.url || primaryImage,
+          variantImagePublicId: chosen?.publicId || primaryImagePublicId,
+        };
+      };
+
       const variantDocs = [];
       for (const variant of variants) {
+        const { variantImage, variantImagePublicId } = imageForVariant(variant);
         const base = variantSlug({ productName, storage: variant.storage, color: variant.color });
         const slug = await ensureUniqueSlug(base, async (candidate) =>
           variantDocs.some((doc) => doc.slug === candidate) ||
@@ -476,8 +506,8 @@ async function createProduct(req, res, next) {
           reviewScore,
           peopleReviewed,
           condition,
-          image: primaryImage,
-          imagePublicId: primaryImagePublicId,
+          image: variantImage,
+          imagePublicId: variantImagePublicId,
           // A photo someone chose for this product, not a stand-in — so it is
           // shown as it is, and never replaced by a guess from the local image
           // manifest. That substitution is why an admin could upload one photo
@@ -550,7 +580,10 @@ async function getAccessories(req, res, next) {
 
     // The same two accessories on every product page in the catalogue. Without
     // this each page view refetched them.
-    res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
+    // A listing can lag briefly — nobody buys from it directly — but 60s of
+    // hard caching plus 300s of stale-while-revalidate meant an edit took
+    // minutes to surface, and showed the old data once even after a reload.
+    res.set("Cache-Control", "public, max-age=30, stale-while-revalidate=60");
     res.status(200).json(accessories);
   } catch (error) {
     next(error);
