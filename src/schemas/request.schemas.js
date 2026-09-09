@@ -20,10 +20,25 @@ const trimmedString = (label, min = 1, max = 255) => z.string().trim().min(min, 
 const emailField = z.string().trim().email("Please enter a valid email address");
 const phoneField = z.string().trim().min(7, "Please enter a valid phone number").max(20, "Please enter a valid phone number");
 
+// Caps chosen well above what the real catalogue holds, so they bound an
+// accident or an attack without ever refusing genuine data. Measured on
+// 9 Sep 2026: the largest product family has 20 variants, the most images on a
+// parent product is 6, and on a category 2.
+const MAX_CATEGORY_IMAGES = 20;
+const MAX_PRODUCT_IMAGES = 30;
+const MAX_VARIANTS_PER_BATCH = 100;
+
 const categorySchema = z.object({
   modelName: trimmedString("Category name", 1, 120),
   description: z.string().trim().max(2000, "Description must be 2000 characters or fewer").optional(),
-  images: z.array(z.any()).optional().default([]),
+  // Was z.array(z.any()) with no length limit — the only unbounded array on an
+  // admin write route, and these routes carry a 25mb body allowance because
+  // images are still posted as base64 data URLs.
+  images: z
+    .array(z.any())
+    .max(MAX_CATEGORY_IMAGES, `A category can have at most ${MAX_CATEGORY_IMAGES} images`)
+    .optional()
+    .default([]),
 });
 
 const productSchema = z.object({
@@ -31,10 +46,14 @@ const productSchema = z.object({
   productName: trimmedString("Product name", 1, 140),
   description: z.string().trim().max(2000, "Description must be 2000 characters or fewer").optional(),
   storage: trimmedString("Storage", 1, 40),
+  // Every other string in this schema is capped; these three were not, which
+  // made them the one place an oversized value could reach the database on this
+  // route. Admin-only, so not publicly reachable — but the cap costs nothing
+  // and a colour is a short label and a hex code, never prose.
   color: z.object({
-    name: z.string(),
-    value: z.string().optional(),
-    hex: z.string().optional(),
+    name: trimmedString("Colour name", 1, 60),
+    value: z.string().trim().max(40, "Colour value must be 40 characters or fewer").optional(),
+    hex: z.string().trim().max(40, "Colour hex must be 40 characters or fewer").optional(),
   }),
   price: numericField.refine((value) => value > 0, "Price must be positive"),
   discountPrice: optionalNumericField,
@@ -67,11 +86,57 @@ const productBatchSchema = z.object({
   categoryName: trimmedString("Category", 1, 140),
   categoryId: objectIdField.optional(),
   image: trimmedString("Image", 1, 20000000),
-  images: z.array(z.object({ url: trimmedString("Image URL", 1, 20000000) })).optional(),
+  // publicId matters as much as url does — it is what every delivery URL is
+  // built from, so it is what lets one photo be served at a card's width and a
+  // detail view's width. Validation replaces req.body wholesale, so a field
+  // missing from this list is silently dropped before the controller ever sees
+  // it; leaving publicId out defeated the upload it was added for.
+  images: z
+    .array(z.object({
+      url: trimmedString("Image URL", 1, 20000000),
+      publicId: trimmedString("Image public id", 1, 300).optional(),
+      width: optionalNumericField,
+      height: optionalNumericField,
+    }))
+    .max(MAX_PRODUCT_IMAGES, `A product can have at most ${MAX_PRODUCT_IMAGES} images`)
+    .optional(),
   reviewScore: optionalNumericField,
   peopleReviewed: optionalNumericField,
   condition: z.enum(["Mint", "Excellent", "Good", "Fair", "Refubrished", "New"]).default("Excellent"),
-  variants: z.array(productVariantSchema).min(1, "At least one variant is required"),
+  // Each variant becomes its own database document, so an unbounded array here
+  // meant one request could create thousands of them — a pasted spreadsheet
+  // does this by accident far more easily than an attacker does it on purpose.
+  variants: z
+    .array(productVariantSchema)
+    .min(1, "At least one variant is required")
+    .max(MAX_VARIANTS_PER_BATCH, `A product can have at most ${MAX_VARIANTS_PER_BATCH} variants`)
+    // Storage and colour together are what a customer picks on the product
+    // page, so two variants sharing both are not two things — they are one
+    // thing saved twice. The page can only ever show one of them, which is how
+    // a product came to claim three variants in the admin while offering two.
+    //
+    // Rejected here rather than de-duplicated silently, because the admin
+    // needs to know which row to fix: the prices, stock and discounts of the
+    // two rows can differ, and picking one for them would be a guess.
+    .superRefine((variants, ctx) => {
+      const seen = new Map();
+
+      variants.forEach((variant, index) => {
+        const key = `${String(variant.storage || "").trim().toLowerCase()}|${String(variant.color?.name || "").trim().toLowerCase()}`;
+        const first = seen.get(key);
+
+        if (first === undefined) {
+          seen.set(key, index);
+          return;
+        }
+
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [index],
+          message: `Variants ${first + 1} and ${index + 1} are both ${variant.storage} in ${variant.color?.name}. Each storage and colour pair can only appear once.`,
+        });
+      });
+    }),
 });
 
 const productCreateSchema = z.union([productSchema, productBatchSchema]);
@@ -82,11 +147,23 @@ const productCreateSchema = z.union([productSchema, productBatchSchema]);
 // crafted object in place of an array/number could inject query operators.
 // Public, unauthenticated endpoint, so this matters even though the
 // frontend doesn't currently call it.
+//
+// The arrays also had no length limit, and each one is spread into a Mongo $in.
+// This is the only public, unauthenticated route that builds a query from a
+// caller-supplied array, so a single 2mb body could have become an $in with
+// tens of thousands of terms. Bounded to well past anything the shop filters
+// can produce — there are 83 product families and a handful of storages.
+const filterTerms = (label) =>
+  z
+    .array(z.string().trim().max(140, `${label} values must be 140 characters or fewer`))
+    .max(100, `At most 100 ${label} filters`)
+    .default([]);
+
 const productFilterSchema = z.object({
-  productName: z.array(z.string()).default([]),
-  storage: z.array(z.string()).default([]),
-  color: z.array(z.string()).default([]),
-  condition: z.array(z.string()).default([]),
+  productName: filterTerms("product name"),
+  storage: filterTerms("storage"),
+  color: filterTerms("colour"),
+  condition: filterTerms("condition"),
   price: z
     .tuple([z.number().nonnegative(), z.number().nonnegative()])
     .default([0, Number.MAX_SAFE_INTEGER]),

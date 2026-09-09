@@ -2,6 +2,14 @@ const mongoose = require("mongoose");
 
 const singleVariationSchema = new mongoose.Schema({
     parentCatagory: {type: mongoose.Schema.Types.ObjectId, index: true},
+    // The readable half of /product/iphone-air/iphone-air-256gb-space-black,
+    // built from name + storage + colour by src/utils/slug.js.
+    //
+    // The index below is unique and sparse: unique because this is how a
+    // product is looked up, sparse because a record written before slugs
+    // existed has none, and without sparse every one of those missing values
+    // would collide with every other as a duplicate null.
+    slug: String,
     productName: { type: String, index: true },
     categoryName: { type: String, index: true },
     categoryId: { type: mongoose.Schema.Types.ObjectId, ref: "ShopCategory" },
@@ -15,6 +23,27 @@ const singleVariationSchema = new mongoose.Schema({
     peopleReviewed: Number,
     condition: String,
     image: String,
+    // The Cloudinary public_id behind `image`, which is what every delivery
+    // URL is actually built from — a public_id can be asked for at any width
+    // and format, a stored URL cannot.
+    //
+    // These three were written by scripts/backfill-image-public-ids.js long
+    // before they were declared here. Queries still returned them because they
+    // all use .lean(), which hands back the raw document; but Mongoose strips
+    // undeclared fields from a hydrated document, so any .save() on a product
+    // silently deleted them. Declaring them closes that trap.
+    imagePublicId: String,
+    imageWidth: Number,
+    imageHeight: Number,
+    // True when `image` is a stand-in shared across many products rather than a
+    // photo of this exact variant — the seeded catalogue gives all 96 MacBook
+    // Pro M5 Max variants one single file, for instance.
+    //
+    // It is the difference between "this is the product's photo" and "this is
+    // the best we had". A real photo is always shown as-is; a stand-in may be
+    // improved on by the local image manifest. Anything uploaded through the
+    // admin panel is a real photo, so this stays false for it.
+    imageIsGeneric: { type: Boolean, default: false },
     outOfStock: {
         type: Boolean,
         default: false,
@@ -53,6 +82,7 @@ const singleVariationSchema = new mongoose.Schema({
     reservedFor: { type: String, index: true },
 }, { timestamps: true })
 
+singleVariationSchema.index({ slug: 1 }, { unique: true, sparse: true });
 singleVariationSchema.index({ parentCatagory: 1, outOfStock: 1, price: 1 });
 singleVariationSchema.index({ categoryName: 1, storage: 1, price: 1 });
 singleVariationSchema.index({ productName: 1, price: 1 });

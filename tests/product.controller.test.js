@@ -78,7 +78,10 @@ describe("getShopProducts — the shop page's data source", () => {
 
     const [, fields] = SingleVariation.find.mock.calls[0];
     expect(fields).toBe(
-      "parentCatagory productName categoryName description storage color price image outOfStock"
+      // imagePublicId is the fallback resolveProductImage uses when the image
+      // manifest has no photo for a product. Dropping it from this projection
+      // broke the image on every newly added product.
+      "slug imagePublicId imageIsGeneric parentCatagory productName categoryName description storage color price image outOfStock"
     );
   });
 
@@ -130,7 +133,7 @@ describe("getAdminProducts — the admin product-management pages' data source",
 
     const [, fields] = SingleVariation.find.mock.calls[0];
     expect(fields).toBe(
-      "parentCatagory productName categoryName storage color price discountPrice originalPrice outOfStock image"
+      "parentCatagory productName categoryName storage color price discountPrice originalPrice outOfStock image imagePublicId imageIsGeneric"
     );
   });
 
@@ -250,5 +253,111 @@ describe("getRecommendedProducts — groups in the database", () => {
     await product.getRecommendedProducts({ query: {} }, makeRes(), next);
 
     expect(next).toHaveBeenCalledWith(expect.any(Error));
+  });
+});
+
+// createProduct is what the admin "Save product" button calls, and until now
+// nothing tested it. Two bugs shipped through that gap and were found by hand
+// on the live site: variants were written with no slug, so a saved product had
+// no address and search could not open it; and the image an admin uploaded was
+// stored without its Cloudinary id, which let the frontend's image matcher
+// substitute a different photo. Both are asserted here.
+describe("createProduct — the admin Save product button", () => {
+  const ParentProduct = require("../src/models/parentProduct.model");
+
+  const makeReq = (overrides = {}) => ({
+    body: {
+      productName: "iPhone Air",
+      categoryName: "iPhone",
+      categoryId: "cat1",
+      image: "https://res.cloudinary.com/x/image/upload/upcell/products/iphone/air--abc123",
+      images: [{
+        url: "https://res.cloudinary.com/x/image/upload/upcell/products/iphone/air--abc123",
+        publicId: "upcell/products/iphone/air--abc123",
+      }],
+      variants: [
+        { storage: "256GB", color: { name: "Sky Blue" }, price: 999 },
+        { storage: "512GB", color: { name: "Sky Blue" }, price: 1199 },
+      ],
+      ...overrides,
+    },
+  });
+
+  beforeEach(() => {
+    ParentProduct.findById.mockResolvedValue(null);
+    ParentProduct.findOne.mockResolvedValue(null);
+    ParentProduct.exists.mockResolvedValue(false);
+    ParentProduct.create.mockImplementation(async (doc) => ({ _id: "parent1", ...doc }));
+    SingleVariation.exists.mockResolvedValue(false);
+    SingleVariation.insertMany.mockImplementation(async (docs) => docs);
+  });
+
+  const savedVariants = () => SingleVariation.insertMany.mock.calls[0][0];
+
+  it("gives every variant a slug, because the slug is the whole address of its page", async () => {
+    const res = makeRes();
+    await product.createProduct(makeReq(), res, jest.fn());
+
+    expect(savedVariants().map((variant) => variant.slug)).toEqual([
+      "iphone-air-256gb-sky-blue",
+      "iphone-air-512gb-sky-blue",
+    ]);
+  });
+
+  it("gives the parent a slug too", async () => {
+    await product.createProduct(makeReq(), makeRes(), jest.fn());
+
+    expect(ParentProduct.create).toHaveBeenCalledWith(
+      expect.objectContaining({ slug: "iphone-air" })
+    );
+  });
+
+  it("keeps the Cloudinary id of the uploaded image, not just its URL", async () => {
+    await product.createProduct(makeReq(), makeRes(), jest.fn());
+
+    // Without the id there is no way to ask for the photo at a card's width or
+    // in a modern format — a stored URL is one fixed rendition.
+    for (const variant of savedVariants()) {
+      expect(variant.imagePublicId).toBe("upcell/products/iphone/air--abc123");
+    }
+  });
+
+  it("marks an uploaded photo as the product's own, so nothing substitutes another for it", async () => {
+    await product.createProduct(makeReq(), makeRes(), jest.fn());
+
+    for (const variant of savedVariants()) {
+      expect(variant.imageIsGeneric).toBe(false);
+    }
+  });
+
+  it("writes isAccessory explicitly, so the field exists for the index to use", async () => {
+    await product.createProduct(makeReq(), makeRes(), jest.fn());
+
+    for (const variant of savedVariants()) {
+      expect(variant.isAccessory).toBe(false);
+    }
+  });
+
+  it("gives two variants that slugify identically distinct slugs", async () => {
+    const req = makeReq({
+      variants: [
+        { storage: "256GB", color: { name: "Sky Blue" }, price: 999 },
+        { storage: "256GB", color: { name: "sky blue" }, price: 999 },
+      ],
+    });
+
+    await product.createProduct(req, makeRes(), jest.fn());
+
+    const slugs = savedVariants().map((variant) => variant.slug);
+    expect(new Set(slugs).size).toBe(2);
+  });
+
+  it("falls back to the plain image field when no image refs are sent", async () => {
+    const req = makeReq({ images: undefined });
+
+    await product.createProduct(req, makeRes(), jest.fn());
+
+    expect(savedVariants()[0].image).toBe(req.body.image);
+    expect(savedVariants()[0].imagePublicId).toBeUndefined();
   });
 });

@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const ParentProduct = require("../models/parentProduct.model");
 const SingleVariation = require("../models/singleVariation.model");
+const { parentSlug, variantSlug, ensureUniqueSlug } = require("../utils/slug");
 
 // The shop sells devices. Accessories are real products so the cart and
 // checkout work on them, but they are offered on a device's own page and
@@ -8,7 +9,7 @@ const SingleVariation = require("../models/singleVariation.model");
 // phone. Lookups by id deliberately do not use this.
 const BROWSABLE = { isAccessory: { $ne: true } };
 
-const productCardFields = "parentCatagory productName categoryName description storage color price image outOfStock";
+const productCardFields = "slug imagePublicId imageIsGeneric parentCatagory productName categoryName description storage color price image outOfStock";
 
 // The fields the admin product-management pages (AllProduct, AddProduct)
 // actually render or edit — confirmed by grepping SingleProductGroup.jsx and
@@ -17,7 +18,7 @@ const productCardFields = "parentCatagory productName categoryName description s
 // above does not, and deliberately has no BROWSABLE filter — staff manage
 // accessory pricing/stock here too, unlike the public shop listing.
 const adminProductFields =
-  "parentCatagory productName categoryName storage color price discountPrice originalPrice outOfStock image";
+  "parentCatagory productName categoryName storage color price discountPrice originalPrice outOfStock image imagePublicId imageIsGeneric";
 
 const normalizeProductCard = (product) => ({
   ...product,
@@ -118,11 +119,69 @@ async function getProduct(req, res, next) {
   }
 }
 
+// Fields the product page actually renders: the pickers, the price, the photo,
+// and the slug its variant links are built from. This returned every field of
+// every variant before, including ones only the admin edit form uses.
+const productDetailFields =
+  "slug imagePublicId imageIsGeneric parentCatagory productName categoryName description storage color price discountPrice originalPrice condition image outOfStock";
+
 async function getProductsByParent(req, res, next) {
   try {
     const id = req.params.parentId;
-    const product = await SingleVariation.find({ parentCatagory: id, ...BROWSABLE }).lean();
+    const product = await SingleVariation.find(
+      { parentCatagory: id, ...BROWSABLE },
+      productDetailFields
+    ).lean();
+
+    // A family's variants change only when staff edit the catalogue, so the same
+    // 60 seconds the shop listing uses applies here — and this is the request a
+    // customer waits on when they open a product.
+    res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
     res.status(200).json(product);
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * Everything a product page needs, from one readable slug.
+ *
+ * The URL is /product/iphone-air-256gb-space-black — one segment, not
+ * family-plus-variant. Variant slugs are globally unique (see the unique index
+ * on the model), so the family is derivable from the product and does not need
+ * to be in the path. Putting it there would have meant carrying the parent's
+ * slug on every shop card, which is either a join on the busiest endpoint in
+ * the app or the same string copied onto 956 documents and left to drift.
+ *
+ * Returns the selected variant and its whole family together, because the page
+ * needs both immediately: the variant for the price and photo, the family for
+ * the colour and storage pickers. Two requests would mean two waits.
+ *
+ * 404s on an unknown slug rather than returning an empty list — "no such
+ * product" and "this product has no variants in stock" are different answers
+ * and the page shows different things for each.
+ */
+async function getProductBySlug(req, res, next) {
+  try {
+    const product = await SingleVariation.findOne(
+      { slug: req.params.slug, ...BROWSABLE },
+      productDetailFields
+    ).lean();
+
+    if (!product) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+
+    const [family, parent] = await Promise.all([
+      SingleVariation.find(
+        { parentCatagory: product.parentCatagory, ...BROWSABLE },
+        productDetailFields
+      ).lean(),
+      ParentProduct.findById(product.parentCatagory).select("modelName slug description").lean(),
+    ]);
+
+    res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
+    res.status(200).json({ product, family, parent });
   } catch (error) {
     next(error);
   }
@@ -224,6 +283,7 @@ async function getRecommendedProducts(req, res, next) {
       },
       {
         $project: {
+          slug: 1,
           parentCatagory: 1,
           productName: 1,
           categoryName: 1,
@@ -238,6 +298,9 @@ async function getRecommendedProducts(req, res, next) {
       },
     ]);
 
+    // Identical for every visitor looking at the same product, and it changes
+    // only when the catalogue does.
+    res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
     res.status(200).json(cards);
   } catch (error) {
     next(error);
@@ -332,10 +395,15 @@ async function createProduct(req, res, next) {
         variants,
       } = req.body;
 
+      // An image reference is { url, publicId }. The publicId is the half that
+      // matters: it is what a delivery URL is built from, so storing it is what
+      // lets the same photo be served at a card's width and a detail view's
+      // width. The admin panel uploads to Cloudinary and sends both.
       const parentImages = Array.isArray(images) && images.length
         ? images
         : (image ? [{ url: image }] : []);
       const primaryImage = parentImages[0]?.url || image;
+      const primaryImagePublicId = parentImages[0]?.publicId;
       let parent = null;
       let wasExistingParent = false;
 
@@ -358,6 +426,13 @@ async function createProduct(req, res, next) {
         parent.categoryName = categoryName;
         parent.categoryId = categoryId || undefined;
         parent.images = parentImages;
+        // Only when it has none. A slug that changes is a URL that breaks, so a
+        // rename keeps the address the product was first published at.
+        if (!parent.slug) {
+          parent.slug = await ensureUniqueSlug(parentSlug(productName), async (candidate) =>
+            Boolean(await ParentProduct.exists({ slug: candidate, _id: { $ne: parent._id } }))
+          );
+        }
         await parent.save();
         await SingleVariation.deleteMany({ parentCatagory: parent._id });
       } else {
@@ -366,12 +441,30 @@ async function createProduct(req, res, next) {
           categoryName,
           categoryId: categoryId || undefined,
           images: parentImages,
+          slug: await ensureUniqueSlug(parentSlug(productName), async (candidate) =>
+            Boolean(await ParentProduct.exists({ slug: candidate }))
+          ),
         });
       }
 
-      const createdVariants = await SingleVariation.insertMany(
-        variants.map((variant) => ({
+      // Every variant needs its own slug — it is the whole address of its page.
+      // Without this a product saved through the admin form had none, so its
+      // card had nothing to link to and search could not open it.
+      //
+      // Built in sequence rather than with Promise.all: two variants of the
+      // same product can produce the same base slug, and each needs to see the
+      // one before it to pick the next free suffix.
+      const variantDocs = [];
+      for (const variant of variants) {
+        const base = variantSlug({ productName, storage: variant.storage, color: variant.color });
+        const slug = await ensureUniqueSlug(base, async (candidate) =>
+          variantDocs.some((doc) => doc.slug === candidate) ||
+          Boolean(await SingleVariation.exists({ slug: candidate }))
+        );
+
+        variantDocs.push({
           parentCatagory: parent._id,
+          slug,
           productName,
           categoryName,
           categoryId: categoryId || undefined,
@@ -384,9 +477,20 @@ async function createProduct(req, res, next) {
           peopleReviewed,
           condition,
           image: primaryImage,
+          imagePublicId: primaryImagePublicId,
+          // A photo someone chose for this product, not a stand-in — so it is
+          // shown as it is, and never replaced by a guess from the local image
+          // manifest. That substitution is why an admin could upload one photo
+          // and see a different one on the site.
+          imageIsGeneric: false,
+          // Written explicitly rather than left to the schema default, so the
+          // field exists on the document and a query can use an index on it.
+          isAccessory: false,
           outOfStock: Boolean(variant.outOfStock),
-        }))
-      );
+        });
+      }
+
+      const createdVariants = await SingleVariation.insertMany(variantDocs);
 
       return res.status(wasExistingParent ? 200 : 201).json({
         parent,
@@ -439,11 +543,14 @@ async function getAccessories(req, res, next) {
   try {
     const accessories = await SingleVariation.find(
       { isAccessory: true, outOfStock: { $ne: true } },
-      "productName description price image storage color condition"
+      "slug productName description price image storage color condition"
     )
       .sort({ price: 1 })
       .lean();
 
+    // The same two accessories on every product page in the catalogue. Without
+    // this each page view refetched them.
+    res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
     res.status(200).json(accessories);
   } catch (error) {
     next(error);
@@ -456,6 +563,7 @@ module.exports = {
   getAdminProducts,
   getProduct,
   getProductsByParent,
+  getProductBySlug,
   getShopProducts,
   getRecommendedProducts,
   getProductSuggestions,
