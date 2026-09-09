@@ -13,7 +13,9 @@ const {
   sendDueReminders,
   expireStaleAuthorisations,
   autoDeclineStaleOffers,
+  purgeInspectionPhotos,
 } = require("./returnJobs");
+const { destroyAsset } = require("./cloudinaryDelete");
 
 const resend = new Resend(process.env.RESEND_KEY);
 
@@ -46,6 +48,7 @@ async function runReturnJobs(now = new Date()) {
       RefundRequest, sendEmail, buildEmail: returnExpiredEmail, now,
     })],
     ["staleOffers", () => autoDeclineStaleOffers({ RefundRequest, now })],
+    ["photoPurge", () => purgeInspectionPhotos({ RefundRequest, destroyAsset, now })],
   ];
 
   for (const [name, run] of jobs) {

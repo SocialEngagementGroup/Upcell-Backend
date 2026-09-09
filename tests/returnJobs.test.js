@@ -252,3 +252,133 @@ describe("autoDeclineStaleOffers", () => {
     expect(doc.status).toBe("Approved");
   });
 });
+
+describe("purgeInspectionPhotos", () => {
+  const { purgeInspectionPhotos } = require("../src/services/returnJobs");
+
+  const photo = (id, purgeAfter) => ({ publicId: id, url: `https://cdn/${id}.jpg`, purgeAfter });
+
+  const withPhotos = (photos, status = "Refunded") => request({
+    status,
+    inspection: { photos },
+  });
+
+  const destroys = () => jest.fn(async () => ({ ok: true, result: "ok" }));
+
+  it("deletes a photo whose ninety days are up", async () => {
+    const doc = withPhotos([photo("p1", daysAgo(1))]);
+    const destroyAsset = destroys();
+
+    const result = await purgeInspectionPhotos({
+      RefundRequest: modelReturning([doc]), destroyAsset, now,
+    });
+
+    expect(destroyAsset).toHaveBeenCalledWith("p1");
+    expect(result.deleted).toBe(1);
+    expect(doc.inspection.photos).toHaveLength(0);
+  });
+
+  it("keeps one that is not due yet", async () => {
+    const doc = withPhotos([photo("p1", daysAhead(10))]);
+    const destroyAsset = destroys();
+
+    await purgeInspectionPhotos({ RefundRequest: modelReturning([doc]), destroyAsset, now });
+
+    expect(destroyAsset).not.toHaveBeenCalled();
+    expect(doc.inspection.photos).toHaveLength(1);
+  });
+
+  it("deletes only the due ones, leaving the rest", async () => {
+    const doc = withPhotos([photo("old", daysAgo(1)), photo("new", daysAhead(30))]);
+
+    await purgeInspectionPhotos({ RefundRequest: modelReturning([doc]), destroyAsset: destroys(), now });
+
+    expect(doc.inspection.photos.map((entry) => entry.publicId)).toEqual(["new"]);
+  });
+
+  it("holds everything on a return that went wrong", async () => {
+    // Rejected, reduced and shipped-back returns are exactly the ones that turn
+    // into an argument months later, and the photos are the only evidence of
+    // what actually arrived.
+    for (const status of ["Rejected", "ReturnShipped", "RevisedOffer"]) {
+      const doc = withPhotos([photo("p1", daysAgo(100))], status);
+      const destroyAsset = destroys();
+
+      const result = await purgeInspectionPhotos({
+        RefundRequest: modelReturning([doc]), destroyAsset, now,
+      });
+
+      expect(destroyAsset).not.toHaveBeenCalled();
+      expect(result.held).toBe(1);
+      expect(doc.inspection.photos).toHaveLength(1);
+    }
+  });
+
+  it("keeps the purge date on a held photo, so it is reconsidered when the case closes", async () => {
+    const original = daysAgo(100);
+    const doc = withPhotos([photo("p1", original)], "Rejected");
+
+    await purgeInspectionPhotos({ RefundRequest: modelReturning([doc]), destroyAsset: destroys(), now });
+
+    expect(doc.inspection.photos[0].purgeAfter).toEqual(original);
+  });
+
+  it("keeps a photo whose delete failed, so the next run tries again", async () => {
+    // Marking it gone loses the only handle we have on an asset still sitting
+    // in the account.
+    const doc = withPhotos([photo("p1", daysAgo(1))]);
+    const destroyAsset = jest.fn(async () => ({ ok: false, error: "Cloudinary answered 500" }));
+
+    const result = await purgeInspectionPhotos({
+      RefundRequest: modelReturning([doc]), destroyAsset, now,
+    });
+
+    expect(result.deleted).toBe(0);
+    expect(result.failures).toHaveLength(1);
+    expect(doc.inspection.photos).toHaveLength(1);
+  });
+
+  it("reports the failure rather than looking like a clean run", async () => {
+    const doc = withPhotos([photo("p1", daysAgo(1))]);
+    const destroyAsset = jest.fn(async () => ({ ok: false, error: "keys missing" }));
+
+    const result = await purgeInspectionPhotos({
+      RefundRequest: modelReturning([doc]), destroyAsset, now,
+    });
+
+    expect(result.failures[0]).toMatchObject({ publicId: "p1", error: "keys missing" });
+  });
+
+  it("still deletes the ones that worked when another fails", async () => {
+    const doc = withPhotos([photo("good", daysAgo(1)), photo("bad", daysAgo(1))]);
+    const destroyAsset = jest.fn(async (id) =>
+      id === "bad" ? { ok: false, error: "boom" } : { ok: true, result: "ok" });
+
+    const result = await purgeInspectionPhotos({
+      RefundRequest: modelReturning([doc]), destroyAsset, now,
+    });
+
+    expect(result.deleted).toBe(1);
+    expect(doc.inspection.photos.map((entry) => entry.publicId)).toEqual(["bad"]);
+  });
+
+  it("writes the deletion into the record", async () => {
+    // "Where did the photos go" is a question somebody asks.
+    const doc = withPhotos([photo("p1", daysAgo(1))]);
+
+    await purgeInspectionPhotos({ RefundRequest: modelReturning([doc]), destroyAsset: destroys(), now });
+
+    expect(doc.timeline.at(-1)).toMatchObject({
+      event: "inspection_photos_purged", actorType: "system",
+    });
+    expect(doc.timeline.at(-1).meta.deleted).toBe(1);
+  });
+
+  it("does not save a request it did not change", async () => {
+    const doc = withPhotos([photo("p1", daysAhead(10))]);
+
+    await purgeInspectionPhotos({ RefundRequest: modelReturning([doc]), destroyAsset: destroys(), now });
+
+    expect(doc.save).not.toHaveBeenCalled();
+  });
+});

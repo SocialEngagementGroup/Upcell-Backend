@@ -1,10 +1,12 @@
 // The things that have to happen to a return when nobody is looking at it.
 //
-// Three jobs, run daily: nudge customers before their authorisation lapses,
-// expire the ones that lapsed anyway, and auto-decline a revised offer nobody
-// answered. All three exist because a return left alone does not resolve
-// itself — it sits in a queue looking live, and staff cannot tell it apart from
-// one still on its way.
+// Four jobs, run daily: nudge customers before their authorisation lapses,
+// expire the ones that lapsed anyway, auto-decline a revised offer nobody
+// answered, and delete inspection photos once their retention is up. The first
+// three exist because a return left alone does not resolve itself — it sits in
+// a queue looking live, and staff cannot tell it apart from one still on its
+// way. The fourth exists because evidence photos of somebody's device are not
+// something to keep forever by accident.
 //
 // Every dependency is passed in rather than required at the top. That is what
 // lets these be tested against dates and fake records without a database or a
@@ -15,6 +17,7 @@
 const { dueReminder, hasExpired } = require("./returnAuthorisation");
 const { offerHasExpired } = require("./revisedOffer");
 const { applyTransition, recordEvent } = require("./returnTimeline");
+const { PHOTO_HOLD_STATUSES } = require("../constants/returnStatus");
 
 // Statuses where the customer still has the device and the clock is running.
 // A return already received cannot expire — UpCell has the phone.
@@ -154,7 +157,84 @@ async function autoDeclineStaleOffers({ RefundRequest, now = new Date() }) {
   return { declined, considered: candidates.length };
 }
 
+/**
+ * Deletes inspection photos once their 90 days are up.
+ *
+ * The hold is the important half. A return that went wrong — rejected, reduced,
+ * or shipped back — keeps its photos until the case closes, because those are
+ * exactly the ones that turn into an argument months later, and the photos are
+ * the only evidence of what actually arrived.
+ *
+ * The hold is read from the request's status at purge time rather than written
+ * onto each photo when the status changes. A hold that has to be stamped onto
+ * fifty rows is a hold that gets missed on one of them.
+ *
+ * A delete that fails is left alone and reported, never marked done. The next
+ * run tries again, and a run that cannot reach Cloudinary at all is visible
+ * rather than looking like a successful purge of nothing.
+ */
+async function purgeInspectionPhotos({ RefundRequest, destroyAsset, now = new Date() }) {
+  const candidates = await RefundRequest.find({
+    "inspection.photos.purgeAfter": { $lt: now },
+  });
+
+  let deleted = 0;
+  let held = 0;
+  const failures = [];
+
+  for (const request of candidates) {
+    // Under dispute. Nothing is deleted, and the photos keep their original
+    // purge dates so they are reconsidered once the case closes.
+    if (PHOTO_HOLD_STATUSES.includes(request.status)) {
+      held += (request.inspection?.photos || []).length;
+      continue;
+    }
+
+    const remaining = [];
+    let removedHere = 0;
+
+    for (const photo of request.inspection?.photos || []) {
+      const due = photo.purgeAfter && new Date(photo.purgeAfter).getTime() < now.getTime();
+
+      if (!due) {
+        remaining.push(photo);
+        continue;
+      }
+
+      const result = await destroyAsset(photo.publicId);
+
+      if (!result.ok) {
+        // Kept, so the next run tries again. Marking it gone would lose the
+        // only handle we have on an asset that is still in the account.
+        remaining.push(photo);
+        failures.push({ requestId: String(request._id), publicId: photo.publicId, error: result.error });
+        continue;
+      }
+
+      removedHere += 1;
+    }
+
+    if (!removedHere) continue;
+
+    request.inspection.photos = remaining;
+    // Recorded as an event rather than silently: "where did the photos go" is a
+    // question somebody asks, and the answer has to be in the record.
+    recordEvent(request, {
+      event: "inspection_photos_purged",
+      actor: "system",
+      actorType: "system",
+      meta: { deleted: removedHere, remaining: remaining.length },
+    });
+    await request.save();
+
+    deleted += removedHere;
+  }
+
+  return { deleted, held, failures, considered: candidates.length };
+}
+
 module.exports = {
+  purgeInspectionPhotos,
   sendDueReminders,
   expireStaleAuthorisations,
   autoDeclineStaleOffers,
