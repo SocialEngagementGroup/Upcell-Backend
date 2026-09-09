@@ -296,15 +296,28 @@ const contactSubmissionSchema = z.object({
 // that could act on half-checked input.
 // What a customer submits. reason is required and has a floor: "broken" tells
 // staff nothing they can act on before the device has even been sent back.
-const refundRequestCreateSchema = z.object({
-  orderId: objectIdField,
-  itemIds: z.array(objectIdField).min(1, "Choose at least one item to return").max(50),
-  reason: z
-    .string()
-    .trim()
-    .min(10, "Please describe the problem in a little more detail")
-    .max(2000, "Reason must be 2000 characters or fewer"),
-});
+const refundRequestCreateSchema = z
+  .object({
+    orderId: objectIdField,
+    itemIds: z.array(objectIdField).min(1, "Choose at least one item to return").max(50),
+    // Which of the listed reasons this is. It decides the return window, who
+    // pays the postage and whether the 15% fee applies, so it is picked from a
+    // list rather than typed. Optional while the old free-text form is still
+    // in use; the new form always sends it.
+    reasonCode: z.enum(RETURN_REASON_CODES).optional(),
+    reason: z
+      .string()
+      .trim()
+      .min(10, "Please describe the problem in a little more detail")
+      .max(2000, "Reason must be 2000 characters or fewer"),
+  })
+  // OTHER is the code for "none of these fit", so it cannot stand on its own —
+  // somebody has to read what actually happened before deciding who is at
+  // fault. Every other code explains itself.
+  .refine((data) => data.reasonCode !== "OTHER" || data.reason.trim().length >= 10, {
+    message: "Please tell us what happened — we need the detail to sort this out.",
+    path: ["reason"],
+  });
 
 // What staff send when moving a request along. Every field is optional here
 // because which ones are required depends on the destination status — the

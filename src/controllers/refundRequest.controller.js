@@ -4,6 +4,11 @@ const { Notification } = require("../models/notification.model");
 const RefundRequest = require("../models/refundRequest.model");
 const { ALLOWED_TRANSITIONS, ACTIVE_STATUSES } = require("../models/refundRequest.model");
 const { calculateRefund } = require("../services/refund");
+const { applyTransition, recordEvent } = require("../services/returnTimeline");
+const { summariseForQueue } = require("../services/returnRiskFlags");
+const { issueRmaNumber } = require("../utils/rma");
+const { reasonCategory, faultAttributionFor } = require("../constants/returnReasons");
+const { issueRma } = require("../services/returnAuthorisation");
 const {
   checkReturnEligibility,
   checkSelectedItems,
@@ -117,7 +122,7 @@ async function getRefundableItems(req, res, next) {
 }
 
 async function createRefundRequest(req, res, next) {
-  const { orderId, itemIds, reason } = req.body;
+  const { orderId, itemIds, reason, reasonCode } = req.body;
 
   try {
     const order = await Order.findById(orderId || null);
@@ -159,6 +164,22 @@ async function createRefundRequest(req, res, next) {
         email: order.email,
         itemIds: selection.itemIds,
         reason,
+        reasonCode,
+        reasonCategory: reasonCode ? reasonCategory(reasonCode) : null,
+        // Derived from the reason, not posted. It decides who pays the postage
+        // and whether the 15% fee applies, so it is not the customer's to set.
+        faultAttribution: reasonCode ? faultAttributionFor(reasonCode) : null,
+        // The first entry in the dispute record: the customer asked, and when.
+        timeline: [
+          {
+            at: new Date(),
+            actor: req.user?.id || "customer",
+            actorType: "customer",
+            event: "requested",
+            to: "Submitted",
+            meta: { reasonCode: reasonCode || null },
+          },
+        ],
       });
     } catch (error) {
       // The partial unique index rejected a second live request. Two clicks on
@@ -214,14 +235,68 @@ async function getAdminRefundRequests(req, res, next) {
     const status = req.params.status;
     const query = status && status !== "all" ? { status } : {};
 
-    await sendPaginatedResults({
-      res,
-      model: RefundRequest,
-      query,
-      sort: { createdAt: -1 },
-      page,
-      limit,
-      skip,
+    // Oldest first for the approval queue, newest first everywhere else.
+    //
+    // A queue of work is worked through in the order it arrived — the request
+    // that has been waiting longest is the one a customer is most annoyed
+    // about. Every other tab is a record being looked at, where the most
+    // recent is what someone wants.
+    const sort = status === "Submitted" ? { createdAt: 1 } : { createdAt: -1 };
+
+    const [requests, totalItems] = await Promise.all([
+      RefundRequest.find(query).sort(sort).skip(skip).limit(limit),
+      RefundRequest.countDocuments(query),
+    ]);
+
+    // The numbers a staff member reads before approving: order value, how long
+    // since delivery, and whether anything about this one deserves a second
+    // look. Computed here rather than on the client so the rules live in one
+    // place and the same answer reaches the email and the report.
+    const orderIds = [...new Set(requests.map((request) => String(request.orderId)))];
+    const userIds = [...new Set(requests.map((request) => request.userId).filter(Boolean))];
+
+    const yearAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+
+    const [orders, priorCounts] = await Promise.all([
+      Order.find({ _id: { $in: orderIds } }).select("totalCents deliveredAt").lean(),
+      // How many returns each of these customers has had in the last year, not
+      // counting the ones on screen. Grouped in one query rather than one per
+      // row, which at 25 rows a page is 25 round trips saved.
+      RefundRequest.aggregate([
+        { $match: { userId: { $in: userIds }, createdAt: { $gte: yearAgo } } },
+        { $group: { _id: "$userId", count: { $sum: 1 } } },
+      ]),
+    ]);
+
+    const orderById = new Map(orders.map((order) => [String(order._id), order]));
+    const priorByUser = new Map(priorCounts.map((row) => [row._id, row.count]));
+
+    // Same response shape sendPaginatedResults produces, because the admin UI
+    // and every other admin list already read items/pagination. The only
+    // difference is `queue` on each row.
+    const items = requests.map((request) => {
+      const plain = typeof request.toObject === "function" ? request.toObject() : { ...request };
+
+      return {
+        ...plain,
+        queue: summariseForQueue({
+          request: plain,
+          order: orderById.get(String(request.orderId)),
+          // Minus this one: a customer's first return should not read as one
+          // previous return.
+          priorReturns: Math.max((priorByUser.get(request.userId) || 0) - 1, 0),
+        }),
+      };
+    });
+
+    res.status(200).json({
+      items,
+      pagination: {
+        page,
+        limit,
+        totalItems,
+        totalPages: Math.max(1, Math.ceil(totalItems / limit)),
+      },
     });
   } catch (error) {
     next(error);
@@ -264,6 +339,17 @@ async function updateRefundRequestStatus(req, res, next) {
         });
       }
       request.returnInstructions = returnInstructions.trim();
+
+      // The RMA is issued here, not at submission. A request nobody has agreed
+      // to yet has nothing to authorise, and handing out a number for a return
+      // that then gets declined leaves the customer holding a reference that
+      // means nothing.
+      //
+      // Only once: re-approving an already-approved request must not renumber
+      // it, because the first number is on a box in the post by then.
+      if (!request.rmaNumber) {
+        await issueRma(request, { RefundRequest, issueRmaNumber });
+      }
     }
 
     if (status === "DeviceReceived") {
@@ -346,7 +432,25 @@ async function updateRefundRequestStatus(req, res, next) {
       }
     }
 
-    request.status = status;
+    // Through the state machine, never by assignment. The transition was
+    // already checked above; applyTransition re-checks it and writes the
+    // timeline entry in the same step, so a status can never change without a
+    // record of who changed it. That log is what answers a disputed return.
+    const moved = applyTransition(request, status, {
+      actor: req.user?.email || req.user?.id,
+      actorType: "staff",
+      meta: {
+        ...(returnInstructions ? { returnInstructions: request.returnInstructions } : {}),
+        ...(rejectionReason ? { rejectionReason: request.rejectionReason } : {}),
+        ...(request.rmaNumber ? { rmaNumber: request.rmaNumber } : {}),
+        ...(status === "Approved" ? { calculatedAmount: request.calculatedAmount } : {}),
+      },
+    });
+
+    if (!moved.ok) {
+      return res.status(400).json({ error: moved.error, allowed: moved.allowed });
+    }
+
     await request.save();
 
     AuditLog.create({

@@ -16,7 +16,12 @@ jest.mock("../src/models/notification.model", () => ({ Notification: { create: j
 // (exported from the same module) intact while the calls stay mockable.
 jest.mock("../src/models/refundRequest.model", () => {
   const actual = jest.requireActual("../src/models/refundRequest.model");
-  const mock = { findById: jest.fn(), findOne: jest.fn(), create: jest.fn(), find: jest.fn() };
+  const mock = {
+    findById: jest.fn(), findOne: jest.fn(), create: jest.fn(), find: jest.fn(),
+    // The approval queue counts each customer's prior returns in one grouped
+    // query, and issuing an RMA checks which numbers are already taken.
+    aggregate: jest.fn(), exists: jest.fn(), countDocuments: jest.fn(),
+  };
   mock.ALLOWED_TRANSITIONS = actual.ALLOWED_TRANSITIONS;
   mock.ACTIVE_STATUSES = actual.ACTIVE_STATUSES;
   mock.REFUND_REQUEST_STATUSES = actual.REFUND_REQUEST_STATUSES;
@@ -84,6 +89,19 @@ beforeEach(() => {
   // The controller chains .lean() onto findOne, so the mock has to hand back a
   // query-shaped object rather than the document itself.
   findOneResolves(null);
+
+  // Issuing an RMA asks for the highest number already used this year, then
+  // whether its own candidate is taken. Nothing taken, by default.
+  RefundRequest.findOne.mockReturnValue({
+    sort: () => ({ select: () => ({ lean: async () => null }) }),
+    lean: async () => null,
+  });
+  RefundRequest.exists.mockResolvedValue(false);
+  // No prior returns for anyone, unless a test says otherwise.
+  RefundRequest.aggregate.mockResolvedValue([]);
+  RefundRequest.countDocuments.mockResolvedValue(0);
+  // The queue reads each row's order for value and delivery date.
+  Order.find.mockReturnValue({ select: () => ({ lean: async () => [] }) });
 });
 
 describe("getRefundableItems — what the customer sees before the form", () => {
@@ -434,5 +452,158 @@ describe("updateRefundRequestStatus — the workflow", () => {
     await controller.updateRefundRequestStatus(req, res, next);
 
     expect(res.statusCode).toBe(404);
+  });
+});
+
+// R.3 — the approval queue, RMA issue, and the dispute record.
+describe("approving a return issues its RMA", () => {
+  const approve = async (request) => {
+    RefundRequest.findById.mockResolvedValue(request);
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res, next } = makeReqRes(
+      { status: "ReturnApproved", returnInstructions: "Post to 973 Harrisburg Pike" },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.updateRefundRequestStatus(req, res, next);
+    return { res, next };
+  };
+
+  it("gives the request a number and an expiry", async () => {
+    const request = requestDoc({ status: "Submitted" });
+
+    await approve(request);
+
+    expect(request.rmaNumber).toMatch(/^RMA-\d{4}-\d{5}$/);
+    expect(request.rma.expiresAt.getTime()).toBeGreaterThan(request.rma.issuedAt.getTime());
+  });
+
+  it("issues nothing before staff have agreed", async () => {
+    // A number handed out at submission means a customer holds a reference for
+    // a return that might then be declined.
+    const request = requestDoc({ status: "Submitted" });
+
+    expect(request.rmaNumber).toBeUndefined();
+  });
+
+  it("does not renumber a request that already has one", async () => {
+    // By the time a request is re-saved, the first number is on a box in the
+    // post. Changing it strands the parcel.
+    const request = requestDoc({ status: "Submitted", rmaNumber: "RMA-2026-00042" });
+
+    await approve(request);
+
+    expect(request.rmaNumber).toBe("RMA-2026-00042");
+  });
+});
+
+describe("the timeline is written on every move", () => {
+  it("records who changed the status, and from what to what", async () => {
+    const request = requestDoc({ status: "Submitted", timeline: [] });
+    RefundRequest.findById.mockResolvedValue(request);
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res, next } = makeReqRes(
+      { status: "ReturnApproved", returnInstructions: "Post to 973 Harrisburg Pike" },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.updateRefundRequestStatus(req, res, next);
+
+    expect(request.timeline).toHaveLength(1);
+    expect(request.timeline[0]).toMatchObject({
+      event: "status_changed",
+      from: "Submitted",
+      to: "ReturnApproved",
+      actor: STAFF.email,
+      actorType: "staff",
+    });
+  });
+
+  it("keeps the rejection reason in the record, not just on the request", async () => {
+    const request = requestDoc({ status: "Submitted", timeline: [] });
+    RefundRequest.findById.mockResolvedValue(request);
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res, next } = makeReqRes(
+      { status: "Rejected", rejectionReason: "Outside the return window" },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.updateRefundRequestStatus(req, res, next);
+
+    expect(request.timeline[0].meta.rejectionReason).toBe("Outside the return window");
+  });
+
+  it("appends rather than replacing what is already there", async () => {
+    const request = requestDoc({
+      status: "Submitted",
+      timeline: [{ event: "requested", actorType: "customer" }],
+    });
+    RefundRequest.findById.mockResolvedValue(request);
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res, next } = makeReqRes(
+      { status: "ReturnApproved", returnInstructions: "Post to 973 Harrisburg Pike" },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.updateRefundRequestStatus(req, res, next);
+
+    expect(request.timeline).toHaveLength(2);
+    expect(request.timeline[0].event).toBe("requested");
+  });
+});
+
+describe("the approval queue carries the numbers staff read", () => {
+  const queueWith = async (request, { order, priorReturns = 0 } = {}) => {
+    const chain = { sort: () => chain, skip: () => chain, limit: async () => [request] };
+    RefundRequest.find.mockReturnValue(chain);
+    RefundRequest.countDocuments.mockResolvedValue(1);
+    RefundRequest.aggregate.mockResolvedValue(
+      priorReturns ? [{ _id: request.userId, count: priorReturns + 1 }] : []
+    );
+    Order.find.mockReturnValue({ select: () => ({ lean: async () => (order ? [order] : []) }) });
+
+    const { req, res, next } = makeReqRes({}, { params: { status: "Submitted" }, query: {}, user: STAFF });
+    await controller.getAdminRefundRequests(req, res, next);
+    return res.json.mock.calls[0][0];
+  };
+
+  it("puts order value and days since delivery on the row", async () => {
+    const body = await queueWith(requestDoc({ status: "Submitted" }), {
+      order: {
+        _id: "order1",
+        totalCents: 129900,
+        deliveredAt: new Date(Date.now() - 4 * 24 * 60 * 60 * 1000),
+      },
+    });
+
+    expect(body.items[0].queue.orderValue).toBe(1299);
+    expect(body.items[0].queue.daysSinceDelivery).toBe(4);
+  });
+
+  it("flags a high-value order so it gets a second look", async () => {
+    const body = await queueWith(requestDoc({ status: "Submitted" }), {
+      order: { _id: "order1", totalCents: 200000, deliveredAt: new Date() },
+    });
+
+    const flags = body.items[0].queue.flags.map((flag) => flag.code);
+    expect(flags).toContain("HIGH_VALUE");
+  });
+
+  it("does not count this request as one of the customer's prior returns", async () => {
+    // The aggregate counts every return including the one on screen, so a
+    // first-time returner would otherwise read as having one already.
+    const body = await queueWith(requestDoc({ status: "Submitted" }), {
+      order: { _id: "order1", totalCents: 50000, deliveredAt: new Date() },
+      priorReturns: 0,
+    });
+
+    expect(body.items[0].queue.priorReturns).toBe(0);
+  });
+
+  it("keeps the items/pagination shape every other admin list uses", async () => {
+    const body = await queueWith(requestDoc({ status: "Submitted" }));
+
+    expect(body.pagination).toMatchObject({ page: 1, totalItems: 1 });
+    expect(Array.isArray(body.items)).toBe(true);
   });
 });
