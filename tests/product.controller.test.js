@@ -1,3 +1,4 @@
+jest.mock("../src/models/order.model");
 jest.mock("../src/models/singleVariation.model");
 jest.mock("../src/models/parentProduct.model");
 
@@ -291,6 +292,11 @@ describe("createProduct — the admin Save product button", () => {
     ParentProduct.create.mockImplementation(async (doc) => ({ _id: "parent1", ...doc }));
     SingleVariation.exists.mockResolvedValue(false);
     SingleVariation.insertMany.mockImplementation(async (docs) => docs);
+    // saveVariants reads the family first so it can keep the documents that
+    // already exist. A new product has none.
+    SingleVariation.find.mockReturnValue({ lean: async () => [] });
+    SingleVariation.updateOne.mockResolvedValue({ modifiedCount: 1 });
+    SingleVariation.deleteMany.mockResolvedValue({ deletedCount: 0 });
   });
 
   const savedVariants = () => SingleVariation.insertMany.mock.calls[0][0];
@@ -406,6 +412,11 @@ describe("createProduct — a photo per variant", () => {
     ParentProduct.create.mockImplementation(async (doc) => ({ _id: "parent1", ...doc }));
     SingleVariation.exists.mockResolvedValue(false);
     SingleVariation.insertMany.mockImplementation(async (docs) => docs);
+    // saveVariants reads the family first so it can keep the documents that
+    // already exist. A new product has none.
+    SingleVariation.find.mockReturnValue({ lean: async () => [] });
+    SingleVariation.updateOne.mockResolvedValue({ modifiedCount: 1 });
+    SingleVariation.deleteMany.mockResolvedValue({ deletedCount: 0 });
   });
 
   const saved = () => SingleVariation.insertMany.mock.calls[0][0];
@@ -437,5 +448,109 @@ describe("createProduct — a photo per variant", () => {
     ]), makeRes(), jest.fn());
 
     expect(saved()[0].imagePublicId).toBe(images[0].publicId);
+  });
+});
+
+// The two fixes for orders losing their link to what was bought.
+describe("editing keeps variant documents, deleting is refused when ordered", () => {
+  const ParentProduct = require("../src/models/parentProduct.model");
+  const Order = require("../src/models/order.model");
+
+  const existing = [
+    { _id: "keep-me", parentCatagory: "p1", storage: "64GB", color: { name: "Black" }, price: 100, slug: "x-64gb-black" },
+    { _id: "drop-me", parentCatagory: "p1", storage: "1TB", color: { name: "Pink" }, price: 900, slug: "x-1tb-pink" },
+  ];
+
+  beforeEach(() => {
+    ParentProduct.findById.mockResolvedValue({
+      _id: "p1", slug: "x", save: jest.fn().mockResolvedValue(true),
+    });
+    ParentProduct.exists.mockResolvedValue(false);
+    SingleVariation.exists.mockResolvedValue(false);
+    // saveVariants calls .lean() directly; deleteProductFamily calls
+    // .select("_id").lean(). One chainable stub serves both.
+    const query = { lean: async () => existing };
+    query.select = () => query;
+    SingleVariation.find.mockReturnValue(query);
+    SingleVariation.updateOne.mockResolvedValue({ modifiedCount: 1 });
+    SingleVariation.deleteMany.mockResolvedValue({ deletedCount: 1 });
+    SingleVariation.insertMany.mockImplementation(async (docs) =>
+      docs.map((doc, index) => ({ ...doc, _id: `new-${index}` })));
+  });
+
+  const editWith = (variants) => product.createProduct({
+    body: {
+      existingParentId: "p1", productName: "X", categoryName: "C",
+      image: "https://cdn/one.jpg", variants,
+    },
+  }, makeRes(), jest.fn());
+
+  it("updates the variant that still exists instead of recreating it", async () => {
+    await editWith([{ storage: "64GB", color: { name: "Black" }, price: 150 }]);
+
+    // The order-breaking bug was deleteMany + insertMany on every save. The
+    // matching variant must be updated in place so its _id survives.
+    const [filter, update] = SingleVariation.updateOne.mock.calls[0];
+    expect(filter._id).toBe("keep-me");
+    expect(update.$set.price).toBe(150);
+  });
+
+  it("never rewrites the slug of a variant it keeps", async () => {
+    await editWith([{ storage: "64GB", color: { name: "Black" }, price: 150 }]);
+
+    const [, update] = SingleVariation.updateOne.mock.calls[0];
+    expect(update.$set.slug).toBeUndefined();
+  });
+
+  it("matches on storage and colour regardless of case or spacing", async () => {
+    await editWith([{ storage: " 64gb ", color: { name: "BLACK" }, price: 150 }]);
+
+    expect(SingleVariation.updateOne).toHaveBeenCalled();
+    expect(SingleVariation.insertMany).not.toHaveBeenCalled();
+  });
+
+  it("inserts a genuinely new combination", async () => {
+    await editWith([
+      { storage: "64GB", color: { name: "Black" }, price: 150 },
+      { storage: "256GB", color: { name: "Blue" }, price: 250 },
+    ]);
+
+    const inserted = SingleVariation.insertMany.mock.calls[0][0];
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0].storage).toBe("256GB");
+  });
+
+  it("deletes only the combination the admin removed", async () => {
+    await editWith([{ storage: "64GB", color: { name: "Black" }, price: 150 }]);
+
+    const [filter] = SingleVariation.deleteMany.mock.calls[0];
+    expect(filter._id.$in).toEqual(["drop-me"]);
+  });
+
+  it("refuses to delete a product an order references", async () => {
+    Order.find.mockReturnValue({
+      select: () => ({ limit: () => ({ lean: async () => [{ _id: "order1", status: "Shipped" }] }) }),
+    });
+
+    const res = makeRes();
+    await product.deleteProductFamily({ params: { parentId: "p1" } }, res, jest.fn());
+
+    expect(res.statusCode).toBe(409);
+    expect(res.body.message).toMatch(/out of stock/i);
+    // The point of the guard: nothing was removed.
+    expect(SingleVariation.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("still deletes a product nothing has ordered", async () => {
+    Order.find.mockReturnValue({
+      select: () => ({ limit: () => ({ lean: async () => [] }) }),
+    });
+    ParentProduct.findByIdAndDelete.mockResolvedValue({ _id: "p1" });
+
+    const res = makeRes();
+    await product.deleteProductFamily({ params: { parentId: "p1" } }, res, jest.fn());
+
+    expect(res.statusCode).toBe(200);
+    expect(SingleVariation.deleteMany).toHaveBeenCalled();
   });
 });

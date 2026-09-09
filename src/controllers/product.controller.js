@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const ParentProduct = require("../models/parentProduct.model");
 const SingleVariation = require("../models/singleVariation.model");
 const { parentSlug, variantSlug, ensureUniqueSlug } = require("../utils/slug");
+const Order = require("../models/order.model");
 
 // The shop sells devices. Accessories are real products so the cart and
 // checkout work on them, but they are offered on a device's own page and
@@ -395,6 +396,70 @@ async function getFilteredProducts(req, res, next) {
   }
 }
 
+// What identifies a variant to a customer: the storage and colour they pick.
+// Case and spacing are normalised so "128GB"/"128gb" and "Blue"/" blue " are
+// the same variant rather than two.
+const variantKey = (variant) =>
+  `${String(variant.storage || "").trim().toLowerCase()}|${String(variant.color?.name || "").trim().toLowerCase()}`;
+
+// Writes a product's variants, keeping the documents that already exist.
+//
+// Saving an edit used to delete every variant of the family and insert them
+// again, which gave each one a new _id every time. Orders store the _id of what
+// was bought, so every edit orphaned the orders placed before it: 5 of 32 live
+// order lines were already pointing at documents that no longer existed, one of
+// them on a shipped order.
+//
+// Nothing a customer sees breaks when that happens — an order stores its own
+// snapshot of the name, image and price paid — but the restock does. Returning
+// or refunding an order maps its line ids back to variations to put the stock
+// back (services/inventory.js), and an id that matches nothing puts nothing
+// back, silently.
+//
+// So variants are now matched on storage+colour: the same variant keeps its
+// document, its _id and its slug, whatever else the admin changed. Only a
+// genuinely new combination is inserted, and only a removed one is deleted.
+async function saveVariants(parentId, variantDocs) {
+  const existing = await SingleVariation.find({ parentCatagory: parentId }).lean();
+  const existingByKey = new Map(existing.map((doc) => [variantKey(doc), doc]));
+
+  const saved = [];
+  const keptIds = new Set();
+
+  for (const doc of variantDocs) {
+    const match = existingByKey.get(variantKey(doc));
+
+    if (!match) {
+      saved.push(doc);
+      continue;
+    }
+
+    keptIds.add(String(match._id));
+    // The slug is the variant's public address, so it survives a rename for
+    // the same reason the parent's does: a slug that changes is a URL that
+    // breaks, and anything already linking to it stops working.
+    const { slug, ...changes } = doc;
+    await SingleVariation.updateOne({ _id: match._id }, { $set: changes });
+    saved.push({ ...match, ...changes });
+  }
+
+  const toInsert = saved.filter((doc) => !doc._id);
+  if (toInsert.length) {
+    const inserted = await SingleVariation.insertMany(toInsert);
+    inserted.forEach((doc, index) => { toInsert[index]._id = doc._id; });
+  }
+
+  // Combinations the admin removed from the form.
+  const removed = existing
+    .filter((doc) => !keptIds.has(String(doc._id)))
+    .map((doc) => doc._id);
+  if (removed.length) {
+    await SingleVariation.deleteMany({ _id: { $in: removed } });
+  }
+
+  return saved;
+}
+
 async function createProduct(req, res, next) {
   try {
     if (Array.isArray(req.body.variants)) {
@@ -450,7 +515,6 @@ async function createProduct(req, res, next) {
           );
         }
         await parent.save();
-        await SingleVariation.deleteMany({ parentCatagory: parent._id });
       } else {
         parent = await ParentProduct.create({
           modelName: productName,
@@ -520,7 +584,7 @@ async function createProduct(req, res, next) {
         });
       }
 
-      const createdVariants = await SingleVariation.insertMany(variantDocs);
+      const createdVariants = await saveVariants(parent._id, variantDocs);
 
       return res.status(wasExistingParent ? 200 : 201).json({
         parent,
@@ -547,22 +611,67 @@ function updateProduct(req, res, next) {
     .catch((error) => next(error));
 }
 
-function deleteProduct(req, res, next) {
-  const id = req.params.id;
+// Orders that bought any of these variants.
+//
+// Checked in both shapes an order can carry its lines in: `items` is the
+// current one, `line_items` the legacy Stripe-shaped one still present on
+// older orders (see the Chunk 7 note on the Order schema). Missing either
+// would let a product be deleted out from under half the order history.
+async function ordersReferencing(variationIds) {
+  const ids = variationIds.map((id) => String(id));
 
-  SingleVariation.findByIdAndDelete(id)
-    .then((result) => res.status(200).json(result))
-    .catch((error) => next(error));
+  return Order.find({
+    $or: [
+      { "items.productId": { $in: variationIds } },
+      { "line_items.price_data.product_data.metadata.productId": { $in: ids } },
+    ],
+  })
+    .select("_id status")
+    .limit(20)
+    .lean();
+}
+
+// Refusing to delete is not tidiness — an order stores the id of what was
+// bought, and returning or refunding it maps that id back to the variation to
+// put the stock back. Delete the product and the restock silently puts nothing
+// back. Sold products are taken off sale with outOfStock, not removed.
+function blockedByOrders(res, orders, what) {
+  return res.status(409).json({
+    error: "Product has been ordered",
+    message:
+      `This ${what} cannot be deleted because ${orders.length === 1 ? "an order references" : orders.length + " orders reference"} it. ` +
+      "Mark it out of stock instead — that removes it from the shop and keeps the order history intact.",
+    orderIds: orders.map((order) => String(order._id)),
+  });
+}
+
+async function deleteProduct(req, res, next) {
+  try {
+    const id = req.params.id;
+
+    const orders = await ordersReferencing([new mongoose.Types.ObjectId(id)]);
+    if (orders.length) return blockedByOrders(res, orders, "variant");
+
+    const result = await SingleVariation.findByIdAndDelete(id);
+    return res.status(200).json(result);
+  } catch (error) {
+    return next(error);
+  }
 }
 
 async function deleteProductFamily(req, res, next) {
   try {
     const parentId = req.params.parentId;
+
+    const variations = await SingleVariation.find({ parentCatagory: parentId }).select("_id").lean();
+    const orders = await ordersReferencing(variations.map((doc) => doc._id));
+    if (orders.length) return blockedByOrders(res, orders, "product");
+
     await SingleVariation.deleteMany({ parentCatagory: parentId });
     const deletedParent = await ParentProduct.findByIdAndDelete(parentId);
-    res.status(200).json(deletedParent);
+    return res.status(200).json(deletedParent);
   } catch (error) {
-    next(error);
+    return next(error);
   }
 }
 

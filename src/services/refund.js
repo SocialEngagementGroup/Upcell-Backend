@@ -5,12 +5,14 @@
 //
 // The rule below is exactly what the client confirmed, no more:
 //   refund = (price of the returned items) − 15% restocking fee (unless waived)
+//            + the sales tax charged on those items
 //   shipping is never refunded
-// Their own worked example never mentions tax, so this does not touch it
-// either — inventing a tax refund the client never stated would be a second
-// undocumented assumption sitting next to the one they already flagged
-// (whether partial returns get any shipping back). Both are called out to
-// the caller so a human decides, rather than the code deciding quietly.
+//
+// Tax was left out of this calculation until 9 September 2026, because the
+// client's own worked example predated UpCell charging tax at all and never
+// mentioned it. They have now confirmed it: the 8% comes back in full, and the
+// 15% fee is taken on the goods only, never on the tax. Shipping is unchanged —
+// on a partial return UpCell bears that cost itself rather than refunding it.
 
 const { round2 } = require("../utils/money");
 
@@ -21,6 +23,17 @@ const RESTOCKING_FEE_RATE = 0.15;
 // them apart when reading an order back apart.
 const isRefundableLine = (item) => Boolean(item?.price_data?.product_data?.metadata?.productId);
 
+// The one non-product line the customer is owed back. Matched by the name
+// checkout.controller.js writes, because that is the only thing distinguishing
+// it from the shipping line — both carry a totalPaid and no productId, and
+// only one of them is refundable. Shipping is deliberately not matched.
+const isTaxLine = (item) =>
+  !isRefundableLine(item) &&
+  String(item?.price_data?.product_data?.name || "").trim().toLowerCase() === "sales tax";
+
+const totalPaidOf = (items) =>
+  round2(items.reduce((sum, item) => sum + (item?.price_data?.product_data?.metadata?.totalPaid || 0), 0));
+
 /**
  * What refunding some or all of an order's items comes to.
  *
@@ -29,11 +42,12 @@ const isRefundableLine = (item) => Boolean(item?.price_data?.product_data?.metad
  * @param {string[]} [options.itemIds]      productIds to refund; omitted or empty means every item
  * @param {boolean} [options.waiveRestockingFee]
  * @param {string}  [options.waiveReason]   required when waiving the fee
- * @returns {{ok: true, refundableItems, itemsTotal, restockingFee, restockingFeeWaived, refundAmount}
+ * @returns {{ok: true, refundableItems, itemsTotal, restockingFee, restockingFeeWaived, taxRefunded, refundAmount}
  *          | {ok: false, error: string}}
  */
 function calculateRefund(order, { itemIds, waiveRestockingFee = false, waiveReason } = {}) {
-  const productLines = (order?.line_items || []).filter(isRefundableLine);
+  const lines = order?.line_items || [];
+  const productLines = lines.filter(isRefundableLine);
 
   const requested = itemIds && itemIds.length ? new Set(itemIds.map(String)) : null;
 
@@ -51,15 +65,21 @@ function calculateRefund(order, { itemIds, waiveRestockingFee = false, waiveReas
     return { ok: false, error: "A reason is required to waive the restocking fee." };
   }
 
-  const itemsTotal = round2(
-    refundableItems.reduce(
-      (sum, item) => sum + (item.price_data.product_data.metadata.totalPaid || 0),
-      0
-    )
-  );
+  const itemsTotal = totalPaidOf(refundableItems);
 
   const restockingFee = waiveRestockingFee ? 0 : round2(itemsTotal * RESTOCKING_FEE_RATE);
-  const refundAmount = round2(itemsTotal - restockingFee);
+
+  // Tax is shared out by what the returned items cost, not recalculated as 8%
+  // of them. Two reasons: a full return then hands back exactly the figure that
+  // was charged, cent for cent, rather than a freshly rounded approximation of
+  // it; and an order placed before UpCell charged tax has no tax line to share
+  // out, so it correctly returns nothing instead of inventing 8% the customer
+  // never paid.
+  const goodsTotal = totalPaidOf(productLines);
+  const taxPaid = totalPaidOf(lines.filter(isTaxLine));
+  const taxRefunded = goodsTotal > 0 ? round2(taxPaid * (itemsTotal / goodsTotal)) : 0;
+
+  const refundAmount = round2(itemsTotal - restockingFee + taxRefunded);
 
   return {
     ok: true,
@@ -67,8 +87,9 @@ function calculateRefund(order, { itemIds, waiveRestockingFee = false, waiveReas
     itemsTotal,
     restockingFee,
     restockingFeeWaived: Boolean(waiveRestockingFee),
+    taxRefunded,
     refundAmount,
   };
 }
 
-module.exports = { calculateRefund, RESTOCKING_FEE_RATE, isRefundableLine };
+module.exports = { calculateRefund, RESTOCKING_FEE_RATE, isRefundableLine, isTaxLine };

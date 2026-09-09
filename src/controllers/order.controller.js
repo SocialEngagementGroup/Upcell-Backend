@@ -285,7 +285,8 @@ async function processRefund(req, res, next) {
       return res.status(400).json({ error: result.error });
     }
 
-    const { refundableItems, itemsTotal, restockingFee, restockingFeeWaived, refundAmount } = result;
+    const { refundableItems, itemsTotal, restockingFee, restockingFeeWaived, taxRefunded, refundAmount } =
+      result;
     const refundedProductIds = refundableItems.map(
       (item) => item.price_data.product_data.metadata.productId
     );
@@ -295,6 +296,7 @@ async function processRefund(req, res, next) {
       restockingFee,
       restockingFeeWaived,
       waiveReason: restockingFeeWaived ? waiveReason : undefined,
+      taxRefunded,
       amount: refundAmount,
       itemIds: refundedProductIds,
       notes,
@@ -313,7 +315,14 @@ async function processRefund(req, res, next) {
       action: "order.refund_processed",
       targetType: "Order",
       targetId: order._id,
-      metadata: { itemsTotal, restockingFee, restockingFeeWaived, refundAmount, itemIds: refundedProductIds },
+      metadata: {
+        itemsTotal,
+        restockingFee,
+        restockingFeeWaived,
+        taxRefunded,
+        refundAmount,
+        itemIds: refundedProductIds,
+      },
     }).catch((error) => {
       console.error("[audit] order.refund_processed log failed:", error);
     });
@@ -346,6 +355,7 @@ async function processRefund(req, res, next) {
         itemNames,
         itemsTotal,
         restockingFee,
+        taxRefunded,
         refundAmount,
       });
       resend.emails

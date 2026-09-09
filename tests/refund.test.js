@@ -1,9 +1,10 @@
 const { calculateRefund, RESTOCKING_FEE_RATE } = require("../src/services/refund");
 
-// Matches the worked example the client confirmed:
-//   Devices $2,198.00 − 15% ($329.70) = $1,868.30
-// That example never mentions tax, so this test data omits it too — the
-// calculation is built strictly to what was confirmed, not what seems logical.
+// Matches the worked example the client confirmed, as extended by their
+// 9 Sep 2026 answer on tax:
+//   Devices $2,198.00 − 15% ($329.70) + tax $175.84 = $2,044.14
+// The fee is taken on the goods only and never on the tax; shipping stays
+// out of it entirely, because UpCell bears that cost on a return.
 const deviceLine = (productId, name, totalPaid, quantity = 1) => ({
   quantity,
   price_data: {
@@ -39,12 +40,14 @@ describe("calculateRefund — the client's confirmed rule, exactly", () => {
     expect(result.ok).toBe(true);
     expect(result.itemsTotal).toBe(2198);
     expect(result.restockingFee).toBe(329.7);
-    expect(result.refundAmount).toBe(1868.3);
+    expect(result.taxRefunded).toBe(175.84);
+    expect(result.refundAmount).toBe(2044.14);
   });
 
-  it("never touches the tax or shipping lines", () => {
+  it("returns the whole tax on a full return, and never refunds shipping", () => {
     // Both lines carry no productId, which is the only thing that tells a
-    // real device apart from tax or shipping in a flat line_items array.
+    // real device apart from tax or shipping in a flat line_items array. The
+    // name is then what separates the two: one comes back, one does not.
     const order = {
       line_items: [deviceLine("p1", "iPhone 17", 999), taxLine(79.92), shippingLine(25)],
     };
@@ -52,7 +55,30 @@ describe("calculateRefund — the client's confirmed rule, exactly", () => {
     const result = calculateRefund(order, {});
 
     expect(result.itemsTotal).toBe(999);
+    expect(result.taxRefunded).toBe(79.92);
+    expect(result.refundAmount).toBe(929.07);
+  });
+
+  it("refunds nothing in tax on an order placed before UpCell charged any", () => {
+    // Orders exist from the months when the site displayed tax and the backend
+    // never charged it. Recalculating 8% would hand back money the customer
+    // never paid.
+    const order = { line_items: [deviceLine("p1", "iPhone 17", 999), shippingLine(10.5)] };
+
+    const result = calculateRefund(order, {});
+
+    expect(result.taxRefunded).toBe(0);
     expect(result.refundAmount).toBe(849.15);
+  });
+
+  it("takes the 15% on the goods only, never on the tax", () => {
+    // $1,000 of goods, $80 of tax. The fee is $150, not $162.
+    const order = { line_items: [deviceLine("p1", "iPad", 1000), taxLine(80)] };
+
+    const result = calculateRefund(order, {});
+
+    expect(result.restockingFee).toBe(150);
+    expect(result.refundAmount).toBe(930);
   });
 
   it("refunds only the items named, on a multi-item order", () => {
@@ -68,7 +94,10 @@ describe("calculateRefund — the client's confirmed rule, exactly", () => {
 
     expect(result.itemsTotal).toBe(39);
     expect(result.restockingFee).toBe(5.85);
-    expect(result.refundAmount).toBe(33.15);
+    // Tax is shared out by price: $39 of $1,038 of goods, so $3.12 of the
+    // $83.04 charged. The customer keeps the tax on the phone they kept.
+    expect(result.taxRefunded).toBe(3.12);
+    expect(result.refundAmount).toBe(36.27);
     expect(result.refundableItems).toHaveLength(1);
   });
 

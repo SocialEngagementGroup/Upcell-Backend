@@ -269,7 +269,7 @@ function paymentReceiptEmail({ orderId, paidWith, lineItems, total }) {
 // itemNames is a plain list of what was refunded ("iPhone 17 (Sage, 256GB)"),
 // not the raw line_items — the email should read like a person wrote it, not
 // like a database dump.
-function refundApprovedEmail({ orderId, itemNames, itemsTotal, restockingFee, refundAmount }) {
+function refundApprovedEmail({ orderId, itemNames, itemsTotal, restockingFee, taxRefunded, refundAmount }) {
   const itemRows = (itemNames || [])
     .map(
       (name) =>
@@ -285,6 +285,10 @@ function refundApprovedEmail({ orderId, itemNames, itemsTotal, restockingFee, re
     (restockingFee > 0
       ? detailRow("Restocking fee (15%)", `&minus;${money(restockingFee)}`)
       : "") +
+    // Shown as its own line rather than folded into the total: a customer
+    // checking the figure against their card statement is adding up the same
+    // rows UpCell did, and the tax is the row they are most likely to query.
+    (taxRefunded > 0 ? detailRow("Sales tax refunded", money(taxRefunded)) : "") +
     detailRow("Refund amount", money(refundAmount), { bordered: false, valueColor: "#FFFFFF", valueWeight: 800 });
 
   return {

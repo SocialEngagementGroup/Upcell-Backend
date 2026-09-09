@@ -108,7 +108,8 @@ async function getRefundableItems(req, res, next) {
       // Stated, not calculated. The exact figure depends on what staff decide
       // about the fee after inspection, and quoting it now would read as a
       // promise.
-      feeNotice: "A 15% restocking fee applies. Shipping is not refunded.",
+      feeNotice:
+        "A 15% restocking fee applies. The sales tax you paid on returned items is refunded; shipping is not.",
     });
   } catch (error) {
     next(error);
@@ -314,6 +315,7 @@ async function updateRefundRequestStatus(req, res, next) {
         restockingFee: result.restockingFee,
         restockingFeeWaived: result.restockingFeeWaived,
         waiveReason: result.restockingFeeWaived ? waiveReason : undefined,
+        taxRefunded: result.taxRefunded,
         amount: result.refundAmount,
         itemIds: request.itemIds,
         notes: inspectionNotes,
@@ -371,6 +373,7 @@ async function updateRefundRequestStatus(req, res, next) {
           itemNames,
           itemsTotal: order.refund.itemsTotal,
           restockingFee: order.refund.restockingFee,
+          taxRefunded: order.refund.taxRefunded,
           refundAmount: order.refund.amount,
         })
       );

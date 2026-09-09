@@ -151,8 +151,12 @@ const OrderSchema = new Schema(
       // Required by the controller whenever restockingFeeWaived is true, so a
       // waived fee always has a reason attached, not just a checked box.
       waiveReason: String,
-      // itemsTotal minus restockingFee. What the customer is owed, and the
-      // figure staff type into the Business Center.
+      // The 8% sales tax charged on the returned items, handed back in full.
+      // Confirmed by the client on 9 Sep 2026; refunds recorded before that
+      // date have no such figure and left the tax with UpCell.
+      taxRefunded: Number,
+      // itemsTotal minus restockingFee plus taxRefunded. What the customer is
+      // owed, and the figure staff type into the Business Center.
       amount: Number,
       // productIds of the exact line items refunded. A partial refund on a
       // multi-item order needs this to say which items, not just how much.
