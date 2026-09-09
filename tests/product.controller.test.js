@@ -1,6 +1,7 @@
 jest.mock("../src/models/singleVariation.model");
 jest.mock("../src/models/parentProduct.model");
 
+const mongoose = require("mongoose");
 const SingleVariation = require("../src/models/singleVariation.model");
 const product = require("../src/controllers/product.controller");
 
@@ -167,21 +168,87 @@ describe("getProducts — the full catalogue endpoint", () => {
   });
 });
 
-describe("getRecommendedProducts — still groups (a small, separate use case)", () => {
-  it("still collapses variations to one card per parent product", async () => {
-    const variations = [
-      { _id: "v1", parentCatagory: "p1", productName: "iPhone 15", price: 699, outOfStock: false },
-      { _id: "v2", parentCatagory: "p1", productName: "iPhone 15", price: 649, outOfStock: false },
-    ];
-    mockFindChain(variations);
+// The grouping moved into MongoDB. It used to read every browsable variation
+// (937 of them), build the cards in Node and throw all but four away; now the
+// database groups and limits, and only the rendered cards come back — 614ms to
+// 289ms against the real catalogue.
+//
+// What that costs in testing: the grouping itself is now Mongo's work, and a
+// mocked aggregate cannot prove it. These tests assert the pipeline is built
+// correctly; that one card comes back per family, with its colours intact,
+// needs an integration test against a real database.
+describe("getRecommendedProducts — groups in the database", () => {
+  const stage = (pipeline, key) => pipeline.find((step) => key in step);
+
+  it("returns the cards the aggregation produced", async () => {
+    const cards = [{ _id: "v1", productName: "iPhone 15", price: 649 }];
+    SingleVariation.aggregate.mockResolvedValue(cards);
 
     const res = makeRes();
     await product.getRecommendedProducts({ query: {} }, res, jest.fn());
 
-    // Recommendations show one card per distinct product, unlike the shop
-    // page's own data source above — this is a genuinely different, small
-    // (limit 4-12) use case, not the same duplicated logic.
-    expect(res.body).toHaveLength(1);
-    expect(res.body[0].price).toBe(649); // cheapest in-stock variant wins
+    expect(res.body).toEqual(cards);
+  });
+
+  it("collects colours and storages in the same pass, so swatches survive", async () => {
+    SingleVariation.aggregate.mockResolvedValue([]);
+
+    await product.getRecommendedProducts({ query: {} }, makeRes(), jest.fn());
+
+    const group = stage(SingleVariation.aggregate.mock.calls[0][0], "$group").$group;
+    // Taking $first alone would be faster and would quietly drop every swatch.
+    expect(group.availableColors).toBeDefined();
+    expect(group.availableStorages).toBeDefined();
+    expect(group.doc).toEqual({ $first: "$$ROOT" });
+  });
+
+  it("sorts in-stock first, then cheapest, so $first picks a buyable variant", async () => {
+    SingleVariation.aggregate.mockResolvedValue([]);
+
+    await product.getRecommendedProducts({ query: {} }, makeRes(), jest.fn());
+
+    const sort = stage(SingleVariation.aggregate.mock.calls[0][0], "$sort").$sort;
+    expect(sort).toEqual({ outOfStock: 1, price: 1 });
+  });
+
+  // Mongoose casts a string to an ObjectId for find(), but not inside an
+  // aggregation. Left as a string the $ne matches nothing, and a product page
+  // recommends its own family straight back to itself.
+  it("casts excludeParentId to an ObjectId, or the exclusion silently fails", async () => {
+    SingleVariation.aggregate.mockResolvedValue([]);
+    const parentId = "6a9adcc3acb45145487d7a23";
+
+    await product.getRecommendedProducts({ query: { excludeParentId: parentId } }, makeRes(), jest.fn());
+
+    const match = stage(SingleVariation.aggregate.mock.calls[0][0], "$match").$match;
+    expect(match.parentCatagory.$ne).toBeInstanceOf(mongoose.Types.ObjectId);
+    expect(String(match.parentCatagory.$ne)).toBe(parentId);
+  });
+
+  it("ignores an excludeParentId that is not a real id rather than throwing", async () => {
+    SingleVariation.aggregate.mockResolvedValue([]);
+
+    await product.getRecommendedProducts({ query: { excludeParentId: "nonsense" } }, makeRes(), jest.fn());
+
+    const match = stage(SingleVariation.aggregate.mock.calls[0][0], "$match").$match;
+    expect(match.parentCatagory).toBeUndefined();
+  });
+
+  it("caps the limit at 12 however large a number is asked for", async () => {
+    SingleVariation.aggregate.mockResolvedValue([]);
+
+    await product.getRecommendedProducts({ query: { limit: "500" } }, makeRes(), jest.fn());
+
+    const limit = stage(SingleVariation.aggregate.mock.calls[0][0], "$limit").$limit;
+    expect(limit).toBe(12);
+  });
+
+  it("passes errors to next() instead of leaving the request hanging", async () => {
+    SingleVariation.aggregate.mockRejectedValue(new Error("db down"));
+    const next = jest.fn();
+
+    await product.getRecommendedProducts({ query: {} }, makeRes(), next);
+
+    expect(next).toHaveBeenCalledWith(expect.any(Error));
   });
 });
