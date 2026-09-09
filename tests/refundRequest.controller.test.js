@@ -8,6 +8,7 @@ jest.mock("resend", () => ({
   Resend: jest.fn().mockImplementation(() => ({ emails: { send: mockSendMail } })),
 }));
 jest.mock("../src/models/order.model");
+jest.mock("../src/models/singleVariation.model");
 jest.mock("../src/models/auditLog.model", () => ({ create: jest.fn() }));
 jest.mock("../src/models/notification.model", () => ({ Notification: { create: jest.fn() } }));
 
@@ -1599,5 +1600,161 @@ describe("markShipBackUndeliverable", () => {
     const { res } = await undeliverable(request);
 
     expect(res.statusCode).toBe(400);
+  });
+});
+
+// R.12 — where the device goes once UpCell keeps it.
+describe("recordDisposition", () => {
+  const SingleVariation = require("../src/models/singleVariation.model");
+
+  const accepted = (overrides = {}) => requestDoc({
+    status: "Refunded",
+    rmaNumber: "RMA-2026-00412",
+    itemIds: ["p1"],
+    inspection: { grade: "A" },
+    timeline: [],
+    ...overrides,
+  });
+
+  const decide = async (request, body = {}) => {
+    RefundRequest.findById.mockResolvedValue(request);
+    SingleVariation.updateOne = jest.fn(async () => ({ modifiedCount: 1 }));
+
+    const { req, res, next } = makeReqRes(
+      { type: "RESTOCK_NEW", ...body },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.recordDisposition(req, res, next);
+    return { res, request, SingleVariation };
+  };
+
+  it("puts a sealed device back on sale", async () => {
+    const request = accepted();
+
+    const { res } = await decide(request);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.restocked).toBe(true);
+    expect(SingleVariation.updateOne).toHaveBeenCalled();
+    expect(request.disposition.type).toBe("RESTOCK_NEW");
+  });
+
+  it("does not put an opened device back on sale", async () => {
+    const request = accepted();
+
+    const { res } = await decide(request, { type: "OPEN_BOX", grade: "A" });
+
+    expect(res.body.restocked).toBe(false);
+    expect(SingleVariation.updateOne).not.toHaveBeenCalled();
+  });
+
+  it("hands back an internal record for anything not restocked", async () => {
+    const request = accepted();
+
+    const { res } = await decide(request, { type: "WHOLESALE", grade: "B" });
+
+    expect(res.body.internalRecord).toMatchObject({
+      disposition: "WHOLESALE", grade: "B", rmaNumber: "RMA-2026-00412",
+    });
+  });
+
+  it("warns when the restock did not actually change the shelf", async () => {
+    // Otherwise a device stays off sale that everyone believes is on it.
+    const request = accepted();
+    RefundRequest.findById.mockResolvedValue(request);
+    SingleVariation.updateOne = jest.fn(async () => ({ modifiedCount: 0 }));
+
+    const { req, res, next } = makeReqRes(
+      { type: "RESTOCK_NEW" }, { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.recordDisposition(req, res, next);
+
+    expect(res.body.restocked).toBe(false);
+    expect(res.body.warning).toMatch(/could not be put back on sale/i);
+    // The decision is still recorded — the device did come back.
+    expect(request.disposition.type).toBe("RESTOCK_NEW");
+  });
+
+  it("records who decided, and writes it into the timeline", async () => {
+    const request = accepted();
+
+    await decide(request);
+
+    expect(request.disposition.decidedBy).toBe(STAFF.email);
+    expect(request.timeline.at(-1)).toMatchObject({
+      event: "disposition_recorded", actorType: "staff",
+    });
+  });
+
+  it("refuses a write-off with no reason", async () => {
+    const request = accepted();
+
+    const { res } = await decide(request, { type: "SCRAP", grade: "FAIL" });
+
+    expect(res.statusCode).toBe(400);
+    expect(request.disposition).toBeUndefined();
+  });
+
+  it("will not route a device that is still going back to the customer", async () => {
+    const request = accepted({ status: "Rejected" });
+
+    const { res } = await decide(request);
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("keeps the IMEI, which is the only thing tying a shelf to a return", async () => {
+    const request = accepted();
+
+    await decide(request, { type: "WHOLESALE", grade: "B", imei: "353916000000000" });
+
+    expect(request.device.imei).toBe("353916000000000");
+  });
+});
+
+describe("an accepted return cannot close without saying where the device went", () => {
+  const close = async (request) => {
+    RefundRequest.findById.mockResolvedValue(request);
+    Order.findById.mockResolvedValue(paidOrder());
+    const { req, res, next } = makeReqRes(
+      { status: "Closed" }, { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.updateRefundRequestStatus(req, res, next);
+    return { res, request };
+  };
+
+  it("refuses to close a refunded return with no disposition", async () => {
+    // Otherwise the process ends at the refund and the phone becomes something
+    // on a shelf nobody is responsible for.
+    const request = requestDoc({ status: "Refunded", timeline: [] });
+
+    const { res } = await close(request);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/where the device went/i);
+  });
+
+  it("allows it once one is recorded", async () => {
+    const request = requestDoc({
+      status: "Refunded", disposition: { type: "RESTOCK_NEW" }, timeline: [],
+    });
+
+    const { res } = await close(request);
+
+    expect(res.statusCode).toBe(200);
+    expect(request.status).toBe("Closed");
+  });
+
+  it("does not demand one on a rejected return", async () => {
+    // The device is going back to the customer; there is nothing to route.
+    const request = requestDoc({
+      status: "Rejected",
+      shipping: { outbound: { shippedAt: new Date() } },
+      timeline: [],
+    });
+
+    const { res } = await close(request);
+
+    expect(res.statusCode).toBe(200);
   });
 });

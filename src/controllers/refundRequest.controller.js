@@ -39,6 +39,13 @@ const {
 const { createAccessToken, tokensMatch } = require("../utils/accessToken");
 const { startClock, syncClockToStatus, isOverdue, hoursRemaining } = require("../services/returnSla");
 const {
+  validateDisposition,
+  restockDevice,
+  internalRecordFor,
+} = require("../services/returnDisposition");
+const { DISPOSITIONS, DISPOSITION_TYPES, restocks } = require("../constants/dispositions");
+const SingleVariation = require("../models/singleVariation.model");
+const {
   defaultMethodFor,
   validateSettlement,
   outcomeFor,
@@ -540,6 +547,20 @@ async function updateRefundRequestStatus(req, res, next) {
         order.refund.enteredAtBankBy = req.user?.email;
         await order.save();
       }
+    }
+
+    // An accepted return cannot close until somebody has said where the device
+    // went. Otherwise the process ends at the refund and the phone becomes
+    // something on a shelf that nobody is responsible for — which is the exact
+    // gap the disposition model exists to close.
+    //
+    // Only for returns that were accepted: a rejected device is going back to
+    // the customer, so there is nothing to route.
+    if (status === "Closed" && request.status === "Refunded" && !request.disposition?.type) {
+      return res.status(400).json({
+        error: "Record where the device went before closing this return.",
+        dispositions: DISPOSITION_TYPES,
+      });
     }
 
     // A rejected return cannot close while UpCell is still holding the device.
@@ -1416,6 +1437,112 @@ async function getShipBackQueue(req, res, next) {
   }
 }
 
+/**
+ * The routes a device can take, and what each one means.
+ *
+ * Served rather than written into the admin page for the same reason the
+ * inspection checklist is: the list staff choose from and the list the server
+ * accepts have to be one list.
+ */
+function getDispositions(req, res) {
+  return res.status(200).json({
+    dispositions: DISPOSITION_TYPES.map((type) => ({
+      type,
+      label: DISPOSITIONS[type].label,
+      description: DISPOSITIONS[type].description,
+      restocks: DISPOSITIONS[type].restocks,
+    })),
+  });
+}
+
+/**
+ * Records where the device went, and puts it back on sale if it earned that.
+ *
+ * Only a sealed device restocks automatically. Everything else leaves an
+ * internal record carrying the grade and the IMEI for whoever handles it next
+ * — automatically listing an opened phone as new is the mistake this whole
+ * model exists to prevent.
+ */
+async function recordDisposition(req, res, next) {
+  try {
+    const { type, reason, grade, imei } = req.body || {};
+
+    const request = await RefundRequest.findById(req.params.id || null);
+    if (!request) return res.status(404).json({ error: "Refund request not found" });
+
+    // Only a device UpCell is keeping needs routing. One being sent back to the
+    // customer has a destination already.
+    if (!["Approved", "Refunded"].includes(request.status)) {
+      return res.status(400).json({
+        error: `A disposition is recorded once the return is accepted. This one is ${request.status}.`,
+      });
+    }
+
+    const validation = validateDisposition({ type, reason, grade, imei });
+    if (!validation.ok) return res.status(400).json({ error: validation.error });
+
+    const { disposition } = validation;
+
+    let restocked = null;
+    if (restocks(disposition.type)) {
+      restocked = await restockDevice({
+        SingleVariation,
+        productId: request.itemIds?.[0],
+        dispositionType: disposition.type,
+      });
+    }
+
+    request.disposition = {
+      type: disposition.type,
+      grade: disposition.grade || request.inspection?.grade,
+      // The internal record a person acts on. Kept on the request rather than
+      // in a second collection: the grade, IMEI and reason already live here,
+      // and a separate table is a second place for the same facts to go stale.
+      inventoryItemId: restocked?.ok ? String(request.itemIds?.[0]) : undefined,
+      decidedBy: req.user?.email || req.user?.id,
+      decidedAt: new Date(),
+    };
+    if (disposition.imei) {
+      request.device = { ...(request.device || {}), imei: disposition.imei };
+    }
+
+    recordEvent(request, {
+      event: "disposition_recorded",
+      actor: req.user?.email || req.user?.id,
+      actorType: "staff",
+      meta: {
+        ...internalRecordFor(request, disposition),
+        // Said plainly either way. A restock that silently failed leaves a
+        // device off sale that everyone believes is on it.
+        restocked: restocked ? restocked.ok : false,
+        restockError: restocked && !restocked.ok ? restocked.error : undefined,
+      },
+    });
+
+    await request.save();
+
+    AuditLog.create({
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      action: "refund_request.disposition_recorded",
+      targetType: "RefundRequest",
+      targetId: String(request._id),
+      metadata: { type: disposition.type, grade: request.disposition.grade, restocked: restocked?.ok },
+    }).catch(() => {});
+
+    return res.status(200).json({
+      ok: true,
+      disposition: request.disposition,
+      restocked: restocked ? restocked.ok : false,
+      // Surfaced, not swallowed: staff have to know if the shelf did not change.
+      warning: restocked && !restocked.ok ? restocked.error : undefined,
+      internalRecord: restocks(disposition.type) ? undefined : internalRecordFor(request, disposition),
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 module.exports = {
   getRefundableItems,
   createRefundRequest,
@@ -1433,4 +1560,6 @@ module.exports = {
   shipRejectedDeviceBack,
   markShipBackUndeliverable,
   getShipBackQueue,
+  getDispositions,
+  recordDisposition,
 };

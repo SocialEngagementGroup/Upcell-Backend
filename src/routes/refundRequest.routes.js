@@ -10,6 +10,7 @@ const {
   inspectionSubmitSchema,
   revisedOfferSchema,
   settlementSchema,
+  dispositionSchema,
 } = require("../schemas/request.schemas");
 const {
   getRefundableItems,
@@ -28,6 +29,8 @@ const {
   shipRejectedDeviceBack,
   markShipBackUndeliverable,
   getShipBackQueue,
+  getDispositions,
+  recordDisposition,
 } = require("../controllers/refundRequest.controller");
 
 // Customer. Signed in only — guest returns by order id and email come later,
@@ -134,6 +137,19 @@ router.patch(
   requireAdmin,
   validateObjectIdParam(),
   markShipBackUndeliverable
+);
+
+// The routes a device can take. Served rather than written into the admin page,
+// so the list staff choose from and the list the server accepts are one list.
+router.get("/admin-return-dispositions", verifyToken, requireAdmin, getDispositions);
+
+router.patch(
+  "/admin-refund-requests/:id/disposition",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  validateRequest(dispositionSchema),
+  recordDisposition
 );
 
 module.exports = router;

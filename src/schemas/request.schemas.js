@@ -296,6 +296,22 @@ const contactSubmissionSchema = z.object({
 // that could act on half-checked input.
 // What a customer submits. reason is required and has a floor: "broken" tells
 // staff nothing they can act on before the device has even been sent back.
+// Where a returned device goes.
+//
+// The grade and a reason are demanded by services/returnDisposition.js
+// depending on the route - a scrapped device needs a reason, and anything not
+// going straight back on sale needs its grade, because that is what whoever
+// handles it next has to know and it cannot be recovered once the device has
+// left the bench.
+const dispositionSchema = z.object({
+  type: z.enum(["RESTOCK_NEW", "OPEN_BOX", "RETURN_TO_SUPPLIER", "WHOLESALE", "SCRAP"]),
+  grade: z.enum(["A", "B", "C", "FAIL"]).optional(),
+  reason: z.string().trim().max(500).optional(),
+  // Recorded here when inspection did not capture it. The only thing tying a
+  // device on a shelf to the return it came from.
+  imei: z.string().trim().max(40).optional(),
+});
+
 // Recording that the customer has been paid.
 //
 // Nothing here moves money - it is the record that a person did. Which fields
@@ -492,6 +508,7 @@ module.exports = {
   inspectionSubmitSchema,
   revisedOfferSchema,
   settlementSchema,
+  dispositionSchema,
   monthlySellSchema,
   cartLookupSchema,
 };
