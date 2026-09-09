@@ -19,6 +19,9 @@ const {
   validateShipment,
   trackingNumberInUse,
   recordInboundLeg,
+  recordOutboundLeg,
+  recordUndeliverable,
+  awaitingShipBack,
 } = require("../services/returnShipping");
 const {
   validateInspection,
@@ -459,6 +462,18 @@ async function updateRefundRequestStatus(req, res, next) {
         });
       }
       request.rejectionReason = rejectionReason.trim();
+
+      // How many times this customer has been rejected before. Recorded on the
+      // request so the ship-back queue and any later dispute can see it without
+      // re-counting, and surfaced to staff — never an automatic block. A person
+      // rejected twice may still be right the third time, and the deterrent
+      // against frivolous returns is the 15% fee, not a system that refuses
+      // people.
+      request.priorRejections = await RefundRequest.countDocuments({
+        userId: request.userId,
+        status: { $in: ["Rejected", "ReturnShipped"] },
+        _id: { $ne: request._id },
+      });
       // A rejection after the device arrived is an inspection outcome, so the
       // notes belong on the record just as they would on an approval.
       if (previousStatus === "DeviceReceived") {
@@ -525,6 +540,15 @@ async function updateRefundRequestStatus(req, res, next) {
         order.refund.enteredAtBankBy = req.user?.email;
         await order.save();
       }
+    }
+
+    // A rejected return cannot close while UpCell is still holding the device.
+    // That is how a phone ends up on a shelf with nobody responsible for it and
+    // a customer who has stopped being told anything.
+    if (status === "Closed" && awaitingShipBack(request)) {
+      return res.status(400).json({
+        error: "This device has not been sent back yet. Record the ship-back before closing the return.",
+      });
     }
 
     // Through the state machine, never by assignment. The transition was
@@ -1231,6 +1255,167 @@ async function getReturnsDashboard(req, res, next) {
   }
 }
 
+/**
+ * Sends a rejected device back to the customer.
+ *
+ * UpCell pays. The alternative — holding the device until an already-unhappy
+ * customer agrees to pay $12 — needs a payment-hold state, a chasing
+ * mechanism, and somewhere to keep the phone meanwhile, to recover about the
+ * cost of the postage. The deterrent against frivolous returns is the 15%
+ * restocking fee, not this.
+ */
+async function shipRejectedDeviceBack(req, res, next) {
+  try {
+    const { carrier, trackingNumber, labelUrl, labelCost } = req.body || {};
+
+    const request = await RefundRequest.findById(req.params.id || null);
+    if (!request) return res.status(404).json({ error: "Refund request not found" });
+
+    if (request.status !== "Rejected") {
+      return res.status(400).json({
+        error: `Only a rejected return is sent back. This one is ${request.status}.`,
+      });
+    }
+
+    const shipment = validateShipment({ carrier, trackingNumber, labelUrl });
+    if (!shipment.ok) return res.status(400).json({ error: shipment.error });
+
+    const clash = await trackingNumberInUse({
+      RefundRequest,
+      activeStatuses: ACTIVE_STATUSES,
+      trackingNumber: shipment.trackingNumber,
+      exceptId: request._id,
+    });
+    if (clash) {
+      return res.status(409).json({
+        error: `That tracking number is already on another open return${clash.rmaNumber ? ` (${clash.rmaNumber})` : ""}.`,
+      });
+    }
+
+    recordOutboundLeg(request, {
+      carrier: shipment.carrier,
+      trackingNumber: shipment.trackingNumber,
+      labelUrl: shipment.labelUrl,
+      labelCost,
+    });
+
+    const moved = moveStatus(request, "ReturnShipped", {
+      actor: req.user?.email || req.user?.id,
+      actorType: "staff",
+      event: "shipped_back",
+      meta: { carrier: shipment.carrier, trackingNumber: shipment.trackingNumber, paidBy: "UPCELL" },
+    });
+    if (!moved.ok) return res.status(400).json({ error: moved.error, allowed: moved.allowed });
+
+    await request.save();
+
+    const order = await Order.findById(request.orderId);
+
+    sendEmail(
+      request.email,
+      returnLabelIssuedEmail({
+        rmaNumber: request.rmaNumber,
+        orderId: String(request.orderId),
+        carrier: shipment.carrier,
+        trackingNumber: shipment.trackingNumber,
+        labelUrl: shipment.labelUrl,
+        itemNames: namesForItems(order, request.itemIds),
+      })
+    );
+
+    AuditLog.create({
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      action: "refund_request.shipped_back",
+      targetType: "RefundRequest",
+      targetId: String(request._id),
+      metadata: { carrier: shipment.carrier, trackingNumber: shipment.trackingNumber },
+    }).catch(() => {});
+
+    return res.status(200).json({ ok: true, status: request.status, shipping: request.shipping });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+/**
+ * Records that a ship-back came back — refused, or nobody was there.
+ *
+ * Starts a 60-day hold rather than disposing of anything. A customer who moved
+ * house or was away should get an email, not a written-off phone.
+ */
+async function markShipBackUndeliverable(req, res, next) {
+  try {
+    const request = await RefundRequest.findById(req.params.id || null);
+    if (!request) return res.status(404).json({ error: "Refund request not found" });
+
+    if (!request.shipping?.outbound?.shippedAt) {
+      return res.status(400).json({ error: "Nothing has been sent back on this return yet." });
+    }
+
+    recordUndeliverable(request, { reason: req.body?.reason });
+
+    recordEvent(request, {
+      event: "ship_back_undeliverable",
+      actor: req.user?.email || req.user?.id,
+      actorType: "staff",
+      meta: {
+        reason: req.body?.reason,
+        disposeAfter: request.shipping.outbound.disposeAfter,
+      },
+    });
+
+    await request.save();
+
+    return res.status(200).json({
+      ok: true,
+      disposeAfter: request.shipping.outbound.disposeAfter,
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+/**
+ * Devices waiting to go back, and devices that came back undelivered.
+ *
+ * A rejected phone with no owner is the thing that quietly accumulates, so it
+ * gets its own queue rather than living as a filter on the main list.
+ */
+async function getShipBackQueue(req, res, next) {
+  try {
+    const [awaiting, undelivered] = await Promise.all([
+      RefundRequest.find({ status: "Rejected" })
+        .select("rmaNumber email rejectionReason priorRejections updatedAt shipping")
+        .sort({ updatedAt: 1 })
+        .lean(),
+      RefundRequest.find({ "shipping.outbound.undeliverableAt": { $exists: true } })
+        .select("rmaNumber email shipping")
+        .sort({ "shipping.outbound.disposeAfter": 1 })
+        .lean(),
+    ]);
+
+    return res.status(200).json({
+      // Oldest first: a device waiting longest is the one to post today.
+      awaitingShipBack: awaiting.filter((request) => !request.shipping?.outbound?.shippedAt),
+      undeliverable: undelivered.map((request) => ({
+        _id: request._id,
+        rmaNumber: request.rmaNumber,
+        disposeAfter: request.shipping?.outbound?.disposeAfter,
+        reason: request.shipping?.outbound?.undeliverableReason,
+        daysLeft: request.shipping?.outbound?.disposeAfter
+          ? Math.ceil(
+              (new Date(request.shipping.outbound.disposeAfter).getTime() - Date.now())
+                / (24 * 60 * 60 * 1000)
+            )
+          : null,
+      })),
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 module.exports = {
   getRefundableItems,
   createRefundRequest,
@@ -1245,4 +1430,7 @@ module.exports = {
   respondToRevisedOffer,
   settleRefundRequest,
   getReturnsDashboard,
+  shipRejectedDeviceBack,
+  markShipBackUndeliverable,
+  getShipBackQueue,
 };

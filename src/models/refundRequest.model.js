@@ -140,8 +140,18 @@ const RefundRequestSchema = new Schema(
         paidBy: String,
         paidAt: Date,
         shippedAt: Date,
+        // Came back refused, or nobody was there. UpCell holds it for 60 days
+        // from here, with an escalation before anything is disposed of.
+        undeliverableAt: Date,
+        undeliverableReason: String,
+        disposeAfter: Date,
       },
     },
+
+    // How many times this customer has had a return rejected before this one.
+    // Surfaced to staff and never an automatic block: the deterrent against
+    // frivolous returns is the 15% fee, not a system that refuses people.
+    priorRejections: { type: Number, default: 0 },
 
     // The structured inspection. `inspectionNotes` above is still the
     // inspector's prose; this is the part that can be reported on.

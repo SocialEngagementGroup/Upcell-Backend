@@ -1451,3 +1451,153 @@ describe("getReturnsDashboard", () => {
     expect(body.queues.overdue).toBe(0);
   });
 });
+
+// R.9 — getting a rejected device back to its owner.
+describe("shipRejectedDeviceBack", () => {
+  const rejected = (overrides = {}) => requestDoc({
+    status: "Rejected", rmaNumber: "RMA-2026-00412", timeline: [], ...overrides,
+  });
+
+  const shipBack = async (request, body = {}) => {
+    RefundRequest.findById.mockResolvedValue(request);
+    Order.findById.mockResolvedValue(paidOrder());
+    const { req, res, next } = makeReqRes(
+      { carrier: "FedEx", trackingNumber: "OUT123456789", labelUrl: "https://cdn/out.pdf", ...body },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.shipRejectedDeviceBack(req, res, next);
+    return { res, request };
+  };
+
+  it("records the outbound parcel and moves to ReturnShipped", async () => {
+    const request = rejected();
+
+    const { res } = await shipBack(request);
+
+    expect(res.statusCode).toBe(200);
+    expect(request.status).toBe("ReturnShipped");
+    expect(request.shipping.outbound.trackingNumber).toBe("OUT123456789");
+  });
+
+  it("charges UpCell, whoever was at fault", async () => {
+    // Holding the device until an unhappy customer agrees to pay $12 needs a
+    // payment-hold state and somewhere to keep the phone, to recover about the
+    // cost of the postage.
+    const request = rejected({ faultAttribution: "CUSTOMER" });
+
+    await shipBack(request);
+
+    expect(request.shipping.outbound.paidBy).toBe("UPCELL");
+  });
+
+  it("emails the customer the tracking", async () => {
+    const request = rejected();
+
+    await shipBack(request);
+
+    expect(mockSendMail.mock.calls[0][0].html).toContain("OUT123456789");
+  });
+
+  it("will not send back a return that was not rejected", async () => {
+    const request = rejected({ status: "Approved" });
+
+    const { res } = await shipBack(request);
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("refuses a tracking number already on another open return", async () => {
+    const request = rejected();
+    RefundRequest.findOne.mockReturnValue({
+      select: () => ({ lean: async () => ({ _id: "other", rmaNumber: "RMA-2026-00099" }) }),
+    });
+
+    const { res } = await shipBack(request);
+
+    expect(res.statusCode).toBe(409);
+  });
+});
+
+describe("a rejected return cannot close while UpCell still has the device", () => {
+  const closeFrom = async (request) => {
+    RefundRequest.findById.mockResolvedValue(request);
+    Order.findById.mockResolvedValue(paidOrder());
+    const { req, res, next } = makeReqRes(
+      { status: "Closed" },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.updateRefundRequestStatus(req, res, next);
+    return { res, request };
+  };
+
+  it("refuses to close a rejected return with nothing shipped", async () => {
+    // Otherwise a phone sits on a shelf with nobody responsible for it and a
+    // customer who has stopped being told anything.
+    const request = requestDoc({ status: "Rejected", timeline: [] });
+
+    const { res } = await closeFrom(request);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/not been sent back/i);
+    expect(request.status).toBe("Rejected");
+  });
+
+  it("allows it once the device has gone", async () => {
+    const request = requestDoc({
+      status: "Rejected",
+      shipping: { outbound: { shippedAt: new Date() } },
+      timeline: [],
+    });
+
+    const { res } = await closeFrom(request);
+
+    expect(res.statusCode).toBe(200);
+    expect(request.status).toBe("Closed");
+  });
+});
+
+describe("markShipBackUndeliverable", () => {
+  const undeliverable = async (request, body = {}) => {
+    RefundRequest.findById.mockResolvedValue(request);
+    const { req, res, next } = makeReqRes(
+      { reason: "Refused at the door", ...body },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.markShipBackUndeliverable(req, res, next);
+    return { res, request };
+  };
+
+  it("starts the sixty-day hold", async () => {
+    const request = requestDoc({
+      status: "ReturnShipped",
+      shipping: { outbound: { shippedAt: new Date(), trackingNumber: "OUT1" } },
+      timeline: [],
+    });
+
+    const { res } = await undeliverable(request);
+
+    expect(res.statusCode).toBe(200);
+    const days = Math.round((res.body.disposeAfter - Date.now()) / (24 * 60 * 60 * 1000));
+    expect(days).toBe(60);
+  });
+
+  it("logs it, so disposal later is not a surprise", async () => {
+    const request = requestDoc({
+      status: "ReturnShipped",
+      shipping: { outbound: { shippedAt: new Date() } },
+      timeline: [],
+    });
+
+    await undeliverable(request);
+
+    expect(request.timeline.at(-1).event).toBe("ship_back_undeliverable");
+  });
+
+  it("refuses when nothing was ever sent back", async () => {
+    const request = requestDoc({ status: "Rejected", timeline: [] });
+
+    const { res } = await undeliverable(request);
+
+    expect(res.statusCode).toBe(400);
+  });
+});

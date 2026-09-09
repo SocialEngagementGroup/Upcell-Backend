@@ -119,8 +119,51 @@ function recordOutboundLeg(request, { carrier, trackingNumber, labelUrl, labelCo
   return request.shipping.outbound;
 }
 
+// How long UpCell holds a device the customer would not take back.
+//
+// Refused or undeliverable parcels come back and then sit. Sixty days is long
+// enough for someone who moved house or was away, and short enough that UpCell
+// is not warehousing devices it can neither sell nor deliver. Stated on the
+// returns page, so disposal at the end of it is not a surprise.
+const UNDELIVERABLE_HOLD_DAYS = 60;
+
+/**
+ * Marks a ship-back as having come back.
+ *
+ * Starts the clock rather than disposing of anything. Disposal is a decision a
+ * person makes with the record in front of them, and the escalation before it
+ * is the point — a customer who missed a delivery should get an email, not a
+ * written-off phone.
+ */
+function recordUndeliverable(request, { reason, now = new Date() } = {}) {
+  request.shipping = request.shipping || {};
+  request.shipping.outbound = {
+    ...(request.shipping.outbound || {}),
+    undeliverableAt: now,
+    undeliverableReason: reason,
+    disposeAfter: new Date(now.getTime() + UNDELIVERABLE_HOLD_DAYS * 24 * 60 * 60 * 1000),
+  };
+
+  return request.shipping.outbound;
+}
+
+/**
+ * Whether a rejected device still has to be sent back.
+ *
+ * A rejected return cannot close while UpCell is still holding the device: that
+ * is how a phone ends up on a shelf with nobody responsible for it and a
+ * customer who has stopped being told anything.
+ */
+function awaitingShipBack(request) {
+  if (request?.status !== "Rejected") return false;
+  return !request?.shipping?.outbound?.shippedAt;
+}
+
 module.exports = {
   CARRIERS,
+  UNDELIVERABLE_HOLD_DAYS,
+  recordUndeliverable,
+  awaitingShipBack,
   validateShipment,
   trackingNumberInUse,
   recordInboundLeg,

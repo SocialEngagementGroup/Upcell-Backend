@@ -207,3 +207,59 @@ describe("normaliseTracking", () => {
     expect(normaliseTracking(undefined)).toBe("");
   });
 });
+
+describe("ship-backs that come back", () => {
+  const { recordUndeliverable, awaitingShipBack, UNDELIVERABLE_HOLD_DAYS } =
+    require("../src/services/returnShipping");
+  const now = new Date("2026-09-10T12:00:00Z");
+
+  it("holds a refused device for sixty days rather than disposing of it", () => {
+    // A customer who moved house or was away should get an email, not a
+    // written-off phone.
+    const request = { shipping: { outbound: { shippedAt: now } } };
+
+    recordUndeliverable(request, { reason: "Refused at the door", now });
+
+    const expected = new Date(now.getTime() + UNDELIVERABLE_HOLD_DAYS * 24 * 60 * 60 * 1000);
+    expect(request.shipping.outbound.disposeAfter).toEqual(expected);
+    expect(UNDELIVERABLE_HOLD_DAYS).toBe(60);
+  });
+
+  it("keeps why it came back", () => {
+    const request = { shipping: { outbound: {} } };
+
+    recordUndeliverable(request, { reason: "Nobody home after three attempts", now });
+
+    expect(request.shipping.outbound.undeliverableReason).toBe("Nobody home after three attempts");
+  });
+
+  it("does not lose the tracking number it went out with", () => {
+    const request = { shipping: { outbound: { trackingNumber: "OUT123456", shippedAt: now } } };
+
+    recordUndeliverable(request, { now });
+
+    expect(request.shipping.outbound.trackingNumber).toBe("OUT123456");
+  });
+});
+
+describe("awaitingShipBack", () => {
+  const { awaitingShipBack } = require("../src/services/returnShipping");
+
+  it("is true for a rejected device still sitting here", () => {
+    expect(awaitingShipBack({ status: "Rejected" })).toBe(true);
+  });
+
+  it("is false once it has been posted", () => {
+    expect(awaitingShipBack({
+      status: "Rejected",
+      shipping: { outbound: { shippedAt: new Date() } },
+    })).toBe(false);
+  });
+
+  it("is false for a return that was not rejected", () => {
+    // An approved return has no device to send back.
+    for (const status of ["Approved", "Refunded", "Submitted", "Closed"]) {
+      expect(awaitingShipBack({ status })).toBe(false);
+    }
+  });
+});

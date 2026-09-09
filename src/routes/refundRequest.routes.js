@@ -25,6 +25,9 @@ const {
   respondToRevisedOffer,
   settleRefundRequest,
   getReturnsDashboard,
+  shipRejectedDeviceBack,
+  markShipBackUndeliverable,
+  getShipBackQueue,
 } = require("../controllers/refundRequest.controller");
 
 // Customer. Signed in only — guest returns by order id and email come later,
@@ -109,6 +112,28 @@ router.patch(
   validateObjectIdParam(),
   validateRequest(settlementSchema),
   settleRefundRequest
+);
+
+// Devices waiting to go back, and ones that came back undelivered. Its own
+// queue rather than a filter, because a rejected phone with no owner is what
+// quietly accumulates.
+router.get("/admin-return-ship-backs", verifyToken, requireAdmin, getShipBackQueue);
+
+router.patch(
+  "/admin-refund-requests/:id/ship-back",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  validateRequest(returnLabelSchema),
+  shipRejectedDeviceBack
+);
+
+router.patch(
+  "/admin-refund-requests/:id/undeliverable",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  markShipBackUndeliverable
 );
 
 module.exports = router;
