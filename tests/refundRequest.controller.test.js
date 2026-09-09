@@ -42,7 +42,11 @@ const makeReqRes = (body = {}, { params = {}, query = {}, user } = {}) => {
   res = {
     statusCode: 200,
     body: undefined,
+    // Express's own res.set and res.send, which the CSV export uses.
+    headers: {},
     status(code) { this.statusCode = code; return this; },
+    set(name, value) { res.headers[name] = value; return this; },
+    send: jest.fn(function capture(payload) { res.body = payload; return this; }),
     json: jest.fn(function capture(payload) { res.body = payload; return this; }),
   };
   return { req, res, next: jest.fn() };
@@ -1756,5 +1760,130 @@ describe("an accepted return cannot close without saying where the device went",
     const { res } = await close(request);
 
     expect(res.statusCode).toBe(200);
+  });
+});
+
+// R.13 — what the returns data says.
+describe("getReturnsReport", () => {
+  const SingleVariation = require("../src/models/singleVariation.model");
+
+  const report = async ({ requests = [], units = 100, query = {} } = {}) => {
+    RefundRequest.find.mockReturnValue({ select: () => ({ lean: async () => requests }) });
+    SingleVariation.find = jest.fn(() => ({
+      select: () => ({ lean: async () => [{ _id: "p1", productName: "iPhone 15", storage: "256GB" }] }),
+    }));
+    Order.aggregate = jest.fn(async () => [{ units }]);
+
+    const { req, res, next } = makeReqRes({}, { query, user: STAFF });
+    await controller.getReturnsReport(req, res, next);
+    return res.json.mock.calls[0][0];
+  };
+
+  const ret = (overrides = {}) => ({
+    status: "Refunded", reasonCode: "CHANGED_MIND", reasonCategory: "PREFERENCE",
+    faultAttribution: "CUSTOMER", createdAt: new Date(), itemIds: ["p1"], timeline: [],
+    ...overrides,
+  });
+
+  it("reports the return rate against units sold", async () => {
+    const body = await report({ requests: [ret(), ret()], units: 100 });
+
+    expect(body.metrics.returnRate).toBe(2);
+    expect(body.metrics.total).toBe(2);
+  });
+
+  it("counts units from paid orders only", async () => {
+    // Counting unpaid orders inflates the denominator and quietly flatters the
+    // rate — which is exactly the number somebody would use to argue nothing
+    // is wrong.
+    await report({ requests: [ret()] });
+
+    const pipeline = Order.aggregate.mock.calls[0][0];
+    expect(pipeline[0].$match.paid).toBe(true);
+  });
+
+  it("defaults to the last ninety days", async () => {
+    const body = await report({ requests: [] });
+
+    const days = Math.round(
+      (new Date(body.window.to) - new Date(body.window.from)) / (24 * 60 * 60 * 1000)
+    );
+    expect(days).toBe(90);
+  });
+
+  it("honours an explicit window", async () => {
+    const body = await report({
+      requests: [], query: { from: "2026-01-01", to: "2026-03-31" },
+    });
+
+    expect(new Date(body.window.from).toISOString().slice(0, 10)).toBe("2026-01-01");
+  });
+
+  it("groups by product, so a bad model stands out", async () => {
+    const body = await report({ requests: [ret(), ret()] });
+
+    expect(body.byProduct[0]).toMatchObject({ key: "iPhone 15", total: 2 });
+  });
+
+  it("groups by storage too", async () => {
+    const body = await report({ requests: [ret()] });
+
+    expect(body.byStorage[0].key).toBe("256GB");
+  });
+
+  it("filters to one model when asked", async () => {
+    const body = await report({ requests: [ret()], query: { model: "iPad Air" } });
+
+    // The only return is an iPhone 15, so filtering to iPad Air leaves none.
+    expect(body.metrics.total).toBe(0);
+  });
+});
+
+describe("exportReturnsCsv", () => {
+  const exportCsv = async (requests = []) => {
+    RefundRequest.find.mockReturnValue({
+      select: () => ({ sort: () => ({ lean: async () => requests }) }),
+    });
+
+    const { req, res, next } = makeReqRes({}, { query: {}, user: STAFF });
+    await controller.exportReturnsCsv(req, res, next);
+    return res;
+  };
+
+  it("writes one row per return, with a header", async () => {
+    const res = await exportCsv([
+      { rmaNumber: "RMA-2026-00412", status: "Refunded", reasonCode: "CHANGED_MIND" },
+    ]);
+
+    const [header, row] = res.body.split("\n");
+    expect(header).toContain("rma");
+    expect(row).toContain("RMA-2026-00412");
+  });
+
+  it("flattens nested fields rather than dumping JSON into a cell", async () => {
+    // A cell containing {"type":"OPEN_BOX"} is not something anyone can filter.
+    const res = await exportCsv([{
+      rmaNumber: "RMA-1", status: "Closed",
+      disposition: { type: "OPEN_BOX", grade: "B" },
+      resolution: { outcome: "FULL_REFUND", settlementAmount: 849.15 },
+    }]);
+
+    expect(res.body).toContain("OPEN_BOX");
+    expect(res.body).toContain("849.15");
+    expect(res.body).not.toContain("{");
+  });
+
+  it("serves it as a download with a dated filename", async () => {
+    // returns.csv in a downloads folder is indistinguishable from the last four.
+    const res = await exportCsv([{ rmaNumber: "RMA-1", status: "Closed" }]);
+
+    expect(res.headers["Content-Type"]).toMatch(/text\/csv/);
+    expect(res.headers["Content-Disposition"]).toMatch(/upcell-returns-\d{4}-\d{2}-\d{2}-to-\d{4}-\d{2}-\d{2}\.csv/);
+  });
+
+  it("returns an empty body when there is nothing to export", async () => {
+    const res = await exportCsv([]);
+
+    expect(res.body).toBe("");
   });
 });

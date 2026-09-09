@@ -45,6 +45,7 @@ const {
 } = require("../services/returnDisposition");
 const { DISPOSITIONS, DISPOSITION_TYPES, restocks } = require("../constants/dispositions");
 const SingleVariation = require("../models/singleVariation.model");
+const { buildReturnMetrics, groupReturns, toCsv } = require("../services/returnReporting");
 const {
   defaultMethodFor,
   validateSettlement,
@@ -1543,6 +1544,150 @@ async function recordDisposition(req, res, next) {
   }
 }
 
+// The window a report covers. Defaults to the last 90 days, which is long
+// enough for a pattern to show and short enough that a slow month does not
+// hide behind a good quarter.
+function reportWindow(query = {}) {
+  const to = query.to ? new Date(query.to) : new Date();
+  const from = query.from
+    ? new Date(query.from)
+    : new Date(to.getTime() - 90 * 24 * 60 * 60 * 1000);
+
+  return { from, to };
+}
+
+/**
+ * How many units were sold in the window — the denominator of the return rate.
+ *
+ * Counted from paid orders only. Including unpaid ones would inflate the
+ * denominator and quietly flatter the return rate, which is exactly the number
+ * somebody would use to argue nothing is wrong.
+ */
+async function unitsSoldBetween(from, to, filters = {}) {
+  const match = {
+    paid: true,
+    createdAt: { $gte: from, $lte: to },
+  };
+
+  const pipeline = [
+    { $match: match },
+    { $unwind: "$items" },
+    ...(filters.productName
+      ? [{ $match: { "items.name": new RegExp(filters.productName, "i") } }]
+      : []),
+    { $group: { _id: null, units: { $sum: "$items.quantity" } } },
+  ];
+
+  const [result] = await Order.aggregate(pipeline);
+  return result?.units || 0;
+}
+
+/**
+ * The returns report.
+ *
+ * Answers the question the plan actually asks: is a particular model or batch
+ * coming back more than the rest, and what is it coming back for.
+ */
+async function getReturnsReport(req, res, next) {
+  try {
+    const { from, to } = reportWindow(req.query);
+
+    const query = { createdAt: { $gte: from, $lte: to } };
+    if (req.query?.reasonCode) query.reasonCode = req.query.reasonCode;
+    if (req.query?.category) query.reasonCategory = req.query.category;
+
+    const requests = await RefundRequest.find(query)
+      .select("status reasonCode reasonCategory faultAttribution createdAt resolution sla timeline disposition refundBreakdown itemIds rmaNumber")
+      .lean();
+
+    // The product each return was for, so the report can group by model. Read
+    // from the catalogue rather than stored on the request: a return records
+    // what was bought by id, and the name can change.
+    const productIds = [...new Set(requests.flatMap((request) => request.itemIds || []))];
+    const products = productIds.length
+      ? await SingleVariation.find({ _id: { $in: productIds } })
+          .select("productName storage")
+          .lean()
+      : [];
+    const productById = new Map(products.map((product) => [String(product._id), product]));
+
+    const enriched = requests.map((request) => {
+      const product = productById.get(String(request.itemIds?.[0]));
+      return {
+        ...request,
+        productName: product?.productName,
+        storage: product?.storage,
+      };
+    });
+
+    const filtered = enriched.filter((request) => {
+      if (req.query?.model && request.productName !== req.query.model) return false;
+      if (req.query?.storage && request.storage !== req.query.storage) return false;
+      return true;
+    });
+
+    const unitsSold = await unitsSoldBetween(from, to, { productName: req.query?.model });
+
+    return res.status(200).json({
+      window: { from, to },
+      metrics: buildReturnMetrics({ requests: filtered, unitsSold }),
+      byProduct: groupReturns(filtered, "productName"),
+      byStorage: groupReturns(filtered, "storage"),
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+/**
+ * The same returns as a spreadsheet.
+ *
+ * One row per return, flat, with the fields somebody would actually pivot on.
+ * Nested objects are flattened rather than JSON-stringified into a cell — a
+ * cell containing {"type":"OPEN_BOX"} is not something anyone can filter.
+ */
+async function exportReturnsCsv(req, res, next) {
+  try {
+    const { from, to } = reportWindow(req.query);
+
+    const requests = await RefundRequest.find({ createdAt: { $gte: from, $lte: to } })
+      .select("rmaNumber status reasonCode reasonCategory faultAttribution createdAt resolution disposition refundBreakdown sla email")
+      .sort({ createdAt: 1 })
+      .lean();
+
+    const rows = requests.map((request) => ({
+      rma: request.rmaNumber || "",
+      status: request.status,
+      reason: request.reasonCode || "",
+      category: request.reasonCategory || "",
+      faultAttribution: request.faultAttribution || "",
+      requestedAt: request.createdAt ? new Date(request.createdAt).toISOString() : "",
+      settledAt: request.resolution?.settledAt
+        ? new Date(request.resolution.settledAt).toISOString()
+        : "",
+      outcome: request.resolution?.outcome || "",
+      settlementMethod: request.resolution?.settlementMethod || "",
+      settlementAmount: request.resolution?.settlementAmount ?? "",
+      disposition: request.disposition?.type || "",
+      grade: request.disposition?.grade || "",
+      dueAt: request.sla?.dueAt ? new Date(request.sla.dueAt).toISOString() : "",
+    }));
+
+    const csv = toCsv(rows);
+
+    res.set("Content-Type", "text/csv; charset=utf-8");
+    // Dated, because a file called returns.csv in a downloads folder is
+    // indistinguishable from the last four.
+    res.set(
+      "Content-Disposition",
+      `attachment; filename="upcell-returns-${from.toISOString().slice(0, 10)}-to-${to.toISOString().slice(0, 10)}.csv"`
+    );
+    return res.status(200).send(csv);
+  } catch (error) {
+    return next(error);
+  }
+}
+
 module.exports = {
   getRefundableItems,
   createRefundRequest,
@@ -1562,4 +1707,6 @@ module.exports = {
   getShipBackQueue,
   getDispositions,
   recordDisposition,
+  getReturnsReport,
+  exportReturnsCsv,
 };

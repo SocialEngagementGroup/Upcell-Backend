@@ -31,6 +31,8 @@ const {
   getShipBackQueue,
   getDispositions,
   recordDisposition,
+  getReturnsReport,
+  exportReturnsCsv,
 } = require("../controllers/refundRequest.controller");
 
 // Customer. Signed in only — guest returns by order id and email come later,
@@ -151,5 +153,10 @@ router.patch(
   validateRequest(dispositionSchema),
   recordDisposition
 );
+
+// Is a model coming back more than the rest, and what for. The question the
+// whole reporting phase exists to answer.
+router.get("/admin-returns-report", verifyToken, requireAdmin, getReturnsReport);
+router.get("/admin-returns-report.csv", verifyToken, requireAdmin, exportReturnsCsv);
 
 module.exports = router;
