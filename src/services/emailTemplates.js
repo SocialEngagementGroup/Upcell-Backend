@@ -453,6 +453,58 @@ function revisedOfferEmail({ rmaNumber, originalAmount, offeredAmount, deduction
   };
 }
 
+// A nudge before the authorisation lapses.
+//
+// The deadline is the whole message. A customer who misses it loses the return
+// and has to ask again, which is a support email and an annoyed person over
+// something a reminder prevents.
+function returnReminderEmail({ rmaNumber, daysLeft, expiresAt, labelUrl, trackingNumber }) {
+  const rows =
+    detailRow("Return number", escapeHtml(rmaNumber)) +
+    detailRow("Post it by", escapeHtml(new Date(expiresAt).toDateString())) +
+    (trackingNumber ? detailRow("Tracking number", escapeHtml(trackingNumber)) : "");
+
+  return {
+    subject: daysLeft <= 2
+      ? `Last chance to post your return ${rmaNumber}`
+      : `A reminder about your return ${rmaNumber}`,
+    html: emailShell({
+      preheader: `${daysLeft} day${daysLeft === 1 ? "" : "s"} left to post return ${rmaNumber}.`,
+      badgeGlyph: "&#9200;",
+      headline: daysLeft <= 2 ? "Your return expires soon" : "Have you posted it yet?",
+      subtext:
+        `We haven't received your return yet. You have ${daysLeft} day${daysLeft === 1 ? "" : "s"} left to post it — after ${escapeHtml(new Date(expiresAt).toDateString())} the authorisation expires and you'd need to request the return again.`,
+      detailRowsHtml: rows,
+      ctaLabel: labelUrl ? "Print Your Label" : "View Your Return",
+      ctaHref: labelUrl || ACCOUNT_URL,
+      footerNote: "Already posted it? You can ignore this — tracking can take a day to update.",
+    }),
+  };
+}
+
+// The authorisation lapsed. Says how to start again, because the alternative is
+// a customer who assumes the door is closed and emails support to ask.
+function returnExpiredEmail({ rmaNumber, orderId }) {
+  const rows =
+    detailRow("Return number", escapeHtml(rmaNumber)) +
+    detailRow("Order ID", `#${escapeHtml(orderId)}`);
+
+  return {
+    subject: `Your return ${rmaNumber} has expired`,
+    html: emailShell({
+      preheader: `Return ${rmaNumber} expired because we didn't receive the device.`,
+      badgeGlyph: "&#9203;",
+      headline: "Your return authorisation has expired",
+      subtext:
+        "We didn't receive the device within 14 days, so this return number is no longer valid. If you still want to return it, start a new request from your order and we'll issue a fresh one — assuming the item is still inside its return window.",
+      detailRowsHtml: rows,
+      ctaLabel: "View Your Orders",
+      ctaHref: ACCOUNT_URL,
+      footerNote: "You're receiving this because you asked to return an item.",
+    }),
+  };
+}
+
 function refundReturnInstructionsEmail({ requestId, orderId, itemNames, instructions }) {
   const rows =
     detailRow("Request ID", `#${escapeHtml(requestId)}`) +
@@ -733,6 +785,8 @@ module.exports = {
   refundRequestReceivedEmail,
   returnLabelIssuedEmail,
   revisedOfferEmail,
+  returnReminderEmail,
+  returnExpiredEmail,
   refundReturnInstructionsEmail,
   refundDeviceReceivedEmail,
   refundRejectedEmail,

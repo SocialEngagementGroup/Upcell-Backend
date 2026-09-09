@@ -1,4 +1,5 @@
 const { runReconciliation } = require("./reconciliation");
+const { runReturnJobs } = require("./returnMaintenance");
 
 // Deliberately setInterval and not a cron package. Render's free plan sleeps
 // the service when idle, so no in-process timer can be relied on to fire — a
@@ -18,6 +19,14 @@ const getLastReport = () => lastReport;
 
 async function runNow(options) {
   lastReport = await runReconciliation(options);
+
+  // Returns maintenance rides along on the same timer rather than adding a
+  // second one. It is deliberately not allowed to fail the reconciliation
+  // report: a reminder email that did not send must not hide a payment
+  // discrepancy, which is the more serious of the two by a wide margin.
+  runReturnJobs().catch((error) =>
+    console.error("[returns] maintenance failed:", error?.message || error)
+  );
 
   const { critical = [], warnings = [] } = lastReport;
   if (critical.length || warnings.length) {
