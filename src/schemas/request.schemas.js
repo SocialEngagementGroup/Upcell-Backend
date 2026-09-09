@@ -296,6 +296,26 @@ const contactSubmissionSchema = z.object({
 // that could act on half-checked input.
 // What a customer submits. reason is required and has a floor: "broken" tells
 // staff nothing they can act on before the device has even been sent back.
+// Attaching a return label bought by hand in FedEx Ship Manager.
+//
+// Deliberately loose on the tracking number: carriers use different lengths and
+// formats and change them, and a strict pattern rejects a real number the
+// moment one of them does — which strands a real parcel to prevent a typo. The
+// service applies the same rule; this is the outer guard.
+const returnLabelSchema = z.object({
+  carrier: z.enum(["FedEx", "UPS", "USPS", "DHL", "Other"]),
+  trackingNumber: z
+    .string()
+    .trim()
+    .min(6, "That tracking number looks too short")
+    .max(40, "That tracking number looks too long"),
+  // The printable label. https only — a label a customer cannot open is the
+  // same as no label, and an http link is blocked in most mail clients anyway.
+  labelUrl: z.string().trim().url().startsWith("https://", "The label link must be https").optional(),
+  // What the label cost, so the postage UpCell absorbs can be reported on.
+  labelCost: optionalNumericField,
+});
+
 const refundRequestCreateSchema = z
   .object({
     orderId: objectIdField,
@@ -400,6 +420,7 @@ module.exports = {
   refundSchema,
   refundRequestCreateSchema,
   refundRequestStatusSchema,
+  returnLabelSchema,
   monthlySellSchema,
   cartLookupSchema,
 };

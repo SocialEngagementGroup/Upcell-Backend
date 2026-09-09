@@ -16,6 +16,11 @@ const {
 } = require("../constants/returnReasons");
 const { issueRma } = require("../services/returnAuthorisation");
 const {
+  validateShipment,
+  trackingNumberInUse,
+  recordInboundLeg,
+} = require("../services/returnShipping");
+const {
   checkReturnEligibility,
   checkSelectedItems,
   returnWindowClosesAt,
@@ -24,6 +29,7 @@ const { getAdminListPagination, sendPaginatedResults } = require("../utils/pagin
 const { Resend } = require("resend");
 const {
   refundRequestReceivedEmail,
+  returnLabelIssuedEmail,
   refundReturnInstructionsEmail,
   refundDeviceReceivedEmail,
   refundRejectedEmail,
@@ -565,10 +571,157 @@ async function updateRefundRequestStatus(req, res, next) {
   }
 }
 
+/**
+ * Attaches the return label and tracking number, and tells the customer.
+ *
+ * Phase 1 of the shipping work: a staff member buys the label in FedEx Ship
+ * Manager, uploads it, and types the number in. R.14 replaces this body with a
+ * call to the FedEx Ship API — everything downstream reads the same fields and
+ * does not care which of the two wrote them.
+ *
+ * This is also the first email the customer can act on. Until the label exists
+ * they have a number and no way to use it.
+ */
+async function recordReturnLabel(req, res, next) {
+  try {
+    const { carrier, trackingNumber, labelUrl, labelCost } = req.body || {};
+
+    const request = await RefundRequest.findById(req.params.id || null);
+    if (!request) return res.status(404).json({ error: "Refund request not found" });
+
+    const shipment = validateShipment({ carrier, trackingNumber, labelUrl });
+    if (!shipment.ok) return res.status(400).json({ error: shipment.error });
+
+    // Two live returns sharing a tracking number means the receiving desk scans
+    // a parcel and gets two answers, and a carrier update advances the wrong
+    // one. Excludes this request, so fixing a typo on it is not a clash with
+    // itself.
+    const clash = await trackingNumberInUse({
+      RefundRequest,
+      activeStatuses: ACTIVE_STATUSES,
+      trackingNumber: shipment.trackingNumber,
+      exceptId: request._id,
+    });
+
+    if (clash) {
+      return res.status(409).json({
+        error: `That tracking number is already on another open return${clash.rmaNumber ? ` (${clash.rmaNumber})` : ""}.`,
+      });
+    }
+
+    recordInboundLeg(request, {
+      carrier: shipment.carrier,
+      trackingNumber: shipment.trackingNumber,
+      labelUrl: shipment.labelUrl,
+      labelCost,
+    });
+
+    // Only moves the status when there is somewhere to move to. Re-uploading a
+    // corrected label onto a request already in LabelIssued should replace the
+    // file, not fail because the transition is illegal.
+    if (request.status === "ReturnApproved") {
+      const moved = applyTransition(request, "LabelIssued", {
+        actor: req.user?.email || req.user?.id,
+        actorType: "staff",
+        meta: { carrier: shipment.carrier, trackingNumber: shipment.trackingNumber },
+      });
+
+      if (!moved.ok) return res.status(400).json({ error: moved.error, allowed: moved.allowed });
+    } else {
+      recordEvent(request, {
+        event: "label_replaced",
+        actor: req.user?.email || req.user?.id,
+        actorType: "staff",
+        meta: { carrier: shipment.carrier, trackingNumber: shipment.trackingNumber },
+      });
+    }
+
+    await request.save();
+
+    const order = await Order.findById(request.orderId);
+
+    sendEmail(
+      request.email,
+      returnLabelIssuedEmail({
+        rmaNumber: request.rmaNumber,
+        orderId: String(request.orderId),
+        carrier: shipment.carrier,
+        trackingNumber: shipment.trackingNumber,
+        labelUrl: shipment.labelUrl,
+        expiresAt: request.rma?.expiresAt,
+        itemNames: namesForItems(order, request.itemIds),
+      })
+    );
+
+    AuditLog.create({
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      action: "refund_request.label_issued",
+      targetType: "RefundRequest",
+      targetId: String(request._id),
+      metadata: {
+        rmaNumber: request.rmaNumber,
+        carrier: shipment.carrier,
+        trackingNumber: shipment.trackingNumber,
+      },
+    }).catch(() => {});
+
+    return res.status(200).json({
+      ok: true,
+      status: request.status,
+      rmaNumber: request.rmaNumber,
+      shipping: request.shipping,
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+/**
+ * Finds a return by its RMA or a tracking number.
+ *
+ * How a parcel on the receiving bench becomes a record on screen. Looking it up
+ * is the point: staff must never create a new record for something that
+ * arrived, because then the customer's request stays open forever alongside a
+ * duplicate that has no history.
+ */
+async function lookupReturnRequest(req, res, next) {
+  try {
+    const term = String(req.query?.q || "").trim();
+    if (term.length < 4) {
+      return res.status(400).json({ error: "Enter an RMA number or a tracking number." });
+    }
+
+    const normalised = term.toUpperCase();
+
+    const request = await RefundRequest.findOne({
+      $or: [
+        { rmaNumber: normalised },
+        { "shipping.inbound.trackingNumber": normalised },
+        { "shipping.outbound.trackingNumber": normalised },
+      ],
+    }).lean();
+
+    if (!request) {
+      return res.status(404).json({
+        error: "No return found for that number.",
+        // Said explicitly, because the wrong instinct here is to create one.
+        hint: "Check the RMA on the box, or the tracking number on the label. Do not create a new request for a parcel that has arrived.",
+      });
+    }
+
+    return res.status(200).json({ ok: true, request });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 module.exports = {
   getRefundableItems,
   createRefundRequest,
   getMyRefundRequests,
   getAdminRefundRequests,
   updateRefundRequestStatus,
+  recordReturnLabel,
+  lookupReturnRequest,
 };

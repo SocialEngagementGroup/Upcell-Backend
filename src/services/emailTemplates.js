@@ -339,7 +339,7 @@ const paragraphs = (text) =>
     )
     .join("");
 
-function refundRequestReceivedEmail({ requestId, orderId, itemNames }) {
+function refundRequestReceivedEmail({ requestId, orderId, itemNames, restockingFee = true, customerPaysPostage = true }) {
   const rows =
     detailRow("Request ID", `#${escapeHtml(requestId)}`) +
     detailRow("Order ID", `#${escapeHtml(orderId)}`) +
@@ -354,11 +354,54 @@ function refundRequestReceivedEmail({ requestId, orderId, itemNames }) {
       headline: "Return request received",
       // Says plainly that nothing has been agreed yet. A customer who reads
       // this as approval will post a phone before being told where to send it.
+      // What this customer is actually charged, not what a change-of-mind
+      // return is charged. This used to promise a 15% fee to everyone,
+      // including someone returning a device that would not power on.
       subtext:
-        "Thanks — we have your request and will review it shortly. Please don't send anything back yet: we'll email you the return address and instructions once it's approved. A 15% restocking fee applies, and shipping is not refunded.",
+        "Thanks — we have your request and will review it shortly. Please don't send anything back yet: we'll email you the return address and instructions once it's approved. "
+        + (restockingFee
+          ? "A 15% restocking fee applies to change-of-mind returns, and shipping is not refunded."
+          : "No restocking fee applies to this return, and "
+            + (customerPaysPostage ? "shipping is not refunded." : "we'll cover the return postage.")),
       detailRowsHtml: rows,
       ctaLabel: "View Order",
       ctaHref: ACCOUNT_URL,
+      footerNote: "You're receiving this because you asked to return an item.",
+    }),
+  };
+}
+
+// Everything the customer needs to actually post the parcel: the number to
+// write on it, the label to print, the carrier, and the date the authorisation
+// runs out. Sent when staff attach the label, which is the first moment all of
+// those exist together.
+function returnLabelIssuedEmail({ rmaNumber, orderId, carrier, trackingNumber, labelUrl, expiresAt, itemNames }) {
+  const rows =
+    detailRow("Return number", escapeHtml(rmaNumber)) +
+    detailRow("Order ID", `#${escapeHtml(orderId)}`) +
+    detailRow("Carrier", escapeHtml(carrier)) +
+    detailRow("Tracking number", escapeHtml(trackingNumber)) +
+    (expiresAt ? detailRow("Post it by", escapeHtml(new Date(expiresAt).toDateString())) : "") +
+    `<tr><td colspan="2" style="padding:12px 0 4px 0;font-family:${FONT};font-size:14px;color:#9A9A9A;">Items to return</td></tr>` +
+    itemNameRows(itemNames);
+
+  return {
+    subject: `Your return label — ${rmaNumber}`,
+    html: emailShell({
+      preheader: `Print your label and post ${rmaNumber} back to us.`,
+      badgeGlyph: "&#128230;",
+      headline: "Your return label is ready",
+      // The deadline is stated in the body as well as the rows, because it is
+      // the one thing that costs the customer their return if they miss it.
+      subtext:
+        `Print the label, write ${escapeHtml(rmaNumber)} on the outside of the box, and drop it off with ${escapeHtml(carrier)}. `
+        + (expiresAt
+          ? `Please post it by ${escapeHtml(new Date(expiresAt).toDateString())} — after that the authorisation expires and you'll need to request the return again.`
+          : "Please post it as soon as you can."),
+      detailRowsHtml: rows,
+      // Straight to the label, because that is the thing they need to do next.
+      ctaLabel: labelUrl ? "Print Your Label" : "View Your Return",
+      ctaHref: labelUrl || ACCOUNT_URL,
       footerNote: "You're receiving this because you asked to return an item.",
     }),
   };
@@ -642,6 +685,7 @@ module.exports = {
   paymentReceiptEmail,
   refundApprovedEmail,
   refundRequestReceivedEmail,
+  returnLabelIssuedEmail,
   refundReturnInstructionsEmail,
   refundDeviceReceivedEmail,
   refundRejectedEmail,

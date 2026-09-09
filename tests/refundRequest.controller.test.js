@@ -36,10 +36,13 @@ const controller = require("../src/controllers/refundRequest.controller");
 
 const makeReqRes = (body = {}, { params = {}, query = {}, user } = {}) => {
   const req = { body, params, query, user };
-  const res = {
+  // eslint-disable-next-line prefer-const
+  let res;
+  res = {
     statusCode: 200,
+    body: undefined,
     status(code) { this.statusCode = code; return this; },
-    json: jest.fn(),
+    json: jest.fn(function capture(payload) { res.body = payload; return this; }),
   };
   return { req, res, next: jest.fn() };
 };
@@ -92,8 +95,12 @@ beforeEach(() => {
 
   // Issuing an RMA asks for the highest number already used this year, then
   // whether its own candidate is taken. Nothing taken, by default.
+  // Three different chains land on findOne: the RMA lookup sorts and selects,
+  // the tracking-clash check selects, and the open-request check leans
+  // directly. One stub that answers all three, with nothing found.
   RefundRequest.findOne.mockReturnValue({
     sort: () => ({ select: () => ({ lean: async () => null }) }),
+    select: () => ({ lean: async () => null }),
     lean: async () => null,
   });
   RefundRequest.exists.mockResolvedValue(false);
@@ -682,5 +689,130 @@ describe("the return form is told the policy for the reason it picked", () => {
     expect(faulty.windowDays).toBe(30);
     expect(new Date(changeOfMind.closesAt).getTime())
       .toBeLessThan(new Date(faulty.closesAt).getTime());
+  });
+});
+
+// R.4 — the label, and finding a parcel that has arrived.
+describe("recordReturnLabel", () => {
+  const attach = async (request, body = {}) => {
+    RefundRequest.findById.mockResolvedValue(request);
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res, next } = makeReqRes(
+      { carrier: "FedEx", trackingNumber: "794123456789", labelUrl: "https://cdn/label.pdf", ...body },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.recordReturnLabel(req, res, next);
+    return { res, next, request };
+  };
+
+  it("records the label and moves the return to LabelIssued", async () => {
+    const request = requestDoc({ status: "ReturnApproved", rmaNumber: "RMA-2026-00001", timeline: [] });
+
+    const { res } = await attach(request);
+
+    expect(res.statusCode).toBe(200);
+    expect(request.status).toBe("LabelIssued");
+    expect(request.shipping.inbound.trackingNumber).toBe("794123456789");
+  });
+
+  it("emails the customer the label, the number and the deadline", async () => {
+    const request = requestDoc({
+      status: "ReturnApproved",
+      rmaNumber: "RMA-2026-00001",
+      rma: { expiresAt: new Date("2026-09-24") },
+      timeline: [],
+    });
+
+    await attach(request);
+
+    const html = mockSendMail.mock.calls[0][0].html;
+    expect(html).toContain("RMA-2026-00001");
+    expect(html).toContain("794123456789");
+    expect(html).toContain("label.pdf");
+  });
+
+  it("refuses a tracking number already on another open return", async () => {
+    // Two live returns sharing a number means the receiving desk scans a parcel
+    // and gets two answers.
+    const request = requestDoc({ status: "ReturnApproved", timeline: [] });
+    RefundRequest.findOne.mockReturnValue({
+      select: () => ({ lean: async () => ({ _id: "other", rmaNumber: "RMA-2026-00099" }) }),
+    });
+
+    const { res } = await attach(request);
+
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toContain("RMA-2026-00099");
+    expect(request.status).toBe("ReturnApproved");
+  });
+
+  it("refuses a carrier UpCell does not ship with", async () => {
+    const request = requestDoc({ status: "ReturnApproved", timeline: [] });
+
+    const { res } = await attach(request, { carrier: "Pigeon" });
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("lets a corrected label replace the first without failing the transition", async () => {
+    // Re-uploading onto a request already in LabelIssued should swap the file,
+    // not refuse because LabelIssued cannot become LabelIssued.
+    const request = requestDoc({ status: "LabelIssued", rmaNumber: "RMA-2026-00001", timeline: [] });
+
+    const { res } = await attach(request, { trackingNumber: "999888777666" });
+
+    expect(res.statusCode).toBe(200);
+    expect(request.shipping.inbound.trackingNumber).toBe("999888777666");
+    expect(request.timeline.at(-1).event).toBe("label_replaced");
+  });
+
+  it("records who attached it", async () => {
+    const request = requestDoc({ status: "ReturnApproved", timeline: [] });
+
+    await attach(request);
+
+    expect(request.timeline[0]).toMatchObject({ to: "LabelIssued", actor: STAFF.email });
+  });
+});
+
+describe("lookupReturnRequest — a parcel on the bench", () => {
+  const lookup = async (q) => {
+    const { req, res, next } = makeReqRes({}, { query: { q }, user: STAFF });
+    await controller.lookupReturnRequest(req, res, next);
+    return res;
+  };
+
+  it("finds a return by its RMA", async () => {
+    RefundRequest.findOne.mockReturnValue({ lean: async () => ({ _id: "req1", rmaNumber: "RMA-2026-00412" }) });
+
+    const res = await lookup("RMA-2026-00412");
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.request.rmaNumber).toBe("RMA-2026-00412");
+  });
+
+  it("finds one by tracking number, whatever case it was typed in", async () => {
+    RefundRequest.findOne.mockReturnValue({ lean: async () => ({ _id: "req1" }) });
+
+    await lookup("abc123456");
+
+    const query = RefundRequest.findOne.mock.calls[0][0];
+    expect(query.$or[1]["shipping.inbound.trackingNumber"]).toBe("ABC123456");
+  });
+
+  it("tells staff not to create a new record when nothing matches", async () => {
+    // The wrong instinct here leaves the customer's request open forever
+    // alongside a duplicate with no history.
+    RefundRequest.findOne.mockReturnValue({ lean: async () => null });
+
+    const res = await lookup("RMA-2026-99999");
+
+    expect(res.statusCode).toBe(404);
+    expect(res.body.hint).toMatch(/do not create a new request/i);
+  });
+
+  it("refuses a search term too short to mean anything", async () => {
+    expect((await lookup("RM")).statusCode).toBe(400);
   });
 });
