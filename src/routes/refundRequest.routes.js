@@ -8,6 +8,7 @@ const {
   refundRequestStatusSchema,
   returnLabelSchema,
   inspectionSubmitSchema,
+  revisedOfferSchema,
 } = require("../schemas/request.schemas");
 const {
   getRefundableItems,
@@ -19,6 +20,8 @@ const {
   lookupReturnRequest,
   getInspectionChecklist,
   submitInspection,
+  offerRevisedRefund,
+  respondToRevisedOffer,
 } = require("../controllers/refundRequest.controller");
 
 // Customer. Signed in only — guest returns by order id and email come later,
@@ -70,6 +73,27 @@ router.patch(
   validateObjectIdParam(),
   validateRequest(inspectionSubmitSchema),
   submitInspection
+);
+
+router.patch(
+  "/admin-refund-requests/:id/revised-offer",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  validateRequest(revisedOfferSchema),
+  offerRevisedRefund
+);
+
+// The customer answering from the link in their email. No verifyToken on
+// purpose: this arrives on a phone months after they last signed in, and a
+// login wall here is how an offer times out and a device gets posted back for
+// no reason. The unguessable token on the request is what authorises it, and it
+// grants exactly this one return. Rate limited like the other public writes.
+router.post(
+  "/returns/:id/:decision",
+  publicFormLimiter,
+  validateObjectIdParam(),
+  respondToRevisedOffer
 );
 
 module.exports = router;

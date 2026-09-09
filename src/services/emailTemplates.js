@@ -407,6 +407,52 @@ function returnLabelIssuedEmail({ rmaNumber, orderId, carrier, trackingNumber, l
   };
 }
 
+// The offer of less than the full refund, and why.
+//
+// Every deduction is listed with the finding behind it, because a smaller
+// number with no explanation is the thing customers dispute and UpCell then
+// cannot defend. The two buttons are the whole point: someone reading this on a
+// phone should be able to answer without signing in or writing an email.
+function revisedOfferEmail({ rmaNumber, originalAmount, offeredAmount, deductions = [], findings, acceptUrl, declineUrl, expiresAt }) {
+  const deductionRows = deductions
+    .map((deduction) => detailRow(
+      escapeHtml(deduction.reason),
+      `&minus;$${Number(deduction.amount).toFixed(2)}`
+    ))
+    .join("");
+
+  const rows =
+    detailRow("Return number", escapeHtml(rmaNumber)) +
+    detailRow("Original refund", `$${Number(originalAmount).toFixed(2)}`) +
+    `<tr><td colspan="2" style="padding:12px 0 4px 0;font-family:${FONT};font-size:14px;color:#9A9A9A;">What we found, and what came off</td></tr>` +
+    deductionRows +
+    detailRow("Revised refund", `<strong>$${Number(offeredAmount).toFixed(2)}</strong>`) +
+    (expiresAt ? detailRow("Please reply by", escapeHtml(new Date(expiresAt).toDateString())) : "");
+
+  return {
+    subject: `About your return ${rmaNumber} — revised refund offer`,
+    html: emailShell({
+      preheader: `We're offering $${Number(offeredAmount).toFixed(2)} for return ${rmaNumber}.`,
+      badgeGlyph: "&#9878;",
+      headline: "A revised refund offer",
+      subtext:
+        (findings ? `${escapeHtml(findings)} ` : "")
+        + "If you accept, we'll refund the revised amount. If you decline, we'll send the device back to you at our cost — either way you won't be charged anything further."
+        + (expiresAt
+          ? ` If we don't hear from you by ${escapeHtml(new Date(expiresAt).toDateString())}, we'll send the device back.`
+          : ""),
+      detailRowsHtml: rows,
+      ctaLabel: "Accept This Offer",
+      ctaHref: acceptUrl,
+      // The decline is a plain link rather than a second button on purpose: it
+      // must be equally easy to find, and equally obviously not the default.
+      footerNote: declineUrl
+        ? `Would rather have the device back? <a href="${declineUrl}" style="color:#D90B0F;">Decline and return it to me</a>.`
+        : "You're receiving this because you asked to return an item.",
+    }),
+  };
+}
+
 function refundReturnInstructionsEmail({ requestId, orderId, itemNames, instructions }) {
   const rows =
     detailRow("Request ID", `#${escapeHtml(requestId)}`) +
@@ -686,6 +732,7 @@ module.exports = {
   refundApprovedEmail,
   refundRequestReceivedEmail,
   returnLabelIssuedEmail,
+  revisedOfferEmail,
   refundReturnInstructionsEmail,
   refundDeviceReceivedEmail,
   refundRejectedEmail,

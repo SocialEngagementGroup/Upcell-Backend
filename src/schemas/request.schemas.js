@@ -296,6 +296,28 @@ const contactSubmissionSchema = z.object({
 // that could act on half-checked input.
 // What a customer submits. reason is required and has a floor: "broken" tells
 // staff nothing they can act on before the device has even been sent back.
+// A revised refund offer.
+//
+// Amounts are staff judgement - how much a scuffed back is worth is not
+// something a lookup table knows - but every deduction has to name the
+// inspection check behind it, and services/revisedOffer.js refuses one that
+// points at a check which passed. The offered total is never posted: it is
+// computed from these.
+const revisedOfferSchema = z.object({
+  deductions: z
+    .array(z.object({
+      type: z.enum(["DAMAGE", "MISSING_ITEMS", "RESTOCKING_FEE", "INBOUND_POSTAGE"]),
+      amount: numericField.refine((value) => value > 0, "A deduction has to be more than zero"),
+      // What the customer reads. A number with no explanation is what gets
+      // disputed and what UpCell then cannot defend.
+      reason: z.string().trim().min(5, "Say why, in words the customer can read").max(500),
+      findingKey: z.string().trim().max(60).optional(),
+    }))
+    .min(1, "A revised offer needs at least one deduction")
+    .max(10),
+  findings: z.string().trim().max(2000).optional(),
+});
+
 // A completed inspection.
 //
 // Loose here on purpose: the real rules - every check answered, at least five
@@ -453,6 +475,7 @@ module.exports = {
   refundRequestStatusSchema,
   returnLabelSchema,
   inspectionSubmitSchema,
+  revisedOfferSchema,
   monthlySellSchema,
   cartLookupSchema,
 };

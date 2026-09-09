@@ -212,6 +212,12 @@ const RefundRequestSchema = new Schema(
       decidedAt: Date,
     },
 
+    // The unguessable half of a link the customer can open without signing in:
+    // the one-click accept/decline on a revised offer, and the tracking page.
+    // Not a session — it grants exactly this return and never confers admin.
+    // See src/utils/accessToken.js.
+    accessToken: { type: String, select: false },
+
     // Append-only. Never edited, never deleted.
     //
     // This is the dispute record. "The customer says they posted it, we say it
@@ -241,6 +247,10 @@ const RefundRequestSchema = new Schema(
 RefundRequestSchema.index({ rmaNumber: 1 }, { unique: true, sparse: true });
 // The expiry job asks for authorisations issued and not yet shipped.
 RefundRequestSchema.index({ "rma.expiresAt": 1 });
+// A customer opening an emailed link is looked up by this and nothing else.
+RefundRequestSchema.index({ accessToken: 1 }, { sparse: true });
+// The job that auto-declines an unanswered offer after five days.
+RefundRequestSchema.index({ "refundBreakdown.offerExpiresAt": 1 }, { sparse: true });
 
 // The admin queue is "show me everything at this stage, newest first", which is
 // the same shape as every other admin list in the project.

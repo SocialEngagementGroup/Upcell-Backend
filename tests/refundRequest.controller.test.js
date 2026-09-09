@@ -1012,3 +1012,235 @@ describe("submitInspection", () => {
     expect(request.status).toBe("InInspection");
   });
 });
+
+// R.7 — offering less, and the customer answering from their email.
+describe("offerRevisedRefund", () => {
+  const inspected = (overrides = {}) => requestDoc({
+    status: "InInspection",
+    rmaNumber: "RMA-2026-00412",
+    timeline: [],
+    inspection: {
+      checklist: [
+        { key: "body_condition", result: "fail" },
+        { key: "powers_on", result: "pass" },
+      ],
+      findings: "Deep scratch across the back",
+    },
+    ...overrides,
+  });
+
+  const offer = async (request, body = {}) => {
+    // .select("+accessToken") is chained on findById here.
+    RefundRequest.findById.mockReturnValue({ select: async () => request });
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res, next } = makeReqRes(
+      {
+        deductions: [{
+          type: "DAMAGE", amount: 100,
+          reason: "Deep scratch across the back", findingKey: "body_condition",
+        }],
+        ...body,
+      },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.offerRevisedRefund(req, res, next);
+    return { res, request };
+  };
+
+  it("records the offer and moves the return to RevisedOffer", async () => {
+    const request = inspected();
+
+    const { res } = await offer(request);
+
+    expect(res.statusCode).toBe(200);
+    expect(request.status).toBe("RevisedOffer");
+    expect(request.refundBreakdown.offeredAmount).toBe(749.15);
+  });
+
+  it("computes the offered amount rather than taking one from the request", async () => {
+    const request = inspected();
+
+    // A posted amount is a posted price. The body has no offeredAmount field
+    // at all, and one supplied would be ignored.
+    const { res } = await offer(request, { offeredAmount: 1 });
+
+    expect(res.body.offeredAmount).toBe(749.15);
+  });
+
+  it("gives the customer five days to answer", async () => {
+    const request = inspected();
+
+    await offer(request);
+
+    const days = Math.round(
+      (request.refundBreakdown.offerExpiresAt - Date.now()) / (24 * 60 * 60 * 1000)
+    );
+    expect(days).toBe(5);
+  });
+
+  it("emails the offer with the reason behind every deduction", async () => {
+    const request = inspected();
+
+    await offer(request);
+
+    const html = mockSendMail.mock.calls[0][0].html;
+    expect(html).toContain("Deep scratch across the back");
+    expect(html).toContain("RMA-2026-00412");
+  });
+
+  it("refuses a deduction pointing at a check that passed", async () => {
+    const request = inspected();
+
+    const { res } = await offer(request, {
+      deductions: [{
+        type: "DAMAGE", amount: 100, reason: "Something", findingKey: "powers_on",
+      }],
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(request.status).toBe("InInspection");
+  });
+
+  it("will not offer on a return that is not being inspected", async () => {
+    const request = inspected({ status: "DeviceReceived" });
+
+    const { res } = await offer(request);
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("mints an access token so the email links work", async () => {
+    const request = inspected();
+
+    await offer(request);
+
+    expect(request.accessToken).toEqual(expect.any(String));
+    expect(request.accessToken.length).toBeGreaterThan(20);
+  });
+
+  it("keeps the same token when an offer is revised again", async () => {
+    // A new token would break the link in an email the customer already has open.
+    const request = inspected({ accessToken: "existing-token-value-kept-as-is" });
+
+    await offer(request);
+
+    expect(request.accessToken).toBe("existing-token-value-kept-as-is");
+  });
+});
+
+describe("respondToRevisedOffer", () => {
+  const offered = (overrides = {}) => requestDoc({
+    status: "RevisedOffer",
+    accessToken: "the-real-token",
+    refundBreakdown: {
+      offeredAmount: 749.15,
+      offerExpiresAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
+    },
+    timeline: [],
+    ...overrides,
+  });
+
+  // NO_TOKEN rather than undefined: undefined would fall back to the default
+  // below and quietly test the happy path instead.
+  const NO_TOKEN = Symbol("absent");
+  const respond = async (request, { decision = "accept", token = "the-real-token" } = {}) => {
+    RefundRequest.findById.mockReturnValue({ select: async () => request });
+
+    const { req, res, next } = makeReqRes(
+      {},
+      { params: { id: "req1", decision }, query: token === NO_TOKEN ? {} : { token } }
+    );
+    await controller.respondToRevisedOffer(req, res, next);
+    return { res, request };
+  };
+
+  it("accepts, and the amount owed becomes the offered amount", async () => {
+    const request = offered();
+
+    const { res } = await respond(request);
+
+    expect(res.statusCode).toBe(200);
+    expect(request.status).toBe("Approved");
+    expect(request.calculatedAmount).toBe(749.15);
+    expect(request.resolution.outcome).toBe("PARTIAL_ACCEPTED");
+  });
+
+  it("declines, which rejects and sends the device back", async () => {
+    const request = offered();
+
+    await respond(request, { decision: "decline" });
+
+    expect(request.status).toBe("Rejected");
+    expect(request.resolution.outcome).toBe("PARTIAL_DECLINED");
+    expect(request.rejectionReason).toMatch(/declined/i);
+  });
+
+  it("records the customer as the actor, not a staff member", async () => {
+    // Which of the two answered is the first thing anyone asks when an offer
+    // is later disputed.
+    const request = offered();
+
+    await respond(request);
+
+    expect(request.timeline.at(-1)).toMatchObject({ actorType: "customer" });
+  });
+
+  it("refuses a wrong token", async () => {
+    const request = offered();
+
+    const { res } = await respond(request, { token: "not-the-token" });
+
+    expect(res.statusCode).toBe(404);
+    expect(request.status).toBe("RevisedOffer");
+  });
+
+  it("refuses a missing token", async () => {
+    const request = offered();
+
+    const { res } = await respond(request, { token: NO_TOKEN });
+
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("answers the same way for a wrong token as for a return that does not exist", async () => {
+    // A different answer tells whoever is guessing which ids are real.
+    const request = offered();
+    const wrongToken = await respond(request, { token: "nope" });
+
+    RefundRequest.findById.mockReturnValue({ select: async () => null });
+    const { req, res } = makeReqRes({}, { params: { id: "req1", decision: "accept" }, query: { token: "x" } });
+    await controller.respondToRevisedOffer(req, res, jest.fn());
+
+    expect(res.statusCode).toBe(wrongToken.res.statusCode);
+    expect(res.body.error).toBe(wrongToken.res.body.error);
+  });
+
+  it("will not let the same offer be answered twice", async () => {
+    const request = offered({ status: "Approved" });
+
+    const { res } = await respond(request);
+
+    expect(res.statusCode).toBe(409);
+  });
+
+  it("refuses once the five days have passed", async () => {
+    const request = offered({
+      refundBreakdown: {
+        offeredAmount: 749.15,
+        offerExpiresAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
+      },
+    });
+
+    const { res } = await respond(request);
+
+    expect(res.statusCode).toBe(410);
+    expect(request.status).toBe("RevisedOffer");
+  });
+
+  it("refuses a decision that is neither accept nor decline", async () => {
+    const { res } = await respond(offered(), { decision: "maybe" });
+
+    expect(res.statusCode).toBe(400);
+  });
+});

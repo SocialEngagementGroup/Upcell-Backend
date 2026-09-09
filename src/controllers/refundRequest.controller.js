@@ -29,6 +29,12 @@ const {
 } = require("../services/returnInspection");
 const { CHECKLIST_ITEMS, PHOTO_GUIDANCE } = require("../constants/inspectionChecklist");
 const {
+  buildRevisedOffer,
+  offerExpiryFrom,
+  offerHasExpired,
+} = require("../services/revisedOffer");
+const { createAccessToken, tokensMatch } = require("../utils/accessToken");
+const {
   checkReturnEligibility,
   checkSelectedItems,
   returnWindowClosesAt,
@@ -38,6 +44,7 @@ const { Resend } = require("resend");
 const {
   refundRequestReceivedEmail,
   returnLabelIssuedEmail,
+  revisedOfferEmail,
   refundReturnInstructionsEmail,
   refundDeviceReceivedEmail,
   refundRejectedEmail,
@@ -872,6 +879,199 @@ async function submitInspection(req, res, next) {
   }
 }
 
+// Where the customer answers an offer. Built here so the links in the email and
+// the routes that serve them cannot drift apart.
+const SITE_URL = process.env.FRONTEND_URL || process.env.SITE_URL || "";
+const offerLink = (request, action) =>
+  `${SITE_URL}/returns/${request._id}/${action}?token=${request.accessToken}`;
+
+/**
+ * Offers the customer less than the full refund, itemised.
+ *
+ * Staff judge the amounts — how much a scuffed back is worth is not something
+ * a lookup table knows — but every deduction has to name the inspection check
+ * that justifies it, and the offered total is computed here rather than posted.
+ * A customer asking "why is this less" gets a list, not a smaller number.
+ */
+async function offerRevisedRefund(req, res, next) {
+  try {
+    const { deductions, findings } = req.body || {};
+
+    const request = await RefundRequest.findById(req.params.id || null).select("+accessToken");
+    if (!request) return res.status(404).json({ error: "Refund request not found" });
+
+    if (!["InInspection", "RevisedOffer"].includes(request.status)) {
+      return res.status(400).json({
+        error: `A revised offer can only be made during inspection. This return is ${request.status}.`,
+      });
+    }
+
+    const order = await Order.findById(request.orderId);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+
+    // What the customer would have been paid if the device had been as
+    // described. Deductions come off this, not off the order total, so
+    // shipping and unreturned items are never quietly included.
+    const full = calculateRefund(order, {
+      itemIds: request.itemIds,
+      reasonCode: request.reasonCode,
+    });
+    if (!full.ok) return res.status(400).json({ error: full.error });
+
+    const offer = buildRevisedOffer({
+      itemsTotal: full.refundAmount,
+      deductions,
+      checklist: request.inspection?.checklist || [],
+    });
+
+    if (!offer.ok) {
+      return res.status(400).json({ error: "This offer cannot be sent.", details: offer.errors });
+    }
+
+    const expiresAt = offerExpiryFrom();
+
+    request.refundBreakdown = {
+      ...(request.refundBreakdown || {}),
+      orderAmount: full.refundAmount,
+      deductions: offer.deductions,
+      offeredAmount: offer.offeredAmount,
+      offerExpiresAt: expiresAt,
+    };
+
+    // Minted once and kept. A new token on every offer would break the link in
+    // an email the customer already has open.
+    if (!request.accessToken) request.accessToken = createAccessToken();
+
+    if (request.status !== "RevisedOffer") {
+      const moved = applyTransition(request, "RevisedOffer", {
+        actor: req.user?.email || req.user?.id,
+        actorType: "staff",
+        event: "revised_offer_sent",
+        meta: { offeredAmount: offer.offeredAmount, totalDeducted: offer.totalDeducted },
+      });
+      if (!moved.ok) return res.status(400).json({ error: moved.error, allowed: moved.allowed });
+    } else {
+      recordEvent(request, {
+        event: "revised_offer_updated",
+        actor: req.user?.email || req.user?.id,
+        actorType: "staff",
+        meta: { offeredAmount: offer.offeredAmount },
+      });
+    }
+
+    await request.save();
+
+    sendEmail(
+      request.email,
+      revisedOfferEmail({
+        rmaNumber: request.rmaNumber,
+        originalAmount: full.refundAmount,
+        offeredAmount: offer.offeredAmount,
+        deductions: offer.deductions,
+        findings: findings || request.inspection?.findings,
+        acceptUrl: offerLink(request, "accept"),
+        declineUrl: offerLink(request, "decline"),
+        expiresAt,
+      })
+    );
+
+    AuditLog.create({
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      action: "refund_request.revised_offer_sent",
+      targetType: "RefundRequest",
+      targetId: String(request._id),
+      metadata: { offeredAmount: offer.offeredAmount, totalDeducted: offer.totalDeducted },
+    }).catch(() => {});
+
+    return res.status(200).json({
+      ok: true,
+      status: request.status,
+      offeredAmount: offer.offeredAmount,
+      deductions: offer.deductions,
+      expiresAt,
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+/**
+ * The customer's answer, from the link in the email.
+ *
+ * Authenticated by the token on the request rather than by a session: this
+ * arrives on a phone, months after they last signed in, and a login wall here
+ * is how an offer times out and a device gets posted back for no reason.
+ *
+ * Accepting moves to Approved and the money follows the normal settlement path.
+ * Declining rejects, which sends the device back at UpCell's cost.
+ */
+async function respondToRevisedOffer(req, res, next) {
+  try {
+    const decision = req.params.decision;
+    if (!["accept", "decline"].includes(decision)) {
+      return res.status(400).json({ error: "Unknown decision." });
+    }
+
+    const request = await RefundRequest.findById(req.params.id || null).select("+accessToken");
+    // Deliberately the same answer for a missing return and a wrong token. A
+    // different one tells whoever is guessing which ids exist.
+    if (!request || !tokensMatch(req.query?.token, request.accessToken)) {
+      return res.status(404).json({ error: "This link is not valid." });
+    }
+
+    if (request.status !== "RevisedOffer") {
+      return res.status(409).json({
+        error: "This offer has already been answered.",
+        status: request.status,
+      });
+    }
+
+    if (offerHasExpired(request)) {
+      return res.status(410).json({
+        error: "This offer has expired and the device is on its way back to you.",
+      });
+    }
+
+    const accepted = decision === "accept";
+    const target = accepted ? "Approved" : "Rejected";
+
+    if (!accepted) {
+      request.rejectionReason = "The customer declined the revised refund offer.";
+    }
+
+    const moved = applyTransition(request, target, {
+      // The customer, not a staff member. Which of the two answered is the
+      // first thing anyone asks when an offer is later disputed.
+      actor: request.userId || request.email,
+      actorType: "customer",
+      event: accepted ? "revised_offer_accepted" : "revised_offer_declined",
+      meta: { offeredAmount: request.refundBreakdown?.offeredAmount },
+    });
+
+    if (!moved.ok) return res.status(400).json({ error: moved.error });
+
+    if (accepted) {
+      request.calculatedAmount = request.refundBreakdown?.offeredAmount;
+      request.refundBreakdown.finalAmount = request.refundBreakdown?.offeredAmount;
+      request.resolution = { ...(request.resolution || {}), outcome: "PARTIAL_ACCEPTED" };
+    } else {
+      request.resolution = { ...(request.resolution || {}), outcome: "PARTIAL_DECLINED" };
+    }
+
+    await request.save();
+
+    return res.status(200).json({
+      ok: true,
+      status: request.status,
+      decision,
+      amount: accepted ? request.refundBreakdown?.offeredAmount : null,
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 module.exports = {
   getRefundableItems,
   createRefundRequest,
@@ -882,4 +1082,6 @@ module.exports = {
   lookupReturnRequest,
   getInspectionChecklist,
   submitInspection,
+  offerRevisedRefund,
+  respondToRevisedOffer,
 };
