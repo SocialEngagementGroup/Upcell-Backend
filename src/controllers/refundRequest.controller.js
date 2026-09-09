@@ -21,6 +21,14 @@ const {
   recordInboundLeg,
 } = require("../services/returnShipping");
 const {
+  validateInspection,
+  suggestOutcome,
+  suggestDisposition,
+  gradeFrom,
+  stampPurgeDates,
+} = require("../services/returnInspection");
+const { CHECKLIST_ITEMS, PHOTO_GUIDANCE } = require("../constants/inspectionChecklist");
+const {
   checkReturnEligibility,
   checkSelectedItems,
   returnWindowClosesAt,
@@ -716,6 +724,154 @@ async function lookupReturnRequest(req, res, next) {
   }
 }
 
+/**
+ * The checklist an inspector fills in, and what each photo is for.
+ *
+ * Sent from the server rather than written into the admin page so the list the
+ * inspector answers and the list the validation demands are the same list. Two
+ * copies drift, and the one that drifts is always the one on screen.
+ */
+function getInspectionChecklist(req, res) {
+  return res.status(200).json({
+    items: CHECKLIST_ITEMS.map((item) => ({
+      key: item.key,
+      label: item.label,
+      critical: Boolean(item.critical),
+      onlyWhenFaultClaimed: Boolean(item.onlyWhenFaultClaimed),
+      drivesDisposition: Boolean(item.drivesDisposition),
+    })),
+    photoGuidance: PHOTO_GUIDANCE,
+  });
+}
+
+/**
+ * Records a completed inspection and says what it points to.
+ *
+ * Submitting does not settle anything. It writes what was found, suggests an
+ * outcome and a disposition, and moves the request to the state that outcome
+ * implies — a person still approves, offers less, or rejects from there. The
+ * suggestion exists so the obvious cases stop needing thought, not so the hard
+ * ones get decided by a lookup table.
+ */
+async function submitInspection(req, res, next) {
+  try {
+    const { checklist, photos, findings, grade: gradeOverride } = req.body || {};
+
+    const request = await RefundRequest.findById(req.params.id || null);
+    if (!request) return res.status(404).json({ error: "Refund request not found" });
+
+    // Inspection follows a person holding the device. A carrier saying
+    // "delivered" is a claim about a doorstep.
+    if (!["DeviceReceived", "InInspection", "ActionRequired"].includes(request.status)) {
+      return res.status(400).json({
+        error: `A return cannot be inspected while it is ${request.status}. It has to be received first.`,
+      });
+    }
+
+    // Whether the customer claimed something was wrong with it. Decides
+    // whether the "fault reproduced" check has to be answered at all.
+    const faultClaimed = request.reasonCategory === "PRODUCT_FAULT";
+
+    const validation = validateInspection({ checklist, photos: photos || [], faultClaimed });
+    if (!validation.ok) {
+      return res.status(400).json({
+        error: "This inspection is not complete.",
+        details: validation.errors,
+      });
+    }
+
+    const outcome = suggestOutcome({
+      checklist: validation.checklist,
+      reasonCode: request.reasonCode,
+      faultClaimed,
+    });
+    const disposition = suggestDisposition({ checklist: validation.checklist, outcome: outcome.outcome });
+    const grade = gradeOverride || gradeFrom(validation.checklist);
+
+    request.inspection = {
+      inspectorId: req.user?.email || req.user?.id,
+      startedAt: request.inspection?.startedAt || new Date(),
+      completedAt: new Date(),
+      checklist: validation.checklist,
+      grade,
+      photos: stampPurgeDates(photos || []),
+      findings,
+    };
+
+    // Kept for the existing admin panel and the customer's email, both of
+    // which already read these.
+    request.inspectedBy = req.user?.email;
+    request.inspectedAt = new Date();
+    if (findings) request.inspectionNotes = findings;
+
+    // A device that has arrived but was never opened is moved into inspection
+    // first. The outcomes branch from InInspection, not from DeviceReceived —
+    // the plan's own diagram works that way, and it means the record shows the
+    // inspection having started rather than a device jumping from a shelf to a
+    // verdict.
+    if (request.status === "DeviceReceived") {
+      const opened = applyTransition(request, "InInspection", {
+        actor: req.user?.email || req.user?.id,
+        actorType: "staff",
+        event: "inspection_started",
+      });
+
+      if (!opened.ok) return res.status(400).json({ error: opened.error, allowed: opened.allowed });
+    }
+
+    // Where the suggestion sends it. ActionRequired and RevisedOffer both stop
+    // the settlement clock, because from here UpCell is waiting on the
+    // customer rather than the other way round.
+    const nextStatus = {
+      ACTION_REQUIRED: "ActionRequired",
+      REVISED_OFFER: "RevisedOffer",
+      REJECT: "Rejected",
+      FULL_REFUND: "InInspection",
+    }[outcome.outcome];
+
+    if (nextStatus && nextStatus !== request.status) {
+      const moved = applyTransition(request, nextStatus, {
+        actor: req.user?.email || req.user?.id,
+        actorType: "staff",
+        event: "inspection_completed",
+        meta: { grade, outcome: outcome.outcome, reason: outcome.reason },
+      });
+
+      if (!moved.ok) return res.status(400).json({ error: moved.error, allowed: moved.allowed });
+    } else {
+      recordEvent(request, {
+        event: "inspection_completed",
+        actor: req.user?.email || req.user?.id,
+        actorType: "staff",
+        meta: { grade, outcome: outcome.outcome },
+      });
+    }
+
+    await request.save();
+
+    AuditLog.create({
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      action: "refund_request.inspection_completed",
+      targetType: "RefundRequest",
+      targetId: String(request._id),
+      metadata: { grade, outcome: outcome.outcome, photoCount: (photos || []).length },
+    }).catch(() => {});
+
+    return res.status(200).json({
+      ok: true,
+      status: request.status,
+      grade,
+      // Labelled suggestions, because a staff member can and should override
+      // them with a reason.
+      suggested: { ...outcome, disposition },
+      inspection: request.inspection,
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 module.exports = {
   getRefundableItems,
   createRefundRequest,
@@ -724,4 +880,6 @@ module.exports = {
   updateRefundRequestStatus,
   recordReturnLabel,
   lookupReturnRequest,
+  getInspectionChecklist,
+  submitInspection,
 };

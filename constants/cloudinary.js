@@ -27,6 +27,11 @@ const CLOUDINARY_FOLDERS = {
   MARKETING_HERO: `${CLOUDINARY_ROOT}/marketing/hero`,
   MARKETING_ADS: `${CLOUDINARY_ROOT}/marketing/ads`,
   STATIC: `${CLOUDINARY_ROOT}/static`,
+  // Evidence photos from a returned device. Kept apart from product imagery
+  // because these are records, not marketing: they are deleted on a schedule
+  // (90 days, or when a disputed case closes) and nothing on the site ever
+  // renders them.
+  RETURNS: `${CLOUDINARY_ROOT}/returns`,
 };
 
 // Product uploads are additionally allowed one level deeper, one folder per

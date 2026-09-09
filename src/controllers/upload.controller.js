@@ -16,6 +16,8 @@ const UPLOAD_TARGETS = {
   hero: () => CLOUDINARY_FOLDERS.MARKETING_HERO,
   ad: () => CLOUDINARY_FOLDERS.MARKETING_ADS,
   static: () => CLOUDINARY_FOLDERS.STATIC,
+  // Inspection photos of a returned device.
+  return_photo: () => CLOUDINARY_FOLDERS.RETURNS,
 };
 
 // Cloudinary treats a signature as valid for one hour. Nothing here needs a

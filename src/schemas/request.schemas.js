@@ -296,6 +296,37 @@ const contactSubmissionSchema = z.object({
 // that could act on half-checked input.
 // What a customer submits. reason is required and has a floor: "broken" tells
 // staff nothing they can act on before the device has even been sent back.
+// A completed inspection.
+//
+// Loose here on purpose: the real rules - every check answered, at least five
+// photos, every photo carrying its Cloudinary id - live in
+// services/returnInspection.js, so they can be tested without a request and
+// reused by trade-in intake later. This is the outer shape guard.
+const inspectionSubmitSchema = z.object({
+  checklist: z
+    .array(z.object({
+      key: z.string().trim().min(1),
+      result: z.enum(["pass", "fail", "na"]),
+      note: z.string().trim().max(500).optional(),
+    }))
+    .min(1, "The checklist has not been filled in")
+    .max(40),
+  photos: z
+    .array(z.object({
+      url: z.string().trim().url(),
+      // Without this a photo can never be deleted, so the 90-day purge would
+      // silently leave it in the account forever.
+      publicId: z.string().trim().min(1, "Every photo needs its Cloudinary id"),
+      caption: z.string().trim().max(200).optional(),
+      takenAt: z.coerce.date().optional(),
+    }))
+    .max(30, "That is more photos than an inspection needs"),
+  findings: z.string().trim().max(2000).optional(),
+  // Staff may override the computed grade; the checklist still decides the
+  // suggested outcome.
+  grade: z.enum(["A", "B", "C", "FAIL"]).optional(),
+});
+
 // Attaching a return label bought by hand in FedEx Ship Manager.
 //
 // Deliberately loose on the tracking number: carriers use different lengths and
@@ -421,6 +452,7 @@ module.exports = {
   refundRequestCreateSchema,
   refundRequestStatusSchema,
   returnLabelSchema,
+  inspectionSubmitSchema,
   monthlySellSchema,
   cartLookupSchema,
 };

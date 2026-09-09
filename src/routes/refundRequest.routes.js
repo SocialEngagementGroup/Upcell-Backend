@@ -7,6 +7,7 @@ const {
   refundRequestCreateSchema,
   refundRequestStatusSchema,
   returnLabelSchema,
+  inspectionSubmitSchema,
 } = require("../schemas/request.schemas");
 const {
   getRefundableItems,
@@ -16,6 +17,8 @@ const {
   updateRefundRequestStatus,
   recordReturnLabel,
   lookupReturnRequest,
+  getInspectionChecklist,
+  submitInspection,
 } = require("../controllers/refundRequest.controller");
 
 // Customer. Signed in only — guest returns by order id and email come later,
@@ -54,6 +57,19 @@ router.patch(
   validateObjectIdParam(),
   validateRequest(returnLabelSchema),
   recordReturnLabel
+);
+
+// The list an inspector answers, served from the same place the validation
+// reads it, so the two can never drift apart.
+router.get("/admin-return-inspection-checklist", verifyToken, requireAdmin, getInspectionChecklist);
+
+router.patch(
+  "/admin-refund-requests/:id/inspection",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  validateRequest(inspectionSubmitSchema),
+  submitInspection
 );
 
 module.exports = router;

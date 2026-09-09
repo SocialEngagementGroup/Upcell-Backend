@@ -816,3 +816,199 @@ describe("lookupReturnRequest — a parcel on the bench", () => {
     expect((await lookup("RM")).statusCode).toBe(400);
   });
 });
+
+// R.5 — a parcel becomes a device in someone's hand.
+describe("receiving a device", () => {
+  const receive = async (from) => {
+    const request = requestDoc({ status: from, timeline: [] });
+    RefundRequest.findById.mockResolvedValue(request);
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res, next } = makeReqRes(
+      { status: "DeviceReceived" },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.updateRefundRequestStatus(req, res, next);
+    return { request, res };
+  };
+
+  it("can be received from every state a parcel can be in", async () => {
+    // A device can arrive after a label was issued, while the carrier still
+    // says in transit, or after it says delivered. All three happen.
+    for (const from of ["ReturnApproved", "LabelIssued", "InTransit", "Delivered"]) {
+      const { request, res } = await receive(from);
+
+      expect(res.statusCode).toBe(200);
+      expect(request.status).toBe("DeviceReceived");
+    }
+  });
+
+  it("records who took it in, and when", async () => {
+    const { request } = await receive("LabelIssued");
+
+    expect(request.receivedBy).toBe(STAFF.email);
+    expect(request.receivedAt).toBeInstanceOf(Date);
+  });
+
+  it("tells the customer it arrived", async () => {
+    await receive("InTransit");
+
+    expect(mockSendMail).toHaveBeenCalled();
+  });
+
+  it("will not accept a device on a return that was never approved", async () => {
+    const { request, res } = await receive("Submitted");
+
+    expect(res.statusCode).toBe(400);
+    expect(request.status).toBe("Submitted");
+  });
+});
+
+// R.6 — the inspection.
+describe("submitInspection", () => {
+  const { CHECKLIST_ITEMS } = require("../src/constants/inspectionChecklist");
+
+  const allPass = (overrides = {}) =>
+    CHECKLIST_ITEMS.map((item) => ({ key: item.key, result: overrides[item.key] || "pass" }));
+
+  const fivePhotos = Array.from({ length: 5 }, (_, index) => ({
+    url: `https://cdn/p${index}.jpg`,
+    publicId: `upcell/returns/p${index}`,
+  }));
+
+  const inspect = async (request, body = {}) => {
+    RefundRequest.findById.mockResolvedValue(request);
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res, next } = makeReqRes(
+      { checklist: allPass(), photos: fivePhotos, findings: "Looks as described", ...body },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.submitInspection(req, res, next);
+    return { res, request };
+  };
+
+  it("records the inspection and who did it", async () => {
+    const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+
+    const { res } = await inspect(request);
+
+    expect(res.statusCode).toBe(200);
+    expect(request.inspection.inspectorId).toBe(STAFF.email);
+    expect(request.inspection.completedAt).toBeInstanceOf(Date);
+    expect(request.inspection.checklist).toHaveLength(CHECKLIST_ITEMS.length);
+  });
+
+  it("stamps every photo with a purge date, so none outlive the policy", async () => {
+    const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+
+    await inspect(request);
+
+    expect(request.inspection.photos).toHaveLength(5);
+    expect(request.inspection.photos.every((photo) => photo.purgeAfter instanceof Date)).toBe(true);
+  });
+
+  it("refuses an incomplete checklist and says what is missing", async () => {
+    const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+
+    const { res } = await inspect(request, { checklist: allPass().slice(0, 3) });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.details.length).toBeGreaterThan(0);
+    expect(request.inspection).toBeUndefined();
+  });
+
+  it("refuses fewer than five photos", async () => {
+    const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+
+    const { res } = await inspect(request, { photos: fivePhotos.slice(0, 4) });
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("will not inspect a device that has not arrived", async () => {
+    // A carrier saying "delivered" is a claim about a doorstep, not about a
+    // device in someone's hand.
+    const request = requestDoc({ status: "Delivered", timeline: [] });
+
+    const { res } = await inspect(request);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/received first/i);
+  });
+
+  it("sends a locked device to ActionRequired rather than rejecting it", async () => {
+    const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+
+    const { res } = await inspect(request, { checklist: allPass({ activation_lock: "fail" }) });
+
+    expect(request.status).toBe("ActionRequired");
+    expect(res.body.suggested.outcome).toBe("ACTION_REQUIRED");
+  });
+
+  it("rejects a device whose IMEI does not match the order", async () => {
+    const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+
+    await inspect(request, { checklist: allPass({ imei_matches: "fail" }) });
+
+    expect(request.status).toBe("Rejected");
+  });
+
+  it("offers less for a device in worse condition than described", async () => {
+    const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+
+    const { res } = await inspect(request, { checklist: allPass({ body_condition: "fail" }) });
+
+    expect(request.status).toBe("RevisedOffer");
+    expect(res.body.grade).toBe("B");
+  });
+
+  it("only demands the fault check when the customer claimed a fault", async () => {
+    // A change-of-mind return has no fault to reproduce.
+    const request = requestDoc({
+      status: "DeviceReceived", reasonCategory: "PREFERENCE", timeline: [],
+    });
+    const withoutFaultCheck = allPass().filter((entry) => entry.key !== "fault_reproduced");
+
+    const { res } = await inspect(request, { checklist: withoutFaultCheck });
+
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("suggests putting a sealed device back into new stock", async () => {
+    const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+
+    const { res } = await inspect(request);
+
+    expect(res.body.suggested.disposition.type).toBe("RESTOCK_NEW");
+  });
+
+  it("marks an opened but working device OPEN_BOX", async () => {
+    const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+
+    const { res } = await inspect(request, { checklist: allPass({ seal_intact: "fail" }) });
+
+    expect(res.body.suggested.disposition.type).toBe("OPEN_BOX");
+  });
+
+  it("writes the outcome into the timeline, with the grade", async () => {
+    const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+
+    await inspect(request);
+
+    expect(request.timeline.at(-1)).toMatchObject({
+      event: "inspection_completed",
+      actor: STAFF.email,
+    });
+    expect(request.timeline.at(-1).meta.grade).toBe("A");
+  });
+
+  it("lets an inspector resume a device that was blocked and then cleared", async () => {
+    const request = requestDoc({ status: "ActionRequired", timeline: [] });
+
+    const { res } = await inspect(request);
+
+    expect(res.statusCode).toBe(200);
+    expect(request.status).toBe("InInspection");
+  });
+});
