@@ -58,6 +58,27 @@ async function issueGuestToken(order, { now = new Date() } = {}) {
 }
 
 /**
+ * Replaces a guest order's token and returns the new plaintext.
+ *
+ * The one place rotation is right. issueGuestToken deliberately never rotates,
+ * because the receipt is the durable record — but a customer who has lost that
+ * email is asking for a new link, and honouring that means the old one stops
+ * working. That is the behaviour to want: a link that leaked is a link this
+ * page can revoke.
+ */
+async function reissueGuestToken(order, { now = new Date() } = {}) {
+  if (!order?.guest) return null;
+
+  const token = createAccessToken();
+
+  order.guestAccessToken = hashToken(token);
+  order.guestTokenExpiresAt = new Date(now.getTime() + GUEST_TOKEN_DAYS * 24 * 60 * 60 * 1000);
+  await order.save();
+
+  return token;
+}
+
+/**
  * Whether this token opens this order.
  *
  * Expiry is checked before the hash, but both must pass and neither says which
@@ -100,6 +121,7 @@ function checkoutEvidence(req) {
 module.exports = {
   guestFieldsFor,
   issueGuestToken,
+  reissueGuestToken,
   guestTokenOpens,
   checkoutEvidence,
   GUEST_TOKEN_DAYS,

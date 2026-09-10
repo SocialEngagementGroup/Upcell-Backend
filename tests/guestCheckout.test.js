@@ -3,7 +3,11 @@ process.env.EMAIL_FROM = "noreply@example.com";
 process.env.CLERK_SECRET_KEY = "sk_test_fake";
 
 jest.mock("resend", () => ({
-  Resend: jest.fn().mockImplementation(() => ({ emails: { send: jest.fn() } })),
+  // send() is awaited with .catch() in the controllers, so it has to return a
+  // promise rather than undefined.
+  Resend: jest.fn().mockImplementation(() => ({
+    emails: { send: jest.fn().mockResolvedValue({ id: "email_1" }) },
+  })),
 }));
 jest.mock("../src/models/order.model");
 jest.mock("../src/models/auditLog.model");
@@ -427,5 +431,112 @@ describe("POST /orders does not hand back what GET /order/:id withholds", () => 
       expect(body[leaked]).toBeUndefined();
     }
     expect(body.totalCents).toBe(107892);
+  });
+});
+
+// The recovery path for a guest who deleted their receipt. It is also what
+// makes it safe for the receipt's own link never to rotate: there is a way to
+// get a new one, so the old one does not have to keep changing.
+describe("POST /track-order", () => {
+  const { orderLinkEmail } = require("../src/services/emailTemplates");
+
+  const guestOrder = () => ({
+    _id: "6a79f7298341f33d9a65b0b7",
+    email: "buyer@example.com",
+    guest: true,
+    guestAccessToken: hashToken("old-token"),
+    save: jest.fn().mockResolvedValue(true),
+  });
+
+  const found = (doc) => {
+    Order.findOne.mockReturnValue({
+      collation: () => ({ select: () => Promise.resolve(doc) }),
+    });
+  };
+
+  const ask = async (body) => {
+    AuditLog.create.mockResolvedValue({});
+    const { req, res, next } = makeReqRes(body);
+    await orderController.emailOrderLink(req, res, next);
+    if (next.mock.calls.length) throw next.mock.calls[0][0];
+    return res;
+  };
+
+  it("emails a fresh link when the id and address match", async () => {
+    const order = guestOrder();
+    found(order);
+
+    const res = await ask({ orderId: order._id, email: "buyer@example.com" });
+
+    expect(res.statusCode).toBe(200);
+    expect(order.guestAccessToken).not.toBe(hashToken("old-token"));
+    expect(order.save).toHaveBeenCalled();
+  });
+
+  it("kills the previous link", async () => {
+    // Asking for a new one is also how a customer revokes a link that leaked.
+    const order = guestOrder();
+    found(order);
+
+    await ask({ orderId: order._id, email: "buyer@example.com" });
+
+    const { guestTokenOpens } = require("../src/services/guestOrder");
+    expect(guestTokenOpens(order, "old-token")).toBe(false);
+  });
+
+  it("answers a match and a miss with exactly the same thing", async () => {
+    // Otherwise this is a way to find out whether an address ever bought
+    // something, and an id plus an email is a pair somebody might be guessing.
+    found(guestOrder());
+    const hit = await ask({ orderId: "6a79f7298341f33d9a65b0b7", email: "buyer@example.com" });
+
+    found(null);
+    const miss = await ask({ orderId: "6a79f7298341f33d9a65b0b7", email: "nobody@example.com" });
+
+    expect(hit.statusCode).toBe(miss.statusCode);
+    expect(sent(hit)).toEqual(sent(miss));
+  });
+
+  it("answers the same for a malformed id, without touching the database", async () => {
+    Order.findOne.mockClear();
+
+    const res = await ask({ orderId: "not-an-id", email: "buyer@example.com" });
+
+    expect(res.statusCode).toBe(200);
+    expect(Order.findOne).not.toHaveBeenCalled();
+  });
+
+  it("only looks for guest orders", async () => {
+    // A signed-in customer has an account. The link is not how they get in,
+    // and reissuing one for their order would be a second key.
+    found(guestOrder());
+
+    await ask({ orderId: "6a79f7298341f33d9a65b0b7", email: "buyer@example.com" });
+
+    const [filter] = Order.findOne.mock.calls[0];
+    expect(filter.guest).toBe(true);
+  });
+
+  it("matches the address case-insensitively, as a plain string", async () => {
+    found(guestOrder());
+
+    await ask({ orderId: "6a79f7298341f33d9a65b0b7", email: "Buyer@Example.com" });
+
+    const [filter] = Order.findOne.mock.calls[0];
+    expect(filter.email).toBe("Buyer@Example.com");
+    expect(filter.email instanceof RegExp).toBe(false);
+  });
+
+  it("builds a link the customer can actually open", () => {
+    const { html } = orderLinkEmail({
+      orderId: "order1",
+      orderUrl: "https://upcellit.com/order/order1?t=abc123",
+    });
+
+    expect(html).toContain("https://upcellit.com/order/order1?t=abc123");
+    expect(html).toContain("View Your Order");
+    // Says plainly that the old link is dead, so a customer with two emails
+    // open knows which one works.
+    expect(html).toMatch(/stopped working/i);
   });
 });

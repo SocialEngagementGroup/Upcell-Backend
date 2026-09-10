@@ -435,6 +435,16 @@ const disputeHoldSchema = z.object({
   { path: ["reason"], message: "Say why this return is on hold" }
 );
 
+// Asking for a fresh link to a guest order.
+//
+// Both fields are required and neither is trusted: the id is checked for shape
+// and the email is only ever compared against the one already on the order,
+// never used to address the mail.
+const orderLinkRequestSchema = z.object({
+  orderId: z.string().trim().regex(/^[0-9a-fA-F]{24}$/, "Enter the order ID from your confirmation email"),
+  email: emailField,
+});
+
 // Marking an order shipped.
 //
 // Deliberately loose on the tracking number, matching returnShipping.js: a
@@ -626,6 +636,7 @@ module.exports = {
   inspectionSubmitSchema,
   windowOverrideSchema,
   orderShipmentSchema,
+  orderLinkRequestSchema,
   disputeHoldSchema,
   revisedOfferSchema,
   settlementSchema,

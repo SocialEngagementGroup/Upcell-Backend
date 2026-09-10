@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const { Resend } = require("resend");
 const Order = require("../models/order.model");
 const { toCustomerOrder, ownsOrder } = require("../utils/orderView");
+const { reissueGuestToken } = require("../services/guestOrder");
 const { salesTaxRate } = require("../services/salesTax");
 const { validateShipment } = require("../services/returnShipping");
 const { trackingUrlFor } = require("../utils/carrierTracking");
@@ -15,6 +16,7 @@ const {
   adminNewOrderEmail,
   refundApprovedEmail,
   orderShippedEmail,
+  orderLinkEmail,
 } = require("../services/emailTemplates");
 const { calculateRefund } = require("../services/refund");
 const {
@@ -26,6 +28,7 @@ const {
 const resend = new Resend(process.env.RESEND_KEY);
 const orderEmailFrom = process.env.EMAIL_FROM;
 const adminNotificationEmail = process.env.ADMIN_NOTIFICATION_EMAIL;
+const SITE_URL = process.env.FRONTEND_URL || process.env.SITE_URL || "";
 
 // Mongo ObjectId as it appears in a URL. Checking the shape before querying
 // keeps a malformed id (a "/order/undefined" from a page loaded without its
@@ -321,6 +324,75 @@ async function recordOrderShipment(req, res, next) {
  * and a live link that still opens an order belonging to an account is a
  * second key nobody is tracking.
  */
+/**
+ * Emails a guest a fresh link to their own order.
+ *
+ * The recovery path for somebody who deleted the receipt. It is also what
+ * makes it safe for the receipt's link never to rotate on its own: there is a
+ * way to get a new one, so the old one does not have to keep changing.
+ *
+ * Two rules make this not a nuisance machine.
+ *
+ * The mail only ever goes to the address already on the order. The form asks
+ * for an address so the caller can prove they know it, never as a delivery
+ * address — otherwise this endpoint posts anyone's order details anywhere.
+ *
+ * And the answer is the same whether or not anything matched. A "no such
+ * order" would turn this into a way to test whether an address ever bought
+ * something, and an order id plus an email is a pair somebody might be
+ * guessing at.
+ */
+async function emailOrderLink(req, res, next) {
+  // Said once, used for every outcome.
+  const SAME_ANSWER = {
+    ok: true,
+    message: "If that matches an order, we've emailed a link to the address on it.",
+  };
+
+  try {
+    const { orderId, email } = req.body || {};
+
+    if (!OBJECT_ID_PATTERN.test(String(orderId || ""))) {
+      return res.status(200).json(SAME_ANSWER);
+    }
+
+    const order = await Order.findOne({
+      _id: orderId,
+      email: String(email || "").trim(),
+      guest: true,
+    })
+      .collation({ locale: "en", strength: 2 })
+      .select("+guestAccessToken");
+
+    // A signed-in customer's order has no guest flag and falls out here. They
+    // have an account; the link is not how they get in.
+    if (!order) return res.status(200).json(SAME_ANSWER);
+
+    const token = await reissueGuestToken(order);
+    if (!token) return res.status(200).json(SAME_ANSWER);
+
+    const orderUrl = `${SITE_URL}/order/${order._id}?t=${encodeURIComponent(token)}`;
+    const { subject, html } = orderLinkEmail({ orderId: order._id, orderUrl });
+
+    resend.emails
+      .send({ from: orderEmailFrom, to: [order.email], subject, html })
+      .catch((error) => console.error("[email] order link send failed:", error?.message || error));
+
+    AuditLog.create({
+      actorId: "guest",
+      actorEmail: order.email,
+      action: "order.link_reissued",
+      targetType: "Order",
+      targetId: order._id,
+      metadata: {},
+    }).catch(() => {});
+
+    return res.status(200).json(SAME_ANSWER);
+  } catch (error) {
+    return next(error);
+  }
+}
+
 async function claimGuestOrders(req, res, next) {
   try {
     if (!req.user?.emailVerified) {
@@ -728,6 +800,7 @@ async function markRefundEnteredAtBank(req, res, next) {
 
 module.exports = {
   getOrder,
+  emailOrderLink,
   claimGuestOrders,
   recordOrderShipment,
   trackingUrlFor,

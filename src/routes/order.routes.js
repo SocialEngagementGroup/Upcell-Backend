@@ -3,15 +3,22 @@ const { verifyToken, requireAdmin, optionalAuth } = require("../middleware/auth.
 const { validateRequest } = require("../middleware/validate.middleware");
 const { validateObjectIdParam } = require("../middleware/validateObjectId.middleware");
 const {
+  publicFormLimiter,
   checkoutLimiter,
   guestCheckoutLimiter,
   orderLookupLimiter,
 } = require("../middleware/rateLimit.middleware");
-const { orderSchema, refundSchema, orderShipmentSchema } = require("../schemas/request.schemas");
+const {
+  orderSchema,
+  refundSchema,
+  orderShipmentSchema,
+  orderLinkRequestSchema,
+} = require("../schemas/request.schemas");
 const {
   getOrder,
   getTaxRate,
   claimGuestOrders,
+  emailOrderLink,
   recordOrderShipment,
   getAdminOrders,
   getAdminOrdersByDate,
@@ -28,6 +35,16 @@ router.get("/tax-rate", getTaxRate);
 // Called once after sign-in. Attaches any guest orders placed with the same
 // verified email to the new account.
 router.post("/orders/claim", verifyToken, claimGuestOrders);
+
+// A guest who lost their receipt asking for a fresh link. Public, because
+// having lost the link is the whole reason they are here — and rate limited
+// like the other public writes, because it sends email.
+router.post(
+  "/track-order",
+  publicFormLimiter,
+  validateRequest(orderLinkRequestSchema),
+  emailOrderLink
+);
 
 // Marking an order shipped. Staff buy the label by hand in the carrier's own
 // tool and paste the number back here — the same manual first phase the

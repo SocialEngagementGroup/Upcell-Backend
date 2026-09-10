@@ -439,6 +439,29 @@ function orderShippedEmail({ orderId, carrier, trackingNumber, trackingUrl, item
   };
 }
 
+// A fresh link to a guest's own order, because they asked for one.
+//
+// Sent only to the address already on the order. The form asks for it so the
+// customer proves they know it; it is never used as a delivery address, or
+// this endpoint would be a way to post somebody's order details anywhere.
+function orderLinkEmail({ orderId, orderUrl }) {
+  return {
+    subject: "Your UpCell order link",
+    html: emailShell({
+      preheader: "Here is the link to your order.",
+      badgeGlyph: "&#128279;",
+      headline: "Here's your order",
+      subtext:
+        "You asked for a fresh link to your order. Any link we sent you before this one "
+        + "has stopped working, so use this one from now on.",
+      detailRowsHtml: detailRow("Order ID", `#${escapeHtml(orderId)}`),
+      ctaLabel: "View Your Order",
+      ctaHref: orderUrl,
+      footerNote: "If you didn't ask for this, you can ignore it — nothing has changed.",
+    }),
+  };
+}
+
 // The offer of less than the full refund, and why.
 //
 // Every deduction is listed with the finding behind it, because a smaller
@@ -817,6 +840,7 @@ module.exports = {
   refundRequestReceivedEmail,
   returnLabelIssuedEmail,
   orderShippedEmail,
+  orderLinkEmail,
   revisedOfferEmail,
   returnReminderEmail,
   returnExpiredEmail,
