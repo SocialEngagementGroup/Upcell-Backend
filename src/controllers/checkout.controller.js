@@ -3,6 +3,7 @@ const SingleVariation = require("../models/singleVariation.model");
 const PaymentEventLog = require("../models/paymentEventLog.model");
 const { round2 } = require("../utils/money");
 const { convertLineItems } = require("../utils/orderItems");
+const { calculateTax } = require("../services/salesTax");
 const { Resend } = require("resend");
 const { paymentReceiptEmail, adminNewOrderEmail } = require("../services/emailTemplates");
 const { EmailConfig } = require("../models/emailConfig.model");
@@ -122,11 +123,9 @@ const orderEmailFrom = process.env.EMAIL_FROM;
 // Sales tax rate charged at checkout. Defined once, here, because the customer
 // is shown this figure before paying and the bank is sent the same figure — the
 // two must never be able to drift apart.
-//
-// A single flat rate is a simplification: US sales tax varies by state, and some
-// states charge none at all. Confirmed with the client as the rate to use for
-// now; revisit if UpCell registers in more states.
-const SALES_TAX_RATE = 0.08;
+// The rate itself now lives in services/salesTax.js, read from env, so the
+// checkout, the refund and the two pages that quote a total all read one
+// number instead of four copies of it.
 
 // A multi-tab customer (or a slow first request they retry) can otherwise
 // create two separate, independently-payable orders for the same cart. These
@@ -276,7 +275,14 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
     (sum, item) => sum + (item?.price_data?.product_data?.metadata?.totalPaid || 0),
     0
   );
-  const taxAmount = Math.round(goodsTotal * SALES_TAX_RATE * 100) / 100;
+  // Rounded to cents before the rate is applied, so the tax is computed on
+  // the exact figure the customer is charged for goods rather than on a
+  // floating-point approximation of it.
+  const { taxCents, rate: taxRate } = calculateTax({
+    goodsCents: Math.round(goodsTotal * 100),
+    shipToState: state,
+  });
+  const taxAmount = taxCents / 100;
 
   if (taxAmount > 0) {
     line_items.push({
@@ -361,6 +367,10 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
     items: converted.items,
     shippingCents: converted.shippingCents,
     taxCents: converted.taxCents,
+    // Stored so a future rate change never rewrites what an old order was
+    // charged, and so a refund years later shares out the rate that applied
+    // on the day rather than today's.
+    taxRate,
     subtotalCents: converted.subtotalCents,
     totalCents: converted.totalCents,
     // Set by verifyToken on the authenticated checkout routes. Undefined on

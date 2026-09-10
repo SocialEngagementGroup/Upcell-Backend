@@ -63,6 +63,10 @@ const OrderSchema = new Schema(
     items: [OrderItemSchema],
     shippingCents: Number,
     taxCents: Number,
+    // The rate that produced taxCents, recorded on the order rather than read
+    // from config at refund time. Config is today's answer; this is the one
+    // that was actually charged.
+    taxRate: Number,
     subtotalCents: Number,
     totalCents: Number,
     // Clerk user id of the account that placed the order. This — not `email` —

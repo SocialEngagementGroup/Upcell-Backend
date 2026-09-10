@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const { Resend } = require("resend");
 const Order = require("../models/order.model");
 const { toCustomerOrder, ownsOrder } = require("../utils/orderView");
+const { salesTaxRate } = require("../services/salesTax");
 const AuditLog = require("../models/auditLog.model");
 const { Notification } = require("../models/notification.model");
 const { makeOrderObjAndTotal } = require("./checkout.controller");
@@ -28,6 +29,14 @@ const adminNotificationEmail = process.env.ADMIN_NOTIFICATION_EMAIL;
 // query string, a crawler, a probe) a plain 404 instead of a CastError — which
 // the global handler would turn into a 500 and page the admin over.
 const OBJECT_ID_PATTERN = /^[0-9a-fA-F]{24}$/;
+
+// The rate the shop quotes, so the cart and the checkout stop carrying their
+// own copy of it. Public and cacheable: it is the same number for everyone and
+// it is printed on every receipt anyway.
+function getTaxRate(req, res) {
+  res.set("Cache-Control", "public, max-age=300");
+  return res.status(200).json({ rate: salesTaxRate() });
+}
 
 async function getOrder(req, res, next) {
   try {
@@ -520,6 +529,7 @@ async function markRefundEnteredAtBank(req, res, next) {
 
 module.exports = {
   getOrder,
+  getTaxRate,
   getAdminOrders,
   getAdminOrdersByDate,
   updateOrderStatus,
