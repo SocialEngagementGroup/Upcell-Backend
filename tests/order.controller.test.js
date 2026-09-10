@@ -888,7 +888,12 @@ describe("recordOrderShipment", () => {
     const { toCustomerOrder } = require("../src/utils/orderView");
     const view = toCustomerOrder({ _id: "order1", fulfilment: order.fulfilment });
 
-    expect(view.fulfilment).toEqual({ carrier: "FedEx", trackingNumber: "794657312345" });
+    expect(view.fulfilment).toEqual({
+      carrier: "FedEx",
+      trackingNumber: "794657312345",
+      trackingUrl: "https://www.fedex.com/fedextrack/?trknbr=794657312345",
+    });
+    // The staff name and UpCell's own label document stay behind.
     expect(view.fulfilment.shippedBy).toBeUndefined();
     expect(view.fulfilment.labelUrl).toBeUndefined();
   });

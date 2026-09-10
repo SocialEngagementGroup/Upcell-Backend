@@ -4,6 +4,7 @@ const Order = require("../models/order.model");
 const { toCustomerOrder, ownsOrder } = require("../utils/orderView");
 const { salesTaxRate } = require("../services/salesTax");
 const { validateShipment } = require("../services/returnShipping");
+const { trackingUrlFor } = require("../utils/carrierTracking");
 const AuditLog = require("../models/auditLog.model");
 const { Notification } = require("../models/notification.model");
 const { makeOrderObjAndTotal } = require("./checkout.controller");
@@ -193,21 +194,6 @@ const ORDER_STATUS_VALUES = ["pending_payment", "under_review", "Processing", "S
 const UNPAID_STATUSES = ["pending_payment", "under_review", "payment failed"];
 const DELIVERED_STATUS = "Delivered";
 
-// Where each carrier's own tracking page lives.
-//
-// Built here rather than stored, so a carrier changing its URL is one edit and
-// not a migration over every order ever shipped. "Other" gets no link: a
-// guessed URL that 404s is worse than the number on its own, which a customer
-// can paste anywhere.
-const TRACKING_URLS = {
-  FedEx: (n) => `https://www.fedex.com/fedextrack/?trknbr=${encodeURIComponent(n)}`,
-  UPS: (n) => `https://www.ups.com/track?tracknum=${encodeURIComponent(n)}`,
-  USPS: (n) => `https://tools.usps.com/go/TrackConfirmAction?tLabels=${encodeURIComponent(n)}`,
-  DHL: (n) => `https://www.dhl.com/en/express/tracking.html?AWB=${encodeURIComponent(n)}`,
-};
-
-const trackingUrlFor = (carrier, trackingNumber) =>
-  (TRACKING_URLS[carrier] ? TRACKING_URLS[carrier](trackingNumber) : null);
 
 /**
  * Records that an order has shipped, and tells the customer.

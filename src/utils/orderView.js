@@ -23,6 +23,8 @@
  * @param {object} order - a Mongoose document or a lean object
  * @returns {object} an allowlisted view — never the document
  */
+const { trackingUrlFor } = require("./carrierTracking");
+
 function toCustomerOrder(order) {
   if (!order) return null;
 
@@ -81,6 +83,9 @@ function toCustomerOrder(order) {
       ? {
           carrier: source.fulfilment.carrier,
           trackingNumber: source.fulfilment.trackingNumber,
+          // Built here rather than on the page, so the account and the email
+          // send a customer to the same place.
+          trackingUrl: trackingUrlFor(source.fulfilment.carrier, source.fulfilment.trackingNumber),
         }
       : undefined,
 
