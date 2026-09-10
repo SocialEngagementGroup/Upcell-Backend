@@ -126,9 +126,3 @@ module.exports = {
   checkoutEvidence,
   GUEST_TOKEN_DAYS,
 };
-
-
-
-var = 5
-var = 6
-
