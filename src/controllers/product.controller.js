@@ -708,7 +708,10 @@ async function getAccessories(req, res, next) {
   try {
     const accessories = await SingleVariation.find(
       { isAccessory: true, outOfStock: { $ne: true } },
-      "slug productName description price image storage color condition"
+      // imagePublicId and imageIsGeneric are what resolveProductImage reads.
+      // Without them an accessory falls back to the legacy path in `image`,
+      // which for both of the current two is a file that no longer exists.
+      "slug productName description price image imagePublicId imageIsGeneric storage color condition"
     )
       .sort({ price: 1 })
       .lean();
