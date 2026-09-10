@@ -638,7 +638,13 @@ async function createOrder(req, res, next) {
     // so paid stays false and status stays makeOrderObjAndTotal's
     // "pending_payment" default until that confirmation happens.
     const newOrder = await Order.create(order);
-    res.status(201).json(newOrder);
+
+    // The allowlisted view, not the document. Order.create returns everything
+    // it was given regardless of select:false, so answering with newOrder
+    // would hand back the guest hash, the gateway fields and the staff-only
+    // half of the refund block — the exact set T00-B took out of GET
+    // /order/:id, straight back out through the door beside it.
+    res.status(201).json(toCustomerOrder(newOrder));
 
     notifyOrderPlaced(newOrder).catch((error) => {
       console.error("[order] order-placed notification failed:", error);

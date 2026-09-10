@@ -233,7 +233,7 @@ function orderStatusEmail({ orderId, status }) {
   };
 }
 
-function paymentReceiptEmail({ orderId, paidWith, lineItems, total }) {
+function paymentReceiptEmail({ orderId, paidWith, lineItems, total, orderUrl }) {
   const itemRows = (lineItems || [])
     .map(
       (item) =>
@@ -259,8 +259,11 @@ function paymentReceiptEmail({ orderId, paidWith, lineItems, total }) {
       headline: "Payment received &mdash; thank you!",
       subtext: `Here&rsquo;s your receipt for order #${escapeHtml(orderId)}.`,
       detailRowsHtml: rows,
-      ctaLabel: "View Order Details",
-      ctaHref: ACCOUNT_URL,
+      // A guest has no account page to send them to, so the receipt carries
+      // the only link they will ever have to this order. Signed-in customers
+      // keep going to their own order list.
+      ctaLabel: orderUrl ? "View Your Order" : "View Order Details",
+      ctaHref: orderUrl || ACCOUNT_URL,
       footerNote: "You're receiving this because you placed an order with UpCell.",
     }),
   };

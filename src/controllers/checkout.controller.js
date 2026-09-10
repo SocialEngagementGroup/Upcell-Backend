@@ -4,9 +4,16 @@ const PaymentEventLog = require("../models/paymentEventLog.model");
 const { round2 } = require("../utils/money");
 const { convertLineItems } = require("../utils/orderItems");
 const { calculateTax } = require("../services/salesTax");
-const { guestFieldsFor, checkoutEvidence } = require("../services/guestOrder");
+const {
+  guestFieldsFor,
+  issueGuestToken,
+  checkoutEvidence,
+} = require("../services/guestOrder");
 const { Resend } = require("resend");
 const { paymentReceiptEmail, adminNewOrderEmail } = require("../services/emailTemplates");
+
+// Where a customer's own link points. Same value the returns emails use.
+const SITE_URL = process.env.FRONTEND_URL || process.env.SITE_URL || "";
 const { EmailConfig } = require("../models/emailConfig.model");
 
 // Reads the "Customer emails" switch from Admin > Email Settings. Defaults to
@@ -90,11 +97,21 @@ exports.sendPaymentReceiptEmail = async (order) => {
 
     const lineItems = exports.orderLineItemsForReceipt(order);
     const total = exports.orderTotal(order);
+
+    // A guest's token is minted here, at the first email, because this is the
+    // first moment it can be: the plaintext cannot survive the trip to the
+    // bank and back. Null for a signed-in customer, who needs no link.
+    const guestToken = await issueGuestToken(order);
+    const orderUrl = guestToken
+      ? `${SITE_URL}/order/${order._id}?t=${encodeURIComponent(guestToken)}`
+      : null;
+
     const { subject, html } = paymentReceiptEmail({
       orderId: order._id,
       paidWith: order.paidWith,
       lineItems,
       total,
+      orderUrl,
     });
 
     await resend.emails.send({

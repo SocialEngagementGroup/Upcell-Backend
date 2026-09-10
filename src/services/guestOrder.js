@@ -19,27 +19,42 @@ const GUEST_TOKEN_DAYS = 90;
 
 /**
  * The fields a guest order carries that a signed-in one does not.
- *
- * Returns the plaintext token alongside them, because it is needed for the
- * link in the receipt email and exists nowhere else — the order itself only
- * ever holds the hash.
  */
-function guestFieldsFor({ user, now = new Date() } = {}) {
-  if (user?.id) {
-    // Signed in. Nothing to mint: the Clerk user id is the ownership proof.
-    return { fields: { guest: false }, token: null };
-  }
+function guestFieldsFor({ user } = {}) {
+  // Only the flag. The token is minted when the first email goes out, not
+  // here — see issueGuestToken below for why.
+  return { fields: { guest: !user?.id }, token: null };
+}
+
+/**
+ * Mints the token for a guest order and stores its hash. Saves the order.
+ *
+ * Minted at the moment an email needs it rather than at checkout, because the
+ * plaintext cannot survive the gap. Checkout hands the customer to the bank
+ * and the receipt is sent later, from the bank's callback, in a different
+ * request — by then the order has been read back from the database and holds
+ * only a hash. A token minted at checkout would be unrecoverable exactly when
+ * it is first needed.
+ *
+ * Minted once. A second call returns null rather than rotating, because the
+ * receipt email is the durable record: a customer who kept it must still be
+ * able to open their order six weeks later, and a later email that quietly
+ * invalidated that link would break the one they are most likely to have.
+ *
+ * @returns {Promise<string|null>} the plaintext, or null if there is nothing
+ *   to mint — a signed-in customer, or a guest who already has one.
+ */
+async function issueGuestToken(order, { now = new Date() } = {}) {
+  if (!order?.guest) return null;
+  if (order.guestAccessToken) return null;
 
   const token = createAccessToken();
 
-  return {
-    token,
-    fields: {
-      guest: true,
-      guestAccessToken: hashToken(token),
-      guestTokenExpiresAt: new Date(now.getTime() + GUEST_TOKEN_DAYS * 24 * 60 * 60 * 1000),
-    },
-  };
+  order.guestAccessToken = hashToken(token);
+  order.guestTokenExpiresAt = new Date(now.getTime() + GUEST_TOKEN_DAYS * 24 * 60 * 60 * 1000);
+  await order.save();
+
+  return token;
 }
 
 /**
@@ -84,6 +99,7 @@ function checkoutEvidence(req) {
 
 module.exports = {
   guestFieldsFor,
+  issueGuestToken,
   guestTokenOpens,
   checkoutEvidence,
   GUEST_TOKEN_DAYS,

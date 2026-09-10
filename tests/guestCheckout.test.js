@@ -10,11 +10,25 @@ jest.mock("../src/models/auditLog.model");
 jest.mock("../src/models/notification.model");
 jest.mock("../src/models/singleVariation.model");
 jest.mock("../src/models/emailConfig.model");
+// order.controller destructures makeOrderObjAndTotal at import time, so a spy
+// set later never reaches the reference it captured.
+jest.mock("../src/controllers/checkout.controller", () => ({
+  makeOrderObjAndTotal: jest.fn(),
+  sendPaymentReceiptEmail: jest.fn(),
+  sendAdminNewOrderEmail: jest.fn(),
+  orderLineItemsForReceipt: jest.fn(() => []),
+  orderTotal: jest.fn(() => 0),
+}));
 
 const Order = require("../src/models/order.model");
 const AuditLog = require("../src/models/auditLog.model");
 const orderController = require("../src/controllers/order.controller");
-const { guestFieldsFor, guestTokenOpens, checkoutEvidence } = require("../src/services/guestOrder");
+const {
+  guestFieldsFor,
+  issueGuestToken,
+  guestTokenOpens,
+  checkoutEvidence,
+} = require("../src/services/guestOrder");
 const { ownsOrder } = require("../src/utils/orderView");
 const { hashToken } = require("../src/utils/accessToken");
 
@@ -38,39 +52,68 @@ beforeEach(() => {
 // Checkout was behind a sign-in wall. For a used-device shop that is the
 // biggest thing between a visitor and a sale, and the account it forced them
 // to make unlocked nothing but the order they were already placing.
-describe("minting a guest order", () => {
-  it("gives an anonymous buyer a token and marks the order guest", () => {
-    const { fields, token } = guestFieldsFor({ user: undefined });
-
-    expect(fields.guest).toBe(true);
-    expect(token).toEqual(expect.any(String));
-    expect(token.length).toBeGreaterThan(40);
+describe("marking an order a guest order", () => {
+  it("flags an anonymous buyer's order", () => {
+    expect(guestFieldsFor({ user: undefined }).fields.guest).toBe(true);
   });
 
-  it("stores only the hash of it", () => {
-    // The order document must never be a set of working links.
-    const { fields, token } = guestFieldsFor({});
-
-    expect(fields.guestAccessToken).toMatch(/^[0-9a-f]{64}$/);
-    expect(fields.guestAccessToken).not.toBe(token);
-  });
-
-  it("gives a signed-in buyer nothing to lose", () => {
+  it("does not flag a signed-in buyer's", () => {
     // Their Clerk id is the ownership proof. A token would be a second key
     // that has to be tracked and can be forwarded.
-    const { fields, token } = guestFieldsFor({ user: { id: "user_1" } });
-
-    expect(fields.guest).toBe(false);
-    expect(fields.guestAccessToken).toBeUndefined();
-    expect(token).toBeNull();
+    expect(guestFieldsFor({ user: { id: "user_1" } }).fields.guest).toBe(false);
   });
 
-  it("expires the token in ninety days", () => {
-    const now = new Date("2026-09-11T00:00:00Z");
-    const { fields } = guestFieldsFor({ now });
+  it("mints no token at checkout", () => {
+    // The plaintext cannot survive the trip to the bank and back — checkout
+    // hands the customer off, and the receipt is sent from a different
+    // request that has only read the order back from the database.
+    expect(guestFieldsFor({}).fields.guestAccessToken).toBeUndefined();
+    expect(guestFieldsFor({}).token).toBeNull();
+  });
+});
 
-    const days = (fields.guestTokenExpiresAt - now) / (24 * 60 * 60 * 1000);
+describe("issuing the token when the first email goes out", () => {
+  const guestOrder = () => ({ guest: true, save: jest.fn().mockResolvedValue(true) });
+
+  it("mints one and stores only its hash", () => {
+    const order = guestOrder();
+
+    return issueGuestToken(order).then((token) => {
+      expect(token).toEqual(expect.any(String));
+      expect(token.length).toBeGreaterThan(40);
+      expect(order.guestAccessToken).toMatch(/^[0-9a-f]{64}$/);
+      expect(order.guestAccessToken).not.toBe(token);
+      expect(order.save).toHaveBeenCalled();
+    });
+  });
+
+  it("expires it in ninety days", async () => {
+    const now = new Date("2026-09-11T00:00:00Z");
+    const order = guestOrder();
+
+    await issueGuestToken(order, { now });
+
+    const days = (order.guestTokenExpiresAt - now) / (24 * 60 * 60 * 1000);
     expect(days).toBe(90);
+  });
+
+  it("mints nothing for a signed-in customer's order", async () => {
+    const order = { guest: false, save: jest.fn() };
+
+    expect(await issueGuestToken(order)).toBeNull();
+    expect(order.save).not.toHaveBeenCalled();
+  });
+
+  it("never rotates one that already exists", async () => {
+    // The receipt email is the durable record. A customer who kept it must
+    // still be able to open their order six weeks later, and a later email
+    // that quietly invalidated that link would break the one they are most
+    // likely to still have.
+    const order = { guest: true, guestAccessToken: "a".repeat(64), save: jest.fn() };
+
+    expect(await issueGuestToken(order)).toBeNull();
+    expect(order.guestAccessToken).toBe("a".repeat(64));
+    expect(order.save).not.toHaveBeenCalled();
   });
 });
 
@@ -350,5 +393,39 @@ describe("the claim leaves a trail", () => {
     expect(sent(res).claimed).toBe(0);
     expect(Order.updateMany).not.toHaveBeenCalled();
     expect(AuditLog.create).not.toHaveBeenCalled();
+  });
+});
+
+// Order.create returns everything it was handed, select:false or not. An
+// endpoint that answers with that document undoes the lockdown on the endpoint
+// beside it.
+describe("POST /orders does not hand back what GET /order/:id withholds", () => {
+  it("answers with the customer view, not the document", async () => {
+    const created = {
+      _id: "order1",
+      email: "buyer@example.com",
+      guest: true,
+      guestAccessToken: hashToken("secret"),
+      checkoutIpHash: "abc123",
+      userAgent: "Mozilla/5.0",
+      avsResult: "Y",
+      boaTransactionId: "7284419920176543904007",
+      items: [],
+      totalCents: 107892,
+      toObject() { return this; },
+    };
+
+    Order.create.mockResolvedValue(created);
+    require("../src/controllers/checkout.controller")
+      .makeOrderObjAndTotal.mockResolvedValue({ order: {}, totalPrice: 1078.92 });
+
+    const { req, res, next } = makeReqRes({ paidWith: "Manual" }, { user: undefined });
+    await orderController.createOrder(req, res, next);
+
+    const body = sent(res);
+    for (const leaked of ["guestAccessToken", "checkoutIpHash", "userAgent", "avsResult", "boaTransactionId"]) {
+      expect(body[leaked]).toBeUndefined();
+    }
+    expect(body.totalCents).toBe(107892);
   });
 });
