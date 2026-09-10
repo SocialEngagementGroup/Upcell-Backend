@@ -47,7 +47,9 @@ async function getOrder(req, res, next) {
       return res.status(404).json({ error: "Order not found" });
     }
 
-    const order = await Order.findById(req.params.id);
+    // +guestAccessToken because it is select:false — without asking for it,
+    // every guest link would be refused and the reason would be invisible.
+    const order = await Order.findById(req.params.id).select("+guestAccessToken");
     if (!order) return res.status(404).json({ error: "Order not found" });
 
     // Anyone who is not the owner gets the same answer as a missing order.
@@ -61,7 +63,9 @@ async function getOrder(req, res, next) {
     // A distinct "not yours" would also confirm that an id exists, which is
     // exactly what somebody walking the id range is trying to learn. One
     // answer for both.
-    if (!ownsOrder(req.user, order)) {
+    // ?t= is the guest's link. A signed-in customer never needs it, and a
+    // wrong one falls through to the same 404 as no token at all.
+    if (!ownsOrder(req.user, order, req.query?.t)) {
       return res.status(404).json({ error: "Order not found" });
     }
 
@@ -296,6 +300,85 @@ async function recordOrderShipment(req, res, next) {
       },
       emailed: !alreadyShipped,
     });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+/**
+ * Attaches a guest's past orders to the account they have just created.
+ *
+ * Somebody who checked out as a guest and later signs up with the same address
+ * should find their orders waiting, not have to keep the email with the link
+ * in it forever.
+ *
+ * Gated on a *verified* email, and that is the whole security of it. Clerk
+ * lets anyone sign up claiming any address; verification is what makes the
+ * claim mean something. Without the check, taking over a stranger's orders
+ * would only need their email address and no access to it.
+ *
+ * The guest token is cleared on the orders it moves. They have an owner now,
+ * and a live link that still opens an order belonging to an account is a
+ * second key nobody is tracking.
+ */
+async function claimGuestOrders(req, res, next) {
+  try {
+    if (!req.user?.emailVerified) {
+      return res.status(403).json({
+        error: "Verify your email address first, then we can find your past orders.",
+      });
+    }
+
+    const email = String(req.user.email || "").trim().toLowerCase();
+    if (!email) return res.status(400).json({ error: "No email address on this account." });
+
+    // Matched case-insensitively, because somebody who typed Buyer@Example.com
+    // at checkout and signed up as buyer@example.com is one person.
+    //
+    // A collation rather than a regex. Building one from an email address
+    // means escaping user input into a pattern, and an unescaped "." matches
+    // any character — so a.b@x.com would also claim aXb@x.com. Strength 2 is
+    // case-insensitive and accent-sensitive, which is exactly the rule wanted
+    // here, and there is nothing to escape.
+    const insensitive = { locale: "en", strength: 2 };
+    const claimable = { guest: true, email, userId: { $in: [null, undefined, ""] } };
+
+    // Read the ids before the update, because afterwards nothing distinguishes
+    // the orders this call moved from ones already on the account — and the
+    // audit trail needs to name them.
+    const orders = await Order.find(claimable).collation(insensitive).select("_id").lean();
+
+    if (!orders.length) return res.status(200).json({ ok: true, claimed: 0 });
+
+    await Order.updateMany(
+      claimable,
+      {
+        $set: { userId: req.user.id, guest: false },
+        // They have an owner now. A live link that still opens an order
+        // belonging to an account is a second key nobody is tracking.
+        $unset: { guestAccessToken: "", guestTokenExpiresAt: "" },
+      },
+      { collation: insensitive }
+    );
+
+    // One row per order, not one for the batch. targetId is a required
+    // ObjectId, so a row for "several orders" cannot be written at all — it
+    // would fail validation inside the catch below and the claim would go
+    // unrecorded with nobody the wiser.
+    for (const order of orders) {
+      AuditLog.create({
+        actorId: req.user.id,
+        actorEmail: req.user.email,
+        action: "order.guest_order_claimed",
+        targetType: "Order",
+        targetId: order._id,
+        metadata: { email },
+      }).catch((error) => {
+        console.error("[audit] order.guest_order_claimed log failed:", error?.message || error);
+      });
+    }
+
+    return res.status(200).json({ ok: true, claimed: orders.length });
   } catch (error) {
     return next(error);
   }
@@ -639,6 +722,7 @@ async function markRefundEnteredAtBank(req, res, next) {
 
 module.exports = {
   getOrder,
+  claimGuestOrders,
   recordOrderShipment,
   trackingUrlFor,
   getTaxRate,

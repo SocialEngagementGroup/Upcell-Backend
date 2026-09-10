@@ -227,10 +227,18 @@ describe("getOrder — who may read an order, and what of it", () => {
     refund: { amount: 999, approvedBy: "yasir@upcellit.com", enteredAtBankBy: "yasir@upcellit.com", notes: "internal" },
   };
 
-  const ask = async (user) => {
-    Order.findById.mockResolvedValue({ ...fullOrder, toObject: () => fullOrder });
+  // getOrder selects +guestAccessToken, so findById returns a chain here the
+  // way Mongoose does rather than a bare promise.
+  const findByIdReturns = (doc) =>
+    Order.findById.mockReturnValue({ select: () => Promise.resolve(doc) });
 
-    const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" }, user });
+  const ask = async (user, guestToken) => {
+    findByIdReturns({ ...fullOrder, toObject: () => fullOrder });
+
+    const { req, res } = makeReqRes(
+      {},
+      { params: { id: "6a79f7298341f33d9a65b0b7" }, user, query: guestToken ? { t: guestToken } : {} }
+    );
     await orderController.getOrder(req, res, jest.fn());
     return res;
   };
@@ -278,7 +286,7 @@ describe("getOrder — who may read an order, and what of it", () => {
   it("answers a stranger exactly as it answers a missing order", async () => {
     const stranger = await ask({ id: "user_someone_else", email: "x@example.com", emailVerified: true });
 
-    Order.findById.mockResolvedValue(null);
+    findByIdReturns(null);
     const { req, res: missing } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" } });
     await orderController.getOrder(req, missing, jest.fn());
 
@@ -321,7 +329,7 @@ describe("getOrder — who may read an order, and what of it", () => {
     const legacy = { ...fullOrder, userId: undefined };
 
     const askLegacy = async (user) => {
-      Order.findById.mockResolvedValue({ ...legacy, toObject: () => legacy });
+      findByIdReturns({ ...legacy, toObject: () => legacy });
       const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" }, user });
       await orderController.getOrder(req, res, jest.fn());
       return res;
@@ -355,7 +363,7 @@ describe("getOrder — who may read an order, and what of it", () => {
   });
 
   it("returns 404 for a non-existent order", async () => {
-    Order.findById.mockResolvedValue(null);
+    Order.findById.mockReturnValue({ select: () => Promise.resolve(null) });
 
     const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0ff" } });
     await orderController.getOrder(req, res, jest.fn());

@@ -4,6 +4,7 @@ const PaymentEventLog = require("../models/paymentEventLog.model");
 const { round2 } = require("../utils/money");
 const { convertLineItems } = require("../utils/orderItems");
 const { calculateTax } = require("../services/salesTax");
+const { guestFieldsFor, checkoutEvidence } = require("../services/guestOrder");
 const { Resend } = require("resend");
 const { paymentReceiptEmail, adminNewOrderEmail } = require("../services/emailTemplates");
 const { EmailConfig } = require("../models/emailConfig.model");
@@ -354,6 +355,11 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
   // this function and the conversion helper have fallen out of sync with
   // each other, which is worth knowing about immediately rather than
   // shipping an order silently missing part of its own total.
+  // A guest gets a token instead of a user id, and the plaintext is returned
+  // to the caller because the receipt email is the only place it can be sent.
+  const guest = guestFieldsFor({ user: req.user });
+  const evidence = checkoutEvidence(req);
+
   const converted = convertLineItems(line_items);
   if (converted.unrecognized.length) {
     console.error(
@@ -363,6 +369,8 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
   }
 
   const order = {
+    ...guest.fields,
+    ...evidence,
     line_items,
     items: converted.items,
     shippingCents: converted.shippingCents,
@@ -373,8 +381,9 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
     taxRate,
     subtotalCents: converted.subtotalCents,
     totalCents: converted.totalCents,
-    // Set by verifyToken on the authenticated checkout routes. Undefined on
-    // the admin-created Manual path, which has no customer session.
+    // Set by optionalAuth when the customer is signed in. Undefined for a
+    // guest, and on the admin-created Manual path which has no session at
+    // all — which is why ownership can never be userId alone.
     userId: req.user?.id,
     name,
     email,
@@ -398,5 +407,5 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
     )
   );
 
-  return { order, totalPrice };
+  return { order, totalPrice , guestToken: guest.token };
 };

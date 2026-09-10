@@ -76,6 +76,23 @@ const OrderSchema = new Schema(
     // as evidence in a chargeback, since it only proves someone typed it.
     // Absent on orders predating this field and on admin-created Manual orders.
     userId: { type: String, index: true },
+
+    // Placed without an account. The order is identified by a token in a link
+    // instead of by a Clerk user id.
+    guest: { type: Boolean, default: false },
+
+    // The SHA-256 of that token, never the token. select:false keeps it out of
+    // every query that does not ask, but the hashing is what protects it — see
+    // utils/accessToken.js for why one is not a substitute for the other.
+    guestAccessToken: { type: String, select: false },
+    guestTokenExpiresAt: Date,
+
+    // Chargeback evidence. The IP is a salted hash: the question a chargeback
+    // asks is "did these two orders come from the same place", which a digest
+    // answers, and the raw value would only add the ability to tell where the
+    // customer lives.
+    checkoutIpHash: { type: String, select: false },
+    userAgent: { type: String, select: false },
     name: String,
     // Contact address for this order's receipt. Deliberately still the form
     // value: customers legitimately send a receipt somewhere other than their
@@ -234,6 +251,10 @@ OrderSchema.index({ boaTransactionUuid: 1 }, { unique: true, sparse: true });
 // different orders if a reference number were ever resolved wrong. sparse,
 // because Manual orders and orders still pending never had a bank transaction.
 OrderSchema.index({ boaTransactionId: 1 }, { unique: true, sparse: true });
+// Claiming guest orders into an account after sign-in looks orders up by
+// email and guest flag.
+OrderSchema.index({ email: 1, guest: 1 });
+
 OrderSchema.index({ email: 1, paid: 1 });
 // Two orders sharing a tracking number means one parcel, two answers. Sparse
 // because most orders have not shipped yet, and those must not all collide on

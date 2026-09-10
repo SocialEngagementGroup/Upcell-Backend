@@ -68,8 +68,31 @@ const orderLookupLimiter = rateLimit({
   message: { error: "Too many requests. Please try again later." },
 });
 
+// Checkout with no account at all.
+//
+// Tighter than checkoutLimiter because there is no Clerk token to slow an
+// attacker down and every attempt reserves stock for twenty minutes. Without
+// this, anonymous checkout is a way to take the whole catalogue off sale from
+// one laptop.
+//
+// Five an hour is generous for a person — nobody buys five phones an hour by
+// accident — and useless for a script.
+const guestCheckoutLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Only the anonymous ones count. A signed-in customer is already limited by
+  // checkoutLimiter and identified by their Clerk id.
+  skip: (req) => Boolean(req.user?.id),
+  message: {
+    error: "Too many checkout attempts. Please sign in, or try again later.",
+  },
+});
+
 module.exports = {
   publicFormLimiter,
+  guestCheckoutLimiter,
   checkoutLimiter,
   analyticsLimiter,
   cartLimiter,

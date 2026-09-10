@@ -24,6 +24,7 @@
  * @returns {object} an allowlisted view — never the document
  */
 const { trackingUrlFor } = require("./carrierTracking");
+const { guestTokenOpens } = require("../services/guestOrder");
 
 function toCustomerOrder(order) {
   if (!order) return null;
@@ -123,8 +124,15 @@ function toCustomerOrder(order) {
  *      matching on it would let anyone claim an order by signing up with the
  *      right email and never proving it.
  */
-function ownsOrder(user, order) {
-  if (!user || !order) return false;
+function ownsOrder(user, order, guestToken) {
+  if (!order) return false;
+
+  // A guest has no account at all, so the token in their link is the only
+  // proof there is. Checked first because it is the only arm that works
+  // without a signed-in user.
+  if (guestTokenOpens(order, guestToken)) return true;
+
+  if (!user) return false;
   if (user.role === "admin") return true;
   if (order.userId && user.id) return String(order.userId) === String(user.id);
   if (order.userId) return false;
