@@ -82,7 +82,32 @@ const RefundRequestSchema = new Schema(
       color: String,
       imei: String,
       serial: String,
+      // Set by the server, never posted: true only when the number read off the
+      // device matched an identifier the order recorded. A device the order
+      // never identified stays false, because "we could not check" is not the
+      // same as "we checked and it was right" — and it is the second one a
+      // chargeback argument needs.
       imeiVerified: { type: Boolean, default: false },
+      // What the listing said when the customer bought it. Copied onto the
+      // request rather than read from the catalogue later, because the listing
+      // can be re-graded and relisted while this return is still open — and
+      // the comparison that decides a regrade is against what was actually
+      // sold, not against what the listing says today.
+      gradeAtSale: String,
+      batteryHealthAtSale: Number,
+      // What the order says was sold, snapshotted when the customer asks. Lets
+      // the inspection screen show the expected number without loading the
+      // order, and survives the catalogue record being edited or deleted
+      // afterwards.
+      expected: [
+        {
+          _id: false,
+          productId: String,
+          name: String,
+          imei: String,
+          serial: String,
+        },
+      ],
     },
 
     // The money, itemised.
@@ -106,6 +131,18 @@ const RefundRequestSchema = new Schema(
       offeredAmount: Number,
       offerExpiresAt: Date,
       finalAmount: Number,
+    },
+
+    // Which 30 days applied, and where day one came from. Stored rather than
+    // recomputed, because a staff override is a decision somebody made and the
+    // order it was made against can change afterwards.
+    window: {
+      // DELIVERY | SHIP_PLUS_3 | STAFF_OVERRIDE
+      startedFrom: String,
+      startDate: Date,
+      expiresAt: Date,
+      overrideBy: String,
+      overrideNote: String,
     },
 
     // The authorisation itself: when it was issued and when it lapses.
@@ -168,7 +205,17 @@ const RefundRequestSchema = new Schema(
           note: String,
         },
       ],
-      // A | B | C | FAIL
+      // The two axes, and the grade that falls out of them.
+      //
+      // batteryHealth is recorded because the next buyer needs it. It can
+      // never move the grade on a return or justify a deduction: battery
+      // decline is normal wear, and charging for it would be charging a
+      // customer for physics.
+      batteryHealth: Number,
+      cosmeticGrade: String,
+      // The lower of the battery band and the cosmetic grade.
+      finalGrade: String,
+      // Kept for requests inspected before the two-axis scale existed.
       grade: String,
       photos: [
         {
@@ -227,6 +274,12 @@ const RefundRequestSchema = new Schema(
     // Not a session — it grants exactly this return and never confers admin.
     // See src/utils/accessToken.js.
     accessToken: { type: String, select: false },
+
+    // Set by hand when a customer disputes a return, by any route — email,
+    // a chargeback, a solicitor's letter. It freezes the inspection photos
+    // past their 90 days, because the moment they matter most is the moment
+    // somebody is arguing about what arrived.
+    disputed: { type: Boolean, default: false },
 
     // Append-only. Never edited, never deleted.
     //

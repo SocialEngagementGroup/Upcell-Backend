@@ -14,6 +14,10 @@ const {
   RETURN_REASONS,
   RETURN_REASON_CODES,
 } = require("../constants/returnReasons");
+const {
+  resolveWindowStart,
+  validateOverride,
+} = require("../services/returnWindow");
 const { issueRma } = require("../services/returnAuthorisation");
 const {
   validateShipment,
@@ -25,6 +29,8 @@ const {
 } = require("../services/returnShipping");
 const {
   validateInspection,
+  batteryHealthFrom,
+  cosmeticGradeFrom,
   suggestOutcome,
   suggestDisposition,
   gradeFrom,
@@ -40,10 +46,17 @@ const { createAccessToken, tokensMatch } = require("../utils/accessToken");
 const { startClock, syncClockToStatus, isOverdue, hoursRemaining } = require("../services/returnSla");
 const {
   validateDisposition,
-  restockDevice,
+  relistDevice,
   internalRecordFor,
 } = require("../services/returnDisposition");
-const { DISPOSITIONS, DISPOSITION_TYPES, restocks } = require("../constants/dispositions");
+const {
+  DISPOSITIONS,
+  DISPOSITION_TYPES,
+  REQUIRES_REASON,
+  relists,
+  sourceAllows,
+} = require("../constants/dispositions");
+const { GRADES } = require("../constants/grading");
 const SingleVariation = require("../models/singleVariation.model");
 const { buildReturnMetrics, groupReturns, toCsv } = require("../services/returnReporting");
 const {
@@ -89,6 +102,43 @@ function sendEmail(to, built) {
 
 // The names the customer recognises, for the items they chose — the ids mean
 // nothing to them.
+// Which physical devices the order says are coming back.
+//
+// Reads the typed items array first and falls back to the legacy line_items,
+// because both shapes are live: orders written since the migration have items,
+// older ones have only line_items, and a return can be opened against either.
+// Anything with no identifier recorded is still listed — the inspection screen
+// has to be able to say "this order never recorded an IMEI", which is a
+// different thing from showing nothing at all.
+const soldDevicesFor = (order, itemIds) => {
+  const wanted = new Set((itemIds || []).map(String));
+
+  const fromItems = (order.items || [])
+    .filter((item) => wanted.has(String(item?.productId)))
+    .map((item) => ({
+      productId: String(item.productId),
+      name: item.name,
+      imei: item.imei || undefined,
+      serial: item.serialNumber || undefined,
+    }));
+
+  if (fromItems.length) return fromItems;
+
+  return (order.line_items || [])
+    .filter((line) =>
+      wanted.has(String(line?.price_data?.product_data?.metadata?.productId)),
+    )
+    .map((line) => {
+      const productData = line.price_data.product_data;
+      return {
+        productId: String(productData.metadata.productId),
+        name: productData.name,
+        imei: productData.metadata.imei || undefined,
+        serial: productData.metadata.serialNumber || undefined,
+      };
+    });
+};
+
 const namesForItems = (order, itemIds) => {
   const wanted = new Set((itemIds || []).map(String));
   return (order.line_items || [])
@@ -213,11 +263,11 @@ async function getRefundableItems(req, res, next) {
       items,
       reasons,
       estimate,
-      // Only true for a change of mind now. It used to say this for every
-      // return, including a device that would not power on.
-      feeNotice: reasonCode && !returnPolicyFor(reasonCode).restockingFee
-        ? "No restocking fee applies to this return, and UpCell pays the return postage. The sales tax you paid is refunded in full."
-        : "A 15% restocking fee applies to change-of-mind returns, and you pay the return postage. The sales tax you paid on returned items is refunded; shipping is not.",
+      // One sentence, true for every reason. It used to vary, and before that
+      // it promised a 15% fee to everyone including customers returning a
+      // device that would not power on.
+      feeNotice:
+        "Returns are free — we pay the postage both ways and there is no restocking fee. The sales tax you paid on returned items comes back in full; original shipping does not.",
     });
   } catch (error) {
     next(error);
@@ -272,6 +322,10 @@ async function createRefundRequest(req, res, next) {
         reason,
         reasonCode,
         reasonCategory: reasonCode ? reasonCategory(reasonCode) : null,
+        // What should be arriving, taken from the order now rather than looked
+        // up at inspection: the catalogue record behind an order line can be
+        // edited or deleted in the weeks a return takes to come back.
+        device: { expected: soldDevicesFor(order, selection.itemIds) },
         // Derived from the reason, not posted. It decides who pays the postage
         // and whether the 15% fee applies, so it is not the customer's to set.
         faultAttribution: reasonCode ? faultAttributionFor(reasonCode) : null,
@@ -798,8 +852,17 @@ function getInspectionChecklist(req, res) {
       critical: Boolean(item.critical),
       onlyWhenFaultClaimed: Boolean(item.onlyWhenFaultClaimed),
       drivesDisposition: Boolean(item.drivesDisposition),
+      // Two checks do not answer with pass or fail. Sent so the bench form
+      // knows to draw a number box and a grade list instead of three buttons
+      // — without these the page cannot collect what the server demands.
+      measured: Boolean(item.measured),
+      graded: Boolean(item.graded),
+      neverDeducts: Boolean(item.neverDeducts),
     })),
     photoGuidance: PHOTO_GUIDANCE,
+    // The scale the graded check answers on, from the same constant the
+    // grading service reads.
+    grades: Object.values(GRADES),
   });
 }
 
@@ -839,12 +902,22 @@ async function submitInspection(req, res, next) {
       });
     }
 
+    // What the listing said when it sold. The regrade compares against this,
+    // not against what the listing says today — it can have been re-graded and
+    // relisted while this return was still in the post.
+    const gradeAtSale = request.device?.gradeAtSale;
+
     const outcome = suggestOutcome({
       checklist: validation.checklist,
       reasonCode: request.reasonCode,
       faultClaimed,
+      gradeAtSale,
     });
-    const disposition = suggestDisposition({ checklist: validation.checklist, outcome: outcome.outcome });
+    const disposition = suggestDisposition({
+      checklist: validation.checklist,
+      outcome: outcome.outcome,
+      gradeAtSale,
+    });
     const grade = gradeOverride || gradeFrom(validation.checklist);
 
     request.inspection = {
@@ -852,6 +925,10 @@ async function submitInspection(req, res, next) {
       startedAt: request.inspection?.startedAt || new Date(),
       completedAt: new Date(),
       checklist: validation.checklist,
+      // Recorded for the relisting and for reporting. Never a deduction.
+      batteryHealth: batteryHealthFrom(validation.checklist),
+      cosmeticGrade: cosmeticGradeFrom(validation.checklist),
+      finalGrade: grade,
       grade,
       photos: stampPurgeDates(photos || []),
       findings,
@@ -967,9 +1044,25 @@ async function offerRevisedRefund(req, res, next) {
     const request = await RefundRequest.findById(req.params.id || null).select("+accessToken");
     if (!request) return res.status(404).json({ error: "Refund request not found" });
 
-    if (!["InInspection", "RevisedOffer"].includes(request.status)) {
+    if (request.status !== "InInspection") {
       return res.status(400).json({
         error: `A revised offer can only be made during inspection. This return is ${request.status}.`,
+      });
+    }
+
+    // One offer per return.
+    //
+    // A second one re-opens a number the customer has already been given five
+    // days to think about, and the accept link in their inbox would still point
+    // at the first amount. If an offer was wrong, reject the return and let the
+    // customer decide against the honest position rather than negotiating by
+    // email.
+    if (request.refundBreakdown?.offeredAmount != null) {
+      return res.status(409).json({
+        error:
+          "This return has already been offered a revised refund. Wait for the customer to answer, or reject it.",
+        offeredAmount: request.refundBreakdown.offeredAmount,
+        offerExpiresAt: request.refundBreakdown.offerExpiresAt,
       });
     }
 
@@ -1009,7 +1102,7 @@ async function offerRevisedRefund(req, res, next) {
     // an email the customer already has open.
     if (!request.accessToken) request.accessToken = createAccessToken();
 
-    if (request.status !== "RevisedOffer") {
+    {
       const moved = moveStatus(request, "RevisedOffer", {
         actor: req.user?.email || req.user?.id,
         actorType: "staff",
@@ -1017,13 +1110,6 @@ async function offerRevisedRefund(req, res, next) {
         meta: { offeredAmount: offer.offeredAmount, totalDeducted: offer.totalDeducted },
       });
       if (!moved.ok) return res.status(400).json({ error: moved.error, allowed: moved.allowed });
-    } else {
-      recordEvent(request, {
-        event: "revised_offer_updated",
-        actor: req.user?.email || req.user?.id,
-        actorType: "staff",
-        meta: { offeredAmount: offer.offeredAmount },
-      });
     }
 
     await request.save();
@@ -1445,15 +1531,51 @@ async function getShipBackQueue(req, res, next) {
  * inspection checklist is: the list staff choose from and the list the server
  * accepts have to be one list.
  */
-function getDispositions(req, res) {
-  return res.status(200).json({
-    dispositions: DISPOSITION_TYPES.map((type) => ({
-      type,
-      label: DISPOSITIONS[type].label,
-      description: DISPOSITIONS[type].description,
-      restocks: DISPOSITIONS[type].restocks,
-    })),
-  });
+async function getDispositions(req, res, next) {
+  try {
+    // Optional, and only used to answer "is the supplier route open for this
+    // one". Asked here rather than left for the save to refuse, so a staff
+    // member does not pick a route, type a reason, and only then be told the
+    // device came from a member of the public.
+    let acquisitionSource;
+    if (req.query?.requestId) {
+      const request = await RefundRequest.findById(req.query.requestId)
+        .select("itemIds")
+        .lean();
+      const productId = request?.itemIds?.[0];
+      if (productId) {
+        const unit = await SingleVariation.findById(productId)
+          .select("acquisitionSource")
+          .lean();
+        acquisitionSource = unit?.acquisitionSource;
+      }
+    }
+
+    return res.status(200).json({
+      dispositions: DISPOSITION_TYPES.map((type) => ({
+        type,
+        label: DISPOSITIONS[type].label,
+        description: DISPOSITIONS[type].description,
+        // What the form has to do about each: put the unit back on sale, ask for
+        // a new price, ask for a reason, or be unavailable for a device bought
+        // from a member of the public.
+        relists: Boolean(DISPOSITIONS[type].relists),
+        reprices: Boolean(DISPOSITIONS[type].reprices),
+        requiresReason: REQUIRES_REASON.includes(type),
+        requiresBulkSource: Boolean(DISPOSITIONS[type].requiresBulkSource),
+        // Only decided when a request was named. Undefined means "not asked",
+        // which the form treats as available — the same permissive default the
+        // server applies to a unit whose source was never recorded.
+        ...(req.query?.requestId
+          ? { unavailableReason: sourceAllows(type, acquisitionSource).error }
+          : {}),
+      })),
+      grades: Object.values(GRADES),
+      acquisitionSource,
+    });
+  } catch (error) {
+    return next(error);
+  }
 }
 
 /**
@@ -1466,7 +1588,7 @@ function getDispositions(req, res) {
  */
 async function recordDisposition(req, res, next) {
   try {
-    const { type, reason, grade, imei } = req.body || {};
+    const { type, reason, grade, imei, price } = req.body || {};
 
     const request = await RefundRequest.findById(req.params.id || null);
     if (!request) return res.status(404).json({ error: "Refund request not found" });
@@ -1479,27 +1601,44 @@ async function recordDisposition(req, res, next) {
       });
     }
 
-    const validation = validateDisposition({ type, reason, grade, imei });
+    // Where the unit came from decides whether the supplier route is even on
+    // offer. Read from the catalogue rather than the request, because it is a
+    // fact about the device rather than about this return.
+    const productId = request.itemIds?.[0];
+    const unit = productId
+      ? await SingleVariation.findById(productId).select("acquisitionSource").lean()
+      : null;
+
+    const validation = validateDisposition({
+      type,
+      reason,
+      // Falls back to what inspection worked out, so staff do not retype it.
+      grade: grade || request.inspection?.finalGrade,
+      imei,
+      price,
+      acquisitionSource: unit?.acquisitionSource,
+    });
     if (!validation.ok) return res.status(400).json({ error: validation.error });
 
     const { disposition } = validation;
 
-    let restocked = null;
-    if (restocks(disposition.type)) {
-      restocked = await restockDevice({
+    let relisted = null;
+    if (relists(disposition.type)) {
+      relisted = await relistDevice({
         SingleVariation,
-        productId: request.itemIds?.[0],
-        dispositionType: disposition.type,
+        productId,
+        disposition,
       });
     }
 
     request.disposition = {
       type: disposition.type,
-      grade: disposition.grade || request.inspection?.grade,
+      grade: disposition.grade,
+      relistedAt: relisted?.ok ? new Date() : undefined,
       // The internal record a person acts on. Kept on the request rather than
       // in a second collection: the grade, IMEI and reason already live here,
       // and a separate table is a second place for the same facts to go stale.
-      inventoryItemId: restocked?.ok ? String(request.itemIds?.[0]) : undefined,
+      inventoryItemId: relisted?.ok ? String(productId) : undefined,
       decidedBy: req.user?.email || req.user?.id,
       decidedAt: new Date(),
     };
@@ -1515,8 +1654,9 @@ async function recordDisposition(req, res, next) {
         ...internalRecordFor(request, disposition),
         // Said plainly either way. A restock that silently failed leaves a
         // device off sale that everyone believes is on it.
-        restocked: restocked ? restocked.ok : false,
-        restockError: restocked && !restocked.ok ? restocked.error : undefined,
+        relisted: relisted ? relisted.ok : false,
+        repriced: relisted?.repriced || false,
+        relistError: relisted && !relisted.ok ? relisted.error : undefined,
       },
     });
 
@@ -1528,16 +1668,16 @@ async function recordDisposition(req, res, next) {
       action: "refund_request.disposition_recorded",
       targetType: "RefundRequest",
       targetId: String(request._id),
-      metadata: { type: disposition.type, grade: request.disposition.grade, restocked: restocked?.ok },
+      metadata: { type: disposition.type, grade: request.disposition.grade, relisted: relisted?.ok },
     }).catch(() => {});
 
     return res.status(200).json({
       ok: true,
       disposition: request.disposition,
-      restocked: restocked ? restocked.ok : false,
+      relisted: relisted ? relisted.ok : false,
       // Surfaced, not swallowed: staff have to know if the shelf did not change.
-      warning: restocked && !restocked.ok ? restocked.error : undefined,
-      internalRecord: restocks(disposition.type) ? undefined : internalRecordFor(request, disposition),
+      warning: relisted && !relisted.ok ? relisted.error : undefined,
+      internalRecord: relists(disposition.type) ? undefined : internalRecordFor(request, disposition),
     });
   } catch (error) {
     return next(error);
@@ -1688,6 +1828,127 @@ async function exportReturnsCsv(req, res, next) {
   }
 }
 
+/**
+ * Moves the date the customer's 30 days started from.
+ *
+ * Needed because the record is sometimes wrong: a carrier marks a parcel
+ * delivered when it reaches a depot, or never marks it at all, and the
+ * customer has an email saying when it actually turned up. Staff can see that
+ * and the system cannot.
+ *
+ * The note is not paperwork. This decides whether a return is inside the
+ * window, so it moves money — and with two or three staff able to do it, an
+ * unexplained override is indistinguishable from a favour.
+ */
+async function overrideReturnWindow(req, res, next) {
+  try {
+    const { startDate, note } = req.body || {};
+
+    const request = await RefundRequest.findById(req.params.id || null);
+    if (!request)
+      return res.status(404).json({ error: "Refund request not found" });
+
+    const validation = validateOverride({
+      startDate,
+      note,
+      by: req.user?.email || req.user?.id,
+    });
+    if (!validation.ok)
+      return res.status(400).json({ error: validation.error });
+
+    const order = await Order.findById(request.orderId);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+
+    const previous = request.window?.startDate;
+    const window = resolveWindowStart(order, { override: validation.override });
+
+    request.window = {
+      startedFrom: window.startedFrom,
+      startDate: window.startDate,
+      expiresAt: window.expiresAt,
+      overrideBy: window.overrideBy,
+      overrideNote: window.overrideNote,
+    };
+
+    recordEvent(request, {
+      event: "window_overridden",
+      actor: req.user?.email || req.user?.id,
+      actorType: "staff",
+      meta: {
+        from: previous,
+        to: window.startDate,
+        note: window.overrideNote,
+      },
+    });
+
+    await request.save();
+
+    AuditLog.create({
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      action: "refund_request.window_overridden",
+      targetType: "RefundRequest",
+      targetId: String(request._id),
+      metadata: { startDate: window.startDate, note: window.overrideNote },
+    }).catch(() => {});
+
+    return res.status(200).json({ ok: true, window: request.window });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+/**
+ * Freezes a return's inspection photos, or lets them go.
+ *
+ * A chargeback, or a solicitor's letter, arrives long after the case looks
+ * closed and the ninety days are nearly up. This is the switch that keeps the
+ * evidence, and it outranks every other rule the purge applies.
+ *
+ * Nothing is deleted when the hold is lifted either — the photos simply become
+ * eligible again on the next run, with their original purge dates intact.
+ */
+async function setDisputeHold(req, res, next) {
+  try {
+    const { disputed, reason } = req.body || {};
+
+    const request = await RefundRequest.findById(req.params.id || null);
+    if (!request)
+      return res.status(404).json({ error: "Refund request not found" });
+
+    const was = Boolean(request.disputed);
+    if (was === Boolean(disputed)) {
+      return res.status(200).json({ ok: true, disputed: was, unchanged: true });
+    }
+
+    request.disputed = Boolean(disputed);
+
+    recordEvent(request, {
+      event: disputed ? "dispute_hold_applied" : "dispute_hold_lifted",
+      actor: req.user?.email || req.user?.id,
+      actorType: "staff",
+      meta: { reason: reason ? String(reason).trim() : undefined },
+    });
+
+    await request.save();
+
+    AuditLog.create({
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      action: disputed
+        ? "refund_request.dispute_hold_applied"
+        : "refund_request.dispute_hold_lifted",
+      targetType: "RefundRequest",
+      targetId: String(request._id),
+      metadata: { reason },
+    }).catch(() => {});
+
+    return res.status(200).json({ ok: true, disputed: request.disputed });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 module.exports = {
   getRefundableItems,
   createRefundRequest,
@@ -1709,4 +1970,6 @@ module.exports = {
   recordDisposition,
   getReturnsReport,
   exportReturnsCsv,
+  overrideReturnWindow,
+  setDisputeHold,
 };

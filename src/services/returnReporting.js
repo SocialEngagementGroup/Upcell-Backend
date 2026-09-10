@@ -10,7 +10,7 @@
 // database, and the arithmetic — especially the rate denominators, which are
 // the easiest thing in reporting to get quietly wrong — stays readable.
 
-const { PHOTO_HOLD_STATUSES } = require("../constants/returnStatus");
+const { photosAreHeld } = require("../constants/returnStatus");
 const { reasonCategory } = require("../constants/returnReasons");
 
 const round1 = (value) => Math.round(value * 10) / 10;
@@ -120,7 +120,9 @@ function buildReturnMetrics({ requests = [], unitsSold = 0 } = {}) {
     dispositionedValue: round2(recoveredValue),
     // Photos still held because a case is open, so the retention policy can be
     // reported on rather than assumed.
-    underDisputeHold: requests.filter((request) => PHOTO_HOLD_STATUSES.includes(request.status)).length,
+    // The same rule the purge job applies, so the number matches what is
+    // actually still in Cloudinary rather than a narrower guess at it.
+    underDisputeHold: requests.filter((request) => photosAreHeld(request).held).length,
   };
 }
 

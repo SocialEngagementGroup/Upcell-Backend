@@ -439,7 +439,23 @@ async function saveVariants(parentId, variantDocs) {
     // the same reason the parent's does: a slug that changes is a URL that
     // breaks, and anything already linking to it stops working.
     const { slug, ...changes } = doc;
-    await SingleVariation.updateOne({ _id: match._id }, { $set: changes });
+
+    // An emptied IMEI box means the admin took the number off this unit, and
+    // $set ignores undefined — without this the old number would stay on the
+    // record while the form showed it gone, and the unique index would keep
+    // holding it against the device it was moved to.
+    const unset = {};
+    for (const key of ["imei", "serialNumber"]) {
+      if (changes[key] === undefined) {
+        unset[key] = "";
+        delete changes[key];
+      }
+    }
+
+    await SingleVariation.updateOne(
+      { _id: match._id },
+      Object.keys(unset).length ? { $set: changes, $unset: unset } : { $set: changes }
+    );
     saved.push({ ...match, ...changes });
   }
 
@@ -564,6 +580,10 @@ async function createProduct(req, res, next) {
           categoryId: categoryId || undefined,
           storage: variant.storage,
           color: variant.color,
+          // Which physical device this row is. Always written, even when empty,
+          // so saveVariants can tell "cleared by the admin" from "not sent".
+          imei: variant.imei,
+          serialNumber: variant.serialNumber,
           price: variant.price,
           discountPrice: variant.discountPrice,
           originalPrice: variant.originalPrice,
@@ -598,6 +618,21 @@ async function createProduct(req, res, next) {
 
     res.status(200).json(newProduct);
   } catch (error) {
+    // The unique index on imei/serialNumber rejected a device that is already
+    // in the catalogue under another product. The raw driver error names the
+    // index and the value but reads as a crash; an admin needs to know which
+    // number to go and look for.
+    if (error?.code === 11000) {
+      const field = Object.keys(error.keyPattern || {})[0];
+      if (field === "imei" || field === "serialNumber") {
+        const label = field === "imei" ? "IMEI" : "serial number";
+        const value = error.keyValue?.[field];
+        return res.status(409).json({
+          error: `The ${label} ${value} is already on another unit in the catalogue. One device can only be listed once — find that unit and remove it, or check the number.`,
+        });
+      }
+    }
+
     next(error);
   }
 }

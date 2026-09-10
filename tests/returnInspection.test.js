@@ -11,12 +11,17 @@ const {
   PHOTO_RETENTION_DAYS,
 } = require("../src/constants/inspectionChecklist");
 
-// Every check answered "pass", which is the as-described case.
-const allPass = (overrides = {}) =>
-  CHECKLIST_ITEMS.map((item) => ({
-    key: item.key,
-    result: overrides[item.key] || "pass",
-  }));
+// Every check answered, everything as described.
+// Two items are not pass/fail: battery health is a number and cosmetic
+// condition is a band. A helper that gets this wrong makes every test below
+// test the wrong thing.
+const answerFor = (item, overrides = {}) => {
+  if (item.measured) return { key: item.key, value: overrides[item.key] ?? 92 };
+  if (item.graded) return { key: item.key, grade: overrides[item.key] || "EXCELLENT" };
+  return { key: item.key, result: overrides[item.key] || "pass" };
+};
+
+const allPass = (overrides = {}) => CHECKLIST_ITEMS.map((item) => answerFor(item, overrides));
 
 const photos = (count = REQUIRED_PHOTO_COUNT) =>
   Array.from({ length: count }, (_, index) => ({
@@ -106,7 +111,7 @@ describe("suggestOutcome", () => {
   it("checks the lock before anything else", () => {
     // A locked device that is also scuffed is still a lock problem first.
     const result = suggestOutcome({
-      checklist: allPass({ activation_lock: "fail", body_condition: "fail" }),
+      checklist: allPass({ activation_lock: "fail", cosmetic_grade: "FAIR" }),
     });
 
     expect(result.outcome).toBe("ACTION_REQUIRED");
@@ -140,49 +145,97 @@ describe("suggestOutcome", () => {
     expect(result.outcome).toBe("FULL_REFUND");
   });
 
-  it("offers less for a device in worse condition than described", () => {
-    const result = suggestOutcome({ checklist: allPass({ body_condition: "fail" }) });
+  it("offers less when the device came back a grade lower than it sold at", () => {
+    const result = suggestOutcome({
+      checklist: allPass({ cosmetic_grade: "GOOD" }),
+      gradeAtSale: "EXCELLENT",
+    });
 
     expect(result.outcome).toBe("REVISED_OFFER");
-    expect(result.reason).toMatch(/body_condition/);
+    expect(result.reason).toMatch(/GOOD against EXCELLENT/);
+  });
+
+  it("refunds in full when it came back at the grade it sold at", () => {
+    const result = suggestOutcome({
+      checklist: allPass({ cosmetic_grade: "GOOD" }),
+      gradeAtSale: "GOOD",
+    });
+
+    expect(result.outcome).toBe("FULL_REFUND");
+  });
+
+  it("refunds in full when only the battery fell", () => {
+    // The rule the policy turns on. Sold at 92%, back at 81%, looking the
+    // same: nothing is deducted and nothing is re-graded.
+    const result = suggestOutcome({
+      checklist: allPass({ battery_health: 81, cosmetic_grade: "EXCELLENT" }),
+      gradeAtSale: "EXCELLENT",
+    });
+
+    expect(result.outcome).toBe("FULL_REFUND");
   });
 
   it("refunds in full when the device is as described", () => {
     expect(suggestOutcome({ checklist: allPass() }).outcome).toBe("FULL_REFUND");
   });
 
-  it("does not treat a broken seal as a reason to pay less", () => {
-    // Opening the box is what a return is. It changes where the device goes,
-    // not what the customer is owed.
-    expect(suggestOutcome({ checklist: allPass({ seal_intact: "fail" }) }).outcome)
-      .toBe("FULL_REFUND");
+  it("offers less when the device no longer works as described", () => {
+    const result = suggestOutcome({ checklist: allPass({ screen_touch: "fail" }) });
+
+    expect(result.outcome).toBe("REVISED_OFFER");
   });
 });
 
 describe("suggestDisposition", () => {
-  it("puts a sealed device back into new stock", () => {
-    expect(suggestDisposition({ checklist: allPass(), outcome: "FULL_REFUND" }).type)
-      .toBe("RESTOCK_NEW");
+  it("relists a device that came back as it left", () => {
+    // The common case, and why per-unit records make this simple: the device
+    // goes back onto its own listing at its own price.
+    const result = suggestDisposition({
+      checklist: allPass(), outcome: "FULL_REFUND", gradeAtSale: "EXCELLENT",
+    });
+
+    expect(result).toMatchObject({ type: "RELIST", regraded: false });
+  });
+
+  it("relists a device that came back a grade lower, re-graded", () => {
+    const result = suggestDisposition({
+      checklist: allPass({ cosmetic_grade: "GOOD" }),
+      outcome: "REVISED_OFFER",
+      gradeAtSale: "EXCELLENT",
+    });
+
+    expect(result).toMatchObject({ type: "RELIST_REGRADED", grade: "GOOD", regraded: true });
+  });
+
+  it("relists unchanged when only the battery fell", () => {
+    const result = suggestDisposition({
+      checklist: allPass({ battery_health: 81 }),
+      outcome: "FULL_REFUND",
+      gradeAtSale: "EXCELLENT",
+    });
+
+    expect(result.type).toBe("RELIST");
+    expect(result.regraded).toBe(false);
   });
 
   it("sends a dead device back to the supplier", () => {
     const result = suggestDisposition({
-      checklist: allPass({ seal_intact: "fail", powers_on: "fail" }),
+      checklist: allPass({ powers_on: "fail" }),
       outcome: "REVISED_OFFER",
+      gradeAtSale: "EXCELLENT",
     });
 
     expect(result.type).toBe("RETURN_TO_SUPPLIER");
   });
 
-  it("marks an opened but working device OPEN_BOX", () => {
-    // Recorded distinctly even though it routes to wholesale today, so where
-    // these go is a policy change later rather than a rebuild.
+  it("scraps a cracked device", () => {
     const result = suggestDisposition({
-      checklist: allPass({ seal_intact: "fail" }),
-      outcome: "FULL_REFUND",
+      checklist: allPass({ cosmetic_grade: "FAIL" }),
+      outcome: "REVISED_OFFER",
+      gradeAtSale: "EXCELLENT",
     });
 
-    expect(result.type).toBe("OPEN_BOX");
+    expect(result.type).toBe("SCRAP");
   });
 
   it("suggests nothing for a device being sent back to the customer", () => {
@@ -191,21 +244,17 @@ describe("suggestDisposition", () => {
 });
 
 describe("gradeFrom", () => {
-  it("grades a perfect device A", () => {
-    expect(gradeFrom(allPass())).toBe("A");
+  it("is the cosmetic grade when the battery is better", () => {
+    expect(gradeFrom(allPass({ battery_health: 95, cosmetic_grade: "GOOD" }))).toBe("GOOD");
   });
 
-  it("grades one cosmetic problem B", () => {
-    expect(gradeFrom(allPass({ body_condition: "fail" }))).toBe("B");
+  it("is the battery band when that is the worse of the two", () => {
+    expect(gradeFrom(allPass({ battery_health: 82, cosmetic_grade: "EXCELLENT" }))).toBe("FAIR");
   });
 
-  it("grades two cosmetic problems C", () => {
-    expect(gradeFrom(allPass({ body_condition: "fail", accessories: "fail" }))).toBe("C");
-  });
-
-  it("grades any functional problem C", () => {
-    expect(gradeFrom(allPass({ screen_touch: "fail" }))).toBe("C");
-    expect(gradeFrom(allPass({ battery_health: "fail" }))).toBe("C");
+  it("is Excellent only when both axes are", () => {
+    expect(gradeFrom(allPass({ battery_health: 95, cosmetic_grade: "EXCELLENT" })))
+      .toBe("EXCELLENT");
   });
 
   it("fails a device that is dead, wet, or not the right one", () => {
@@ -214,8 +263,8 @@ describe("gradeFrom", () => {
     }
   });
 
-  it("does not downgrade for a broken seal", () => {
-    expect(gradeFrom(allPass({ seal_intact: "fail" }))).toBe("A");
+  it("fails a battery under 80%, which is not listable at any grade", () => {
+    expect(gradeFrom(allPass({ battery_health: 74 }))).toBe("FAIL");
   });
 });
 

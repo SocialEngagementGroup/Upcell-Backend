@@ -254,7 +254,7 @@ describe("autoDeclineStaleOffers", () => {
 });
 
 describe("purgeInspectionPhotos", () => {
-  const { purgeInspectionPhotos } = require("../src/services/returnJobs");
+  const { purgeInspectionPhotos, photosAreHeld } = require("../src/services/returnJobs");
 
   const photo = (id, purgeAfter) => ({ publicId: id, url: `https://cdn/${id}.jpg`, purgeAfter });
 
@@ -380,5 +380,131 @@ describe("purgeInspectionPhotos", () => {
     await purgeInspectionPhotos({ RefundRequest: modelReturning([doc]), destroyAsset: destroys(), now });
 
     expect(doc.save).not.toHaveBeenCalled();
+  });
+
+  it("skips photos on a request with an accepted or declined revised offer", async () => {
+    // The status is Refunded and the case looks closed, but money was
+    // withheld — and that is the argument a customer comes back about months
+    // later. The offer in the history is the hold, not the current status.
+    for (const event of [
+      "revised_offer_sent",
+      "revised_offer_accepted",
+      "revised_offer_declined",
+      "revised_offer_expired",
+    ]) {
+      const doc = withPhotos([photo("p1", daysAgo(100))]);
+      doc.timeline = [{ event: "inspection_completed" }, { event }];
+      const destroyAsset = destroys();
+
+      const result = await purgeInspectionPhotos({
+        RefundRequest: modelReturning([doc]), destroyAsset, now,
+      });
+
+      expect(destroyAsset).not.toHaveBeenCalled();
+      expect(result.held).toBe(1);
+      expect(doc.inspection.photos).toHaveLength(1);
+    }
+  });
+
+  it("still purges a clean return whose history has no offer in it", async () => {
+    // The vacuity check on the rule above: a plain refund is not held.
+    const doc = withPhotos([photo("p1", daysAgo(100))]);
+    doc.timeline = [{ event: "inspection_completed" }, { event: "refund_issued" }];
+
+    const result = await purgeInspectionPhotos({
+      RefundRequest: modelReturning([doc]), destroyAsset: destroys(), now,
+    });
+
+    expect(result.deleted).toBe(1);
+  });
+
+  it("skips photos on a request flagged disputed", async () => {
+    // A chargeback or a solicitor's letter. Set by hand, and it outranks
+    // everything else, because the moment the photos matter most is the
+    // moment somebody is arguing about what arrived.
+    const doc = withPhotos([photo("p1", daysAgo(100))]);
+    doc.disputed = true;
+    const destroyAsset = destroys();
+
+    const result = await purgeInspectionPhotos({
+      RefundRequest: modelReturning([doc]), destroyAsset, now,
+    });
+
+    expect(destroyAsset).not.toHaveBeenCalled();
+    expect(result.held).toBe(1);
+    expect(doc.inspection.photos[0].purgeAfter).toEqual(daysAgo(100));
+  });
+
+  it("holds for all three reasons, and says which", () => {
+    expect(photosAreHeld({ disputed: true }).why).toBe("disputed");
+    expect(photosAreHeld({ status: "Rejected" }).why).toBe("status");
+    expect(photosAreHeld({ timeline: [{ event: "revised_offer_sent" }] }).why)
+      .toBe("revised_offer");
+    expect(photosAreHeld({ status: "Refunded", timeline: [] }).held).toBe(false);
+  });
+
+  it("retries a failed delete", async () => {
+    // A blip should not cost a photo another ninety days on the shelf.
+    const doc = withPhotos([photo("p1", daysAgo(1))]);
+    let calls = 0;
+    const destroyAsset = jest.fn(async () => {
+      calls += 1;
+      return calls < 3 ? { ok: false, error: "Cloudinary answered 500" } : { ok: true, result: "ok" };
+    });
+
+    const result = await purgeInspectionPhotos({
+      RefundRequest: modelReturning([doc]), destroyAsset, now,
+    });
+
+    expect(destroyAsset).toHaveBeenCalledTimes(3);
+    expect(result.deleted).toBe(1);
+    expect(result.failures).toHaveLength(0);
+  });
+
+  it("does not retry a delete that worked", async () => {
+    const doc = withPhotos([photo("p1", daysAgo(1))]);
+    const destroyAsset = destroys();
+
+    await purgeInspectionPhotos({ RefundRequest: modelReturning([doc]), destroyAsset, now });
+
+    expect(destroyAsset).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a failed delete after retries rather than silently skipping it", async () => {
+    const doc = withPhotos([photo("p1", daysAgo(1))]);
+    const destroyAsset = jest.fn(async () => ({ ok: false, error: "Cloudinary answered 500" }));
+
+    const result = await purgeInspectionPhotos({
+      RefundRequest: modelReturning([doc]), destroyAsset, now,
+    });
+
+    expect(destroyAsset).toHaveBeenCalledTimes(3);
+    expect(result.deleted).toBe(0);
+    expect(result.failures).toEqual([
+      { requestId: "req1", publicId: "p1", error: "Cloudinary answered 500", refused: false },
+    ]);
+    expect(doc.inspection.photos).toHaveLength(1);
+  });
+
+  it("does not retry a refusal, and counts it apart from a bad day", async () => {
+    // A refusal means the id is outside the returns tree. Retrying refuses
+    // again, and the interesting fact is that something tried at all.
+    const doc = withPhotos([photo("upcell/products/iphone/x", daysAgo(1))]);
+    const destroyAsset = jest.fn(async () => ({
+      ok: false, refused: true, error: 'Refusing to delete "upcell/products/iphone/x"',
+    }));
+    const logged = jest.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await purgeInspectionPhotos({
+      RefundRequest: modelReturning([doc]), destroyAsset, now,
+    });
+
+    expect(destroyAsset).toHaveBeenCalledTimes(1);
+    expect(result.refused).toBe(1);
+    expect(result.failures[0].refused).toBe(true);
+    expect(doc.inspection.photos).toHaveLength(1);
+    expect(logged).toHaveBeenCalled();
+
+    logged.mockRestore();
   });
 });

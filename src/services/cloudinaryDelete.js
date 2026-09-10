@@ -1,4 +1,5 @@
 const { getCloudinaryConfig, buildUploadSignature } = require("../config/cloudinary");
+const { isReturnsAsset, RETURNS_PREFIX } = require("../../constants/cloudinary");
 
 // Deleting an asset from Cloudinary by its public_id.
 //
@@ -25,6 +26,24 @@ const DESTROY_URL = (cloudName) =>
  */
 async function destroyAsset(publicId, { fetchImpl = fetch } = {}) {
   if (!publicId) return { ok: false, error: "No public id given." };
+
+  // The guard this function exists to have.
+  //
+  // Only the returns tree can be deleted from here. Everything else in the
+  // account is catalogue and marketing imagery, and a purge bug that reached
+  // it would delete the product photos of a live shop — which is not something
+  // UpCell recovers from, because the originals are gone.
+  //
+  // Refused rather than logged, and checked here rather than only in the
+  // caller: this is the single function that can destroy an asset, so it is
+  // the only place the check cannot be forgotten.
+  if (!isReturnsAsset(publicId)) {
+    return {
+      ok: false,
+      error: `Refusing to delete "${publicId}" — only assets under ${RETURNS_PREFIX} can be purged.`,
+      refused: true,
+    };
+  }
 
   let config;
   try {

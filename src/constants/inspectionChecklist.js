@@ -12,6 +12,9 @@
 
 const RESULTS = ["pass", "fail", "na"];
 
+// One of these is measured rather than answered (battery health, a number),
+// and one is graded rather than passed (cosmetic condition, a band). The rest
+// are pass / fail / n/a.
 const CHECKLIST_ITEMS = [
   {
     key: "imei_matches",
@@ -31,16 +34,30 @@ const CHECKLIST_ITEMS = [
   },
   { key: "powers_on", label: "Powers on and boots" },
   { key: "screen_touch", label: "Screen and touch respond" },
-  { key: "battery_health", label: "Battery health acceptable" },
-  { key: "body_condition", label: "Body condition graded" },
-  { key: "accessories", label: "Accessories and packaging present" },
+  {
+    key: "battery_health",
+    label: "Battery health % — recorded, never a deduction",
+    // Written down because the next buyer needs it, and because a return can
+    // be compared against what it sold at. It can never move the grade or take
+    // money off: battery decline is normal wear, and charging for it would be
+    // charging a customer for physics.
+    measured: true,
+    neverDeducts: true,
+  },
+  {
+    key: "cosmetic_grade",
+    label: "Cosmetic grade — Excellent / Good / Fair / Fail",
+    // Graded rather than passed or failed. It is one of the two axes the final
+    // grade is the lower of, and the only one a regrade reads.
+    graded: true,
+  },
   { key: "liquid_damage", label: "Liquid damage indicator clear" },
   {
-    key: "seal_intact",
-    label: "Factory seal intact",
-    // The single answer that decides whether this goes back into new stock or
-    // becomes an open-box unit. UpCell sells certified new devices, so a broken
-    // seal changes what the device is, not just what it is worth.
+    key: "matches_grade_sold",
+    label: "Cosmetic condition still matches the grade it sold at",
+    // The question the whole regrade turns on. UpCell sells used devices, so
+    // every one has been opened — what matters is whether it came back looking
+    // the way the listing said it looked.
     drivesDisposition: true,
   },
   {

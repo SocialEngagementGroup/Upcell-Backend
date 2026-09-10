@@ -2,37 +2,32 @@
 // from the controller so the rules can be tested against dates and orders
 // without a database, the same way refund.js is.
 //
-// The window depends on why the device is coming back. A customer who simply
-// changed their mind has 14 days; one sent the wrong device, a faulty one, or
-// one damaged in the post has 30. That split is the returns plan's, and it
-// replaces the flat 30 days this file used to apply to every reason.
-//
-// A caller that does not know the reason yet - the order history page, drawing
-// a "return this" button before anything has been chosen - gets the longer
-// window, so nothing is hidden that might still be returnable.
+// Thirty days for every reason. Where those thirty days start is the part with
+// any judgement in it, and that lives in services/returnWindow.js — delivery
+// date where the carrier recorded one, ship date plus three where it did not,
+// and a dated staff override with a note where a person had to decide.
 const { isRefundableLine } = require("./refund");
-const { returnWindowDays, DEFAULT_RETURN_WINDOW_DAYS } = require("../constants/returnReasons");
+const {
+  RETURN_WINDOW_DAYS,
+  resolveWindowStart,
+  transitClaimInTime,
+} = require("./returnWindow");
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+// Reasons that are a claim about the journey rather than about the device.
+// These have their own, much shorter deadline: after a few days nobody can
+// tell a courier's dent from a kitchen-counter dent.
+const TRANSIT_DAMAGE_REASONS = ["ARRIVED_DAMAGED_BOX", "PHYSICAL_DAMAGE_ON_ARRIVAL"];
 
 /**
  * The last moment a customer can ask to return this order.
  *
- * Counted from deliveredAt, not createdAt. An order placed on the 1st and
- * delivered on the 10th gives the customer until the 9th of the next month —
- * counting from the order date would quietly eat nine days of their window.
- *
- * Returns null when the order has not been delivered, which is not the same as
- * "expired": the window has not started yet.
- *
- * `reasonCode` narrows it: a change-of-mind return closes sooner than a faulty
- * one on the same order. Omitting it gives the longest window any reason could
- * have, which is what a page listing returnable orders wants.
+ * Returns null when the window has not started — the order has neither been
+ * delivered nor shipped. That is not the same as expired: the customer has
+ * done nothing wrong and simply has to wait.
  */
-function returnWindowClosesAt(order, reasonCode) {
-  if (!order?.deliveredAt) return null;
-  const days = reasonCode ? returnWindowDays(reasonCode) : DEFAULT_RETURN_WINDOW_DAYS;
-  return new Date(new Date(order.deliveredAt).getTime() + days * DAY_MS);
+function returnWindowClosesAt(order, reasonCode, options = {}) {
+  const window = resolveWindowStart(order, options);
+  return window ? window.expiresAt : null;
 }
 
 /**
@@ -45,7 +40,7 @@ function returnWindowClosesAt(order, reasonCode) {
  * @returns {{ok: true, closesAt: Date, items: object[]}
  *          | {ok: false, reason: string, message: string}}
  */
-function checkReturnEligibility(order, { now = new Date(), reasonCode } = {}) {
+function checkReturnEligibility(order, { now = new Date(), reasonCode, override } = {}) {
   if (!order) {
     return { ok: false, reason: "not_found", message: "Order not found." };
   }
@@ -66,11 +61,12 @@ function checkReturnEligibility(order, { now = new Date(), reasonCode } = {}) {
     };
   }
 
-  // Not delivered yet. Deliberately separate from an expired window: the
-  // customer has done nothing wrong and simply has to wait.
-  const windowDays = reasonCode ? returnWindowDays(reasonCode) : DEFAULT_RETURN_WINDOW_DAYS;
+  const windowDays = RETURN_WINDOW_DAYS;
+  const window = resolveWindowStart(order, { override });
 
-  if (!order.deliveredAt) {
+  // Neither delivered nor shipped. The window has not opened yet, which is a
+  // different answer from having missed it.
+  if (!window) {
     return {
       ok: false,
       reason: "not_delivered",
@@ -79,13 +75,28 @@ function checkReturnEligibility(order, { now = new Date(), reasonCode } = {}) {
     };
   }
 
-  const closesAt = returnWindowClosesAt(order, reasonCode);
+  const closesAt = window.expiresAt;
   if (now > closesAt) {
     return {
       ok: false,
       reason: "window_closed",
       message: `The ${windowDays}-day return window for this order closed on ${closesAt.toDateString()}.`,
+      closesAt,
     };
+  }
+
+  // Damage in transit is a claim about the journey, and it has a much shorter
+  // deadline than the device itself does.
+  if (TRANSIT_DAMAGE_REASONS.includes(reasonCode)) {
+    const claim = transitClaimInTime(order, { now });
+    if (!claim.ok) {
+      return {
+        ok: false,
+        reason: "transit_claim_late",
+        message: claim.message,
+        closesAt,
+      };
+    }
   }
 
   // Tax and shipping lines carry no productId — only real devices and
@@ -99,7 +110,16 @@ function checkReturnEligibility(order, { now = new Date(), reasonCode } = {}) {
     };
   }
 
-  return { ok: true, closesAt, windowDays, items };
+  return {
+    ok: true,
+    closesAt,
+    windowDays,
+    // Where the clock started, so the queue can show it and staff can see
+    // when it was estimated rather than recorded.
+    startedFrom: window.startedFrom,
+    startDate: window.startDate,
+    items,
+  };
 }
 
 /**
@@ -132,9 +152,7 @@ function checkSelectedItems(order, itemIds) {
 }
 
 module.exports = {
-  // The window when the reason is not known yet. Reason-specific lengths live
-  // in src/constants/returnReasons.js, which is the one place they are set.
-  RETURN_WINDOW_DAYS: DEFAULT_RETURN_WINDOW_DAYS,
+  RETURN_WINDOW_DAYS,
   returnWindowClosesAt,
   checkReturnEligibility,
   checkSelectedItems,

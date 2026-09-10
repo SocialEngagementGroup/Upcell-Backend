@@ -7,17 +7,20 @@ const {
 const { createAccessToken, tokensMatch } = require("../src/utils/accessToken");
 
 const checklist = [
-  { key: "body_condition", result: "fail" },
-  { key: "accessories", result: "fail" },
+  { key: "cosmetic_grade", result: "fail" },
+  { key: "screen_touch", result: "fail" },
   { key: "powers_on", result: "pass" },
-  { key: "seal_intact", result: "pass" },
+  { key: "liquid_damage", result: "pass" },
 ];
 
 const damage = (overrides = {}) => ({
   type: "DAMAGE",
   amount: 100,
   reason: "Deep scratch across the back",
-  findingKey: "body_condition",
+  findingKey: "cosmetic_grade",
+  // Every deduction needs a photograph now. A customer told their refund is
+  // smaller has to be able to see why.
+  photoIds: ["upcell/returns/photo-1"],
   ...overrides,
 });
 
@@ -31,7 +34,7 @@ describe("buildRevisedOffer", () => {
   it("adds several deductions together", () => {
     const offer = buildRevisedOffer({
       itemsTotal: 900,
-      deductions: [damage(), damage({ type: "MISSING_ITEMS", amount: 50, findingKey: "accessories" })],
+      deductions: [damage(), damage({ amount: 50, findingKey: "screen_touch" })],
       checklist,
     });
 
@@ -61,16 +64,28 @@ describe("buildRevisedOffer", () => {
     expect(offer.errors.join(" ")).toMatch(/name the check/i);
   });
 
-  it("lets policy deductions stand without a finding", () => {
-    // The restocking fee and the postage come from the reason, not from
-    // anything found on the bench.
+  it("refuses a deduction with no photograph", () => {
+    // A finding with no picture behind it is an assertion, not evidence.
+    const offer = buildRevisedOffer({
+      itemsTotal: 900, deductions: [damage({ photoIds: [] })], checklist,
+    });
+
+    expect(offer.ok).toBe(false);
+    expect(offer.errors.join(" ")).toMatch(/photo/i);
+  });
+
+  it("refuses a deduction for battery decline, however it is worded", () => {
+    // The rule the grading policy turns on. Refused outright, because staff
+    // can type any amount they like and this is a reason someone writes in
+    // good faith.
     const offer = buildRevisedOffer({
       itemsTotal: 900,
-      deductions: [{ type: "RESTOCKING_FEE", amount: 135, reason: "15% change-of-mind fee" }],
+      deductions: [damage({ reason: "Battery is down to 82%", findingKey: "cosmetic_grade" })],
       checklist,
     });
 
-    expect(offer.ok).toBe(true);
+    expect(offer.ok).toBe(false);
+    expect(offer.errors.join(" ")).toMatch(/normal wear/i);
   });
 
   it("refuses a deduction with no reason the customer can read", () => {

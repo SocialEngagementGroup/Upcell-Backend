@@ -11,12 +11,19 @@
 // number and a shrug. A deduction with nothing behind it is refused here, not
 // argued about later.
 
-const DEDUCTION_TYPES = ["DAMAGE", "MISSING_ITEMS", "RESTOCKING_FEE", "INBOUND_POSTAGE"];
+const { isDeductibleFinding } = require("../constants/grading");
 
-// Deductions a staff member proposes have to name the check that justifies
-// them. These two are the exception: they come from policy rather than from
-// anything found on the bench.
-const POLICY_DEDUCTIONS = ["RESTOCKING_FEE", "INBOUND_POSTAGE"];
+// MISSING_ITEMS is gone: UpCell ships devices only, so there is nothing in the
+// box to be missing. RESTOCKING_FEE and INBOUND_POSTAGE are gone with the
+// policy that created them — returns are free and no fee is charged.
+//
+// What is left is the only thing a customer can legitimately be charged for:
+// physical damage that was not there when the device was sold.
+const DEDUCTION_TYPES = ["DAMAGE"];
+
+// Nothing is charged by policy any more, so every deduction has to point at
+// something an inspector actually found.
+const POLICY_DEDUCTIONS = [];
 
 const round2 = (value) => Math.round(value * 100) / 100;
 
@@ -64,6 +71,25 @@ function buildRevisedOffer({ itemsTotal, deductions = [], checklist = [] }) {
     // and what UpCell then cannot defend.
     if (!String(reason || "").trim()) {
       errors.push(`${type} needs a reason the customer can read.`);
+      continue;
+    }
+
+    // Battery decline is normal wear and can never be charged for. Refused
+    // outright rather than merely unsuggested: staff can type any amount they
+    // like, and "battery is down to 82%" is a reason someone writes in good
+    // faith. A device sold at 90% coming back at 88% keeps its grade and its
+    // full refund.
+    const deductible = isDeductibleFinding({ findingKey, reason });
+    if (!deductible.ok) {
+      errors.push(deductible.error);
+      continue;
+    }
+
+    // Every deduction needs a photograph. A customer told their refund is
+    // smaller has to be able to see why, and a finding with no picture behind
+    // it is an assertion rather than evidence.
+    if (!Array.isArray(deduction.photoIds) || !deduction.photoIds.length) {
+      errors.push(`${type} needs at least one inspection photo showing the damage.`);
       continue;
     }
 

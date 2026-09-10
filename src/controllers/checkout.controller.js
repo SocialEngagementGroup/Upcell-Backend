@@ -234,6 +234,11 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
           metadata: {
             productId: info._id,
             quantity,
+            // The unit's own identity, carried onto the order so a return can
+            // be checked against what was actually shipped. Undefined for
+            // accessories and for anything entered before intake recorded it.
+            imei: info.imei || undefined,
+            serialNumber: info.serialNumber || undefined,
             // Rounded here rather than left as a raw product — a device
             // price times a quantity can drift a fraction of a cent in
             // floating point (99.99 * 3 stores as 299.96999999999997), and

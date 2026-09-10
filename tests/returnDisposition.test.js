@@ -1,160 +1,224 @@
 const {
   validateDisposition,
-  restockDevice,
+  relistDevice,
   internalRecordFor,
 } = require("../src/services/returnDisposition");
 const {
   DISPOSITION_TYPES,
-  RESTOCKING_DISPOSITIONS,
-  restocks,
+  RELISTING_DISPOSITIONS,
+  relists,
+  reprices,
+  sourceAllows,
 } = require("../src/constants/dispositions");
 
 describe("the five routes", () => {
   it("offers all five", () => {
     expect(DISPOSITION_TYPES).toEqual([
-      "RESTOCK_NEW", "OPEN_BOX", "RETURN_TO_SUPPLIER", "WHOLESALE", "SCRAP",
+      "RELIST", "RELIST_REGRADED", "RETURN_TO_SUPPLIER", "WHOLESALE", "SCRAP",
     ]);
   });
 
-  it("puts only a sealed device back on sale", () => {
-    // Automatically listing an opened phone as new is the mistake the whole
-    // disposition model exists to prevent.
-    expect(RESTOCKING_DISPOSITIONS).toEqual(["RESTOCK_NEW"]);
-    for (const type of ["OPEN_BOX", "WHOLESALE", "RETURN_TO_SUPPLIER", "SCRAP"]) {
-      expect(restocks(type)).toBe(false);
+  it("puts a device back on sale only by relisting it", () => {
+    expect(RELISTING_DISPOSITIONS).toEqual(["RELIST", "RELIST_REGRADED"]);
+    for (const type of ["RETURN_TO_SUPPLIER", "WHOLESALE", "SCRAP"]) {
+      expect(relists(type)).toBe(false);
     }
   });
 
-  it("keeps OPEN_BOX as its own route rather than merging it into wholesale", () => {
-    // Handled as wholesale today, but recorded distinctly so the decision is a
-    // change to where it routes, not a rebuild.
-    expect(DISPOSITION_TYPES).toContain("OPEN_BOX");
-    expect(DISPOSITION_TYPES).toContain("WHOLESALE");
+  it("re-prices only when the grade dropped", () => {
+    expect(reprices("RELIST_REGRADED")).toBe(true);
+    expect(reprices("RELIST")).toBe(false);
+  });
+});
+
+describe("acquisition source", () => {
+  it("refuses the supplier route for a device bought from an individual", () => {
+    // There is nobody to send it back to.
+    const result = sourceAllows("RETURN_TO_SUPPLIER", "INDIVIDUAL");
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/bought from an individual/i);
+  });
+
+  it("allows it for bulk stock", () => {
+    expect(sourceAllows("RETURN_TO_SUPPLIER", "BULK").ok).toBe(true);
+  });
+
+  it("allows it when the source is not recorded", () => {
+    // The field is new and most of the catalogue is not filled in. Blocking a
+    // legitimate route on every existing device would cost real recovery
+    // value, so only a source known to be an individual blocks it.
+    expect(sourceAllows("RETURN_TO_SUPPLIER", "UNKNOWN").ok).toBe(true);
+    expect(sourceAllows("RETURN_TO_SUPPLIER", undefined).ok).toBe(true);
+  });
+
+  it("does not restrict any other route by source", () => {
+    for (const type of ["RELIST", "RELIST_REGRADED", "WHOLESALE", "SCRAP"]) {
+      expect(sourceAllows(type, "INDIVIDUAL").ok).toBe(true);
+    }
   });
 });
 
 describe("validateDisposition", () => {
-  it("accepts a sealed device going back to stock", () => {
-    expect(validateDisposition({ type: "RESTOCK_NEW" }).ok).toBe(true);
+  const relist = { type: "RELIST", grade: "EXCELLENT" };
+
+  it("accepts a relist at a grade", () => {
+    expect(validateDisposition(relist).ok).toBe(true);
   });
 
-  it("does not demand a grade for something going back on sale as new", () => {
-    // Its grade is "new" by definition — the seal was never broken.
-    expect(validateDisposition({ type: "RESTOCK_NEW", grade: undefined }).ok).toBe(true);
-  });
-
-  it("demands a grade for anything leaving the returns queue", () => {
+  it("demands a grade on every route", () => {
     // Whoever handles it next needs it, and it cannot be recovered once the
     // device has left the bench.
-    for (const type of ["OPEN_BOX", "WHOLESALE"]) {
-      const result = validateDisposition({ type, grade: "" });
+    for (const type of DISPOSITION_TYPES) {
+      const result = validateDisposition({ type, grade: "", reason: "a reason", price: 100 });
 
       expect(result.ok).toBe(false);
       expect(result.error).toMatch(/grade/i);
     }
   });
 
+  it("refuses a grade that is not on the scale", () => {
+    expect(validateDisposition({ ...relist, grade: "B" }).ok).toBe(false);
+  });
+
+  it("demands a price when the grade dropped", () => {
+    // The system knows it fell from Excellent to Good. It does not know what
+    // a Good one of these is worth this month.
+    const result = validateDisposition({ type: "RELIST_REGRADED", grade: "GOOD" });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/new price/i);
+  });
+
+  it("accepts a re-grade with one", () => {
+    const result = validateDisposition({ type: "RELIST_REGRADED", grade: "GOOD", price: 499 });
+
+    expect(result.ok).toBe(true);
+    expect(result.disposition.price).toBe(499);
+  });
+
+  it("does not ask for a price on a plain relist", () => {
+    expect(validateDisposition(relist).disposition.price).toBeUndefined();
+  });
+
   it("demands a reason before writing a device off", () => {
-    // One that vanishes without a reason is indistinguishable from one that
-    // walked.
     const result = validateDisposition({ type: "SCRAP", grade: "FAIL" });
 
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/reason/i);
   });
 
-  it("accepts a scrap with one", () => {
-    expect(validateDisposition({
-      type: "SCRAP", grade: "FAIL", reason: "Board is water damaged beyond repair",
-    }).ok).toBe(true);
-  });
-
-  it("asks which supplier terms a return-to-supplier is going under", () => {
-    const result = validateDisposition({ type: "RETURN_TO_SUPPLIER", grade: "FAIL" });
-
-    expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/supplier terms/i);
-  });
-
-  it("refuses a route that does not exist", () => {
-    expect(validateDisposition({ type: "BIN_IT", grade: "C" }).ok).toBe(false);
-  });
-
-  it("trims what it stores", () => {
+  it("refuses the supplier route for an individual's device before anything else", () => {
     const result = validateDisposition({
-      type: "WHOLESALE", grade: "  B  ", imei: "  353916...  ",
+      type: "RETURN_TO_SUPPLIER", grade: "FAIL", reason: "DOA within terms",
+      acquisitionSource: "INDIVIDUAL",
     });
 
-    expect(result.disposition.grade).toBe("B");
-    expect(result.disposition.imei).toBe("353916...");
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/individual/i);
+  });
+
+  it("rounds a re-graded price to the cent", () => {
+    const result = validateDisposition({
+      type: "RELIST_REGRADED", grade: "GOOD", price: 499.987,
+    });
+
+    expect(result.disposition.price).toBe(499.99);
   });
 });
 
-describe("restockDevice", () => {
-  const model = (modifiedCount) => ({
-    updateOne: jest.fn(async () => ({ modifiedCount })),
-  });
+describe("relistDevice", () => {
+  const model = (modifiedCount) => ({ updateOne: jest.fn(async () => ({ modifiedCount })) });
 
-  it("puts a sealed device back on sale", async () => {
+  it("puts the unit's own listing back up", () => {
     const SingleVariation = model(1);
 
-    const result = await restockDevice({
-      SingleVariation, productId: "p1", dispositionType: "RESTOCK_NEW",
+    return relistDevice({
+      SingleVariation, productId: "p1", disposition: { type: "RELIST", grade: "EXCELLENT" },
+    }).then((result) => {
+      expect(result.ok).toBe(true);
+      const [filter, update] = SingleVariation.updateOne.mock.calls[0];
+      expect(filter._id).toBe("p1");
+      expect(update.$set.outOfStock).toBe(false);
+      expect(update.$set.cosmeticGrade).toBe("EXCELLENT");
+    });
+  });
+
+  it("never touches a different unit's listing", () => {
+    // With per-unit records this is the failure worth designing against: a
+    // filter matching a model or a grade rather than an id would relist a
+    // shelf of devices that are not back.
+    const SingleVariation = model(1);
+
+    return relistDevice({
+      SingleVariation, productId: "p1", disposition: { type: "RELIST", grade: "GOOD" },
+    }).then(() => {
+      const [filter] = SingleVariation.updateOne.mock.calls[0];
+
+      expect(filter._id).toBe("p1");
+      expect(Object.keys(filter).sort()).toEqual(["_id", "isAccessory"]);
+    });
+  });
+
+  it("re-prices in the same write as it relists", async () => {
+    // A listing live at the old price for even a moment is a listing somebody
+    // can buy.
+    const SingleVariation = model(1);
+
+    await relistDevice({
+      SingleVariation,
+      productId: "p1",
+      disposition: { type: "RELIST_REGRADED", grade: "GOOD", price: 499 },
     });
 
-    expect(result.ok).toBe(true);
-    const [filter, update] = SingleVariation.updateOne.mock.calls[0];
-    expect(filter._id).toBe("p1");
+    const [, update] = SingleVariation.updateOne.mock.calls[0];
+    expect(update.$set.price).toBe(499);
+    expect(update.$set.cosmeticGrade).toBe("GOOD");
     expect(update.$set.outOfStock).toBe(false);
+  });
+
+  it("does not touch the price on a plain relist", async () => {
+    const SingleVariation = model(1);
+
+    await relistDevice({
+      SingleVariation, productId: "p1", disposition: { type: "RELIST", grade: "EXCELLENT" },
+    });
+
+    expect(SingleVariation.updateOne.mock.calls[0][1].$set.price).toBeUndefined();
   });
 
   it("clears the stale reservation from the checkout that sold it", async () => {
     const SingleVariation = model(1);
 
-    await restockDevice({ SingleVariation, productId: "p1", dispositionType: "RESTOCK_NEW" });
+    await relistDevice({
+      SingleVariation, productId: "p1", disposition: { type: "RELIST", grade: "GOOD" },
+    });
 
     const [, update] = SingleVariation.updateOne.mock.calls[0];
     expect(update.$set.reservedUntil).toBeNull();
     expect(update.$set.reservedFor).toBeNull();
   });
 
-  it("only touches devices, matching how they are taken off sale", async () => {
-    const SingleVariation = model(1);
-
-    await restockDevice({ SingleVariation, productId: "p1", dispositionType: "RESTOCK_NEW" });
-
-    expect(SingleVariation.updateOne.mock.calls[0][0].isAccessory).toEqual({ $ne: true });
-  });
-
-  it("refuses to restock anything but a sealed device", async () => {
-    // This function is one line away from listing a scrapped phone as new.
-    for (const type of ["OPEN_BOX", "WHOLESALE", "SCRAP", "RETURN_TO_SUPPLIER"]) {
+  it("refuses to relist anything that is not a relist", async () => {
+    for (const type of ["WHOLESALE", "SCRAP", "RETURN_TO_SUPPLIER"]) {
       const SingleVariation = model(1);
 
-      const result = await restockDevice({ SingleVariation, productId: "p1", dispositionType: type });
+      const result = await relistDevice({
+        SingleVariation, productId: "p1", disposition: { type, grade: "GOOD" },
+      });
 
       expect(result.ok).toBe(false);
       expect(SingleVariation.updateOne).not.toHaveBeenCalled();
     }
   });
 
-  it("reports when nothing changed, rather than claiming success", async () => {
-    // Already on sale, or the product was deleted while the return was in
-    // flight. A staff member has to know the shelf did not change.
-    const result = await restockDevice({
-      SingleVariation: model(0), productId: "p1", dispositionType: "RESTOCK_NEW",
+  it("reports when nothing changed rather than claiming success", async () => {
+    const result = await relistDevice({
+      SingleVariation: model(0), productId: "p1", disposition: { type: "RELIST", grade: "GOOD" },
     });
 
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/could not be put back on sale/i);
-  });
-
-  it("refuses when there is no product to restock", async () => {
-    const result = await restockDevice({
-      SingleVariation: model(1), productId: undefined, dispositionType: "RESTOCK_NEW",
-    });
-
-    expect(result.ok).toBe(false);
   });
 });
 
@@ -162,25 +226,25 @@ describe("internalRecordFor", () => {
   const request = {
     rmaNumber: "RMA-2026-00412",
     itemIds: ["p1"],
-    inspection: { grade: "B" },
+    inspection: { finalGrade: "GOOD" },
     device: { imei: "353916000000000" },
   };
 
   it("carries what whoever handles it next needs", () => {
-    const record = internalRecordFor(request, { type: "WHOLESALE", grade: "C" });
+    const record = internalRecordFor(request, { type: "WHOLESALE", grade: "FAIR" });
 
     expect(record).toMatchObject({
       rmaNumber: "RMA-2026-00412",
       disposition: "WHOLESALE",
       label: "Wholesale",
-      grade: "C",
+      grade: "FAIR",
       imei: "353916000000000",
       productId: "p1",
     });
   });
 
-  it("falls back to the inspection grade when none was given", () => {
-    expect(internalRecordFor(request, { type: "OPEN_BOX" }).grade).toBe("B");
+  it("falls back to the grade inspection worked out", () => {
+    expect(internalRecordFor(request, { type: "WHOLESALE" }).grade).toBe("GOOD");
   });
 
   it("keeps the reason on a write-off", () => {

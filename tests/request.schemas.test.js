@@ -825,3 +825,50 @@ describe("productCreateSchema — image refs and duplicate variants", () => {
     })).not.toThrow();
   });
 });
+
+// V3.7 — the two checks that answer with more than pass or fail.
+//
+// Validation replaces req.body wholesale, so a field the schema does not name
+// is stripped before any service sees it. These two were, which made every
+// inspection fail for not carrying the readings the form had just collected.
+describe("inspectionSubmitSchema — the measured and graded checks", () => {
+  const { inspectionSubmitSchema } = require("../src/schemas/request.schemas");
+
+  const parse = (checklist) => inspectionSubmitSchema.safeParse({ checklist, photos: [] });
+
+  it("keeps the battery percentage", () => {
+    const result = parse([{ key: "battery_health", result: "pass", value: 88 }]);
+
+    expect(result.success).toBe(true);
+    expect(result.data.checklist[0].value).toBe(88);
+  });
+
+  it("keeps the cosmetic grade", () => {
+    const result = parse([{ key: "cosmetic_grade", result: "pass", grade: "GOOD" }]);
+
+    expect(result.success).toBe(true);
+    expect(result.data.checklist[0].grade).toBe("GOOD");
+  });
+
+  it("refuses a battery reading that is not a percentage", () => {
+    expect(parse([{ key: "battery_health", result: "pass", value: 120 }]).success).toBe(false);
+    expect(parse([{ key: "battery_health", result: "pass", value: -1 }]).success).toBe(false);
+  });
+
+  it("refuses a grade that is not on the scale", () => {
+    // A/B/C was the old internal scale and no longer exists anywhere else.
+    expect(parse([{ key: "cosmetic_grade", result: "pass", grade: "B" }]).success).toBe(false);
+  });
+
+  it("takes the override grade on the same scale as the catalogue", () => {
+    const ok = inspectionSubmitSchema.safeParse({
+      checklist: [{ key: "powers_on", result: "pass" }], photos: [], grade: "EXCELLENT",
+    });
+    const bad = inspectionSubmitSchema.safeParse({
+      checklist: [{ key: "powers_on", result: "pass" }], photos: [], grade: "A",
+    });
+
+    expect(ok.success).toBe(true);
+    expect(bad.success).toBe(false);
+  });
+});

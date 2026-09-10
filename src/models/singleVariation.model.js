@@ -22,6 +22,47 @@ const singleVariationSchema = new mongoose.Schema({
     reviewScore: Number,
     peopleReviewed: Number,
     condition: String,
+    // The cosmetic grade on the returns scale: EXCELLENT | GOOD | FAIR | FAIL.
+    //
+    // Separate from `condition`, which was free text on a different scale
+    // (Mint, New, Excellent, Good). A returned device is compared against this
+    // to decide whether it relists unchanged or is re-graded, and that
+    // comparison needs both sides on one scale.
+    //
+    // scripts/migrate-condition-to-grade.js filled it for the existing
+    // catalogue; conditionLegacy keeps whatever the product said before.
+    cosmeticGrade: { type: String, index: true },
+    conditionLegacy: String,
+    // Battery health as a percentage, recorded so the next buyer knows and so
+    // a return can be compared against it. Never a reason to deduct.
+    batteryHealth: Number,
+    // Where this unit came from. Only bulk stock can go back to a supplier —
+    // a device bought from a member of the public has nobody to return it to.
+    //
+    // Defaults to UNKNOWN rather than to either real value, and UNKNOWN is
+    // permissive: the field is new and most of the catalogue has not been
+    // filled in, so blocking the supplier route on every existing device would
+    // cost real recovery value. Only a source known to be an individual
+    // blocks it.
+    acquisitionSource: {
+      type: String,
+      enum: ["BULK", "INDIVIDUAL", "UNKNOWN"],
+      default: "UNKNOWN",
+    },
+    // Which physical device this is.
+    //
+    // Every variation is one unit, and until these existed nothing recorded
+    // which unit it was. The returns inspection asks staff to confirm the
+    // device sent back is the device that was sold, and the Return Policy page
+    // promises customers that check happens — both were an honour system with
+    // no sales record behind them.
+    //
+    // Two fields because Apple uses two: a phone or cellular iPad has a
+    // 15-digit IMEI, a wifi iPad or MacBook has only a serial. Both optional —
+    // accessories have neither, and the 954 products already in the catalogue
+    // were entered before this existed. See src/utils/deviceIdentity.js.
+    imei: String,
+    serialNumber: String,
     image: String,
     // The Cloudinary public_id behind `image`, which is what every delivery
     // URL is actually built from — a public_id can be asked for at any width
@@ -83,6 +124,21 @@ const singleVariationSchema = new mongoose.Schema({
 }, { timestamps: true })
 
 singleVariationSchema.index({ slug: 1 }, { unique: true, sparse: true });
+// One device, one record. Two units cannot share an IMEI, so this is what stops
+// the same phone being entered twice under two products — which would sell one
+// device to two customers, the exact failure the stock hold exists to prevent.
+//
+// Partial rather than sparse: sparse skips only missing values, and the
+// catalogue is full of records that will never have an IMEI. Keyed on the field
+// being a string so those are all ignored rather than colliding on null.
+singleVariationSchema.index(
+  { imei: 1 },
+  { unique: true, partialFilterExpression: { imei: { $type: "string" } } }
+);
+singleVariationSchema.index(
+  { serialNumber: 1 },
+  { unique: true, partialFilterExpression: { serialNumber: { $type: "string" } } }
+);
 singleVariationSchema.index({ parentCatagory: 1, outOfStock: 1, price: 1 });
 singleVariationSchema.index({ categoryName: 1, storage: 1, price: 1 });
 singleVariationSchema.index({ productName: 1, price: 1 });

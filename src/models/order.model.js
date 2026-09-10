@@ -39,6 +39,13 @@ const OrderItemSchema = new Schema(
     // computed independently, with nothing enforcing they matched.
     unitPriceCents: { type: Number, required: true, min: 0 },
     lineTotalCents: { type: Number, required: true, min: 0 },
+    // Which physical device went out of the door, copied from the variation at
+    // checkout rather than looked up later. A snapshot for the same reason the
+    // name and price are: the catalogue record can be edited or deleted, and
+    // this has to still answer "is the phone on the bench the phone we sold
+    // them?" a year afterwards, in a dispute. See utils/deviceIdentity.js.
+    imei: String,
+    serialNumber: String,
   },
   { _id: false }
 );
@@ -183,6 +190,15 @@ const OrderSchema = new Schema(
     // afterwards: a status corrected back and forth must not quietly restart
     // someone's return window.
     deliveredAt: Date,
+
+    // When the parcel actually left. Used only as a fallback for the return
+    // window: if a delivery was never recorded, the window starts three days
+    // after this rather than from the order date, which would eat however long
+    // the parcel spent in transit out of the customer's 30 days.
+    //
+    // Stamped once, like deliveredAt, so a status corrected back and forth
+    // cannot restart anybody's window.
+    shippedAt: Date,
   },
   { timestamps: true }
 );

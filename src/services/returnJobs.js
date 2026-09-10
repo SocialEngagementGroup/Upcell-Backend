@@ -17,7 +17,7 @@
 const { dueReminder, hasExpired } = require("./returnAuthorisation");
 const { offerHasExpired } = require("./revisedOffer");
 const { applyTransition, recordEvent } = require("./returnTimeline");
-const { PHOTO_HOLD_STATUSES } = require("../constants/returnStatus");
+const { photosAreHeld } = require("../constants/returnStatus");
 
 // Statuses where the customer still has the device and the clock is running.
 // A return already received cannot expire — UpCell has the phone.
@@ -157,21 +157,23 @@ async function autoDeclineStaleOffers({ RefundRequest, now = new Date() }) {
   return { declined, considered: candidates.length };
 }
 
+// How many times a delete is retried inside one run before it is left for the
+// next one. Two is enough to ride out a blip without hammering an API that is
+// genuinely down — a run that cannot reach Cloudinary at all should finish and
+// report, not spin.
+const PURGE_RETRIES = 2;
+
 /**
  * Deletes inspection photos once their 90 days are up.
  *
- * The hold is the important half. A return that went wrong — rejected, reduced,
- * or shipped back — keeps its photos until the case closes, because those are
- * exactly the ones that turn into an argument months later, and the photos are
- * the only evidence of what actually arrived.
+ * The hold is the important half, and destroyAsset's prefix guard is the other:
+ * nothing here can reach an asset outside the returns tree, so a bug in this
+ * loop cannot delete the catalogue.
  *
- * The hold is read from the request's status at purge time rather than written
- * onto each photo when the status changes. A hold that has to be stamped onto
- * fifty rows is a hold that gets missed on one of them.
- *
- * A delete that fails is left alone and reported, never marked done. The next
- * run tries again, and a run that cannot reach Cloudinary at all is visible
- * rather than looking like a successful purge of nothing.
+ * A delete that fails is retried twice, then left alone and reported — never
+ * marked done. Marking it gone would lose the only handle we have on an asset
+ * still sitting in the account, and a run that cannot reach Cloudinary at all
+ * becomes visible rather than looking like a successful purge of nothing.
  */
 async function purgeInspectionPhotos({ RefundRequest, destroyAsset, now = new Date() }) {
   const candidates = await RefundRequest.find({
@@ -180,12 +182,15 @@ async function purgeInspectionPhotos({ RefundRequest, destroyAsset, now = new Da
 
   let deleted = 0;
   let held = 0;
+  let refused = 0;
   const failures = [];
 
   for (const request of candidates) {
-    // Under dispute. Nothing is deleted, and the photos keep their original
-    // purge dates so they are reconsidered once the case closes.
-    if (PHOTO_HOLD_STATUSES.includes(request.status)) {
+    const hold = photosAreHeld(request);
+    if (hold.held) {
+      // Nothing is deleted and the photos keep their original purge dates, so
+      // they are reconsidered once the case closes rather than being kept
+      // forever by accident.
       held += (request.inspection?.photos || []).length;
       continue;
     }
@@ -201,13 +206,24 @@ async function purgeInspectionPhotos({ RefundRequest, destroyAsset, now = new Da
         continue;
       }
 
-      const result = await destroyAsset(photo.publicId);
+      let result = null;
+      for (let attempt = 0; attempt <= PURGE_RETRIES; attempt += 1) {
+        result = await destroyAsset(photo.publicId);
+        if (result.ok) break;
+        // A refusal is not a blip. The id is outside the returns tree, and
+        // retrying will refuse again — so stop and report it loudly.
+        if (result.refused) break;
+      }
 
       if (!result.ok) {
-        // Kept, so the next run tries again. Marking it gone would lose the
-        // only handle we have on an asset that is still in the account.
         remaining.push(photo);
-        failures.push({ requestId: String(request._id), publicId: photo.publicId, error: result.error });
+        if (result.refused) refused += 1;
+        failures.push({
+          requestId: String(request._id),
+          publicId: photo.publicId,
+          error: result.error,
+          refused: Boolean(result.refused),
+        });
         continue;
       }
 
@@ -217,8 +233,8 @@ async function purgeInspectionPhotos({ RefundRequest, destroyAsset, now = new Da
     if (!removedHere) continue;
 
     request.inspection.photos = remaining;
-    // Recorded as an event rather than silently: "where did the photos go" is a
-    // question somebody asks, and the answer has to be in the record.
+    // Recorded as an event rather than silently: "where did the photos go" is
+    // a question somebody asks, and the answer has to be in the record.
     recordEvent(request, {
       event: "inspection_photos_purged",
       actor: "system",
@@ -230,11 +246,19 @@ async function purgeInspectionPhotos({ RefundRequest, destroyAsset, now = new Da
     deleted += removedHere;
   }
 
-  return { deleted, held, failures, considered: candidates.length };
+  // A refusal means something tried to delete outside the returns tree. That
+  // is a bug rather than a bad day, and it should be loud.
+  if (refused) {
+    console.error(`[returns] purge refused ${refused} deletes outside the returns folder`);
+  }
+
+  return { deleted, held, refused, failures, considered: candidates.length };
 }
 
 module.exports = {
   purgeInspectionPhotos,
+  // Re-exported so the job and its tests read the rule from one place.
+  photosAreHeld,
   sendDueReminders,
   expireStaleAuthorisations,
   autoDeclineStaleOffers,

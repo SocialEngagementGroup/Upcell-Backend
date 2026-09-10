@@ -6,6 +6,7 @@
 // lookup table. A device that arrives locked, or that is not the device that
 // was sold, has an obvious answer and should not depend on who opened the box.
 
+const { GRADES, batteryBand, finalGrade, regradeOnReturn } = require("../constants/grading");
 const {
   CHECKLIST_ITEMS,
   CHECKLIST_KEYS,
@@ -33,6 +34,32 @@ function validateInspection({ checklist = [], photos = [], faultClaimed = false 
       errors.push(`"${entry?.key}" is not one of the checks.`);
       continue;
     }
+
+    const item = CHECKLIST_ITEMS.find((candidate) => candidate.key === entry.key);
+
+    // Battery health is a number, not a verdict. Asking for pass or fail on it
+    // would be asking the inspector to make the judgement the policy forbids.
+    if (item?.measured) {
+      const value = Number(entry.value);
+      if (!Number.isFinite(value) || value < 0 || value > 100) {
+        errors.push("Battery health must be a percentage between 0 and 100.");
+        continue;
+      }
+      answered.set(entry.key, { key: entry.key, value, note: entry.note });
+      continue;
+    }
+
+    // Cosmetic condition is a band, not a pass. It is one of the two axes the
+    // final grade is the lower of.
+    if (item?.graded) {
+      if (!Object.values(GRADES).includes(entry.grade)) {
+        errors.push(`Cosmetic grade must be one of: ${Object.values(GRADES).join(", ")}.`);
+        continue;
+      }
+      answered.set(entry.key, { key: entry.key, grade: entry.grade, note: entry.note });
+      continue;
+    }
+
     if (!RESULTS.includes(entry?.result)) {
       errors.push(`${entry.key} must be answered pass, fail or na.`);
       continue;
@@ -79,7 +106,7 @@ const resultOf = (checklist, key) => checklist.find((entry) => entry.key === key
  *   REVISED_OFFER    worse than described, but still worth something.
  *   FULL_REFUND      as described.
  */
-function suggestOutcome({ checklist = [], reasonCode, faultClaimed = false }) {
+function suggestOutcome({ checklist = [], reasonCode, faultClaimed = false, ...options }) {
   const failed = (key) => resultOf(checklist, key) === "fail";
 
   if (failed("activation_lock")) {
@@ -115,13 +142,28 @@ function suggestOutcome({ checklist = [], reasonCode, faultClaimed = false }) {
     };
   }
 
-  const condition = ["powers_on", "screen_touch", "battery_health", "body_condition", "accessories"]
-    .filter(failed);
+  // Worse than it sold at, cosmetically. Battery is deliberately not in this
+  // list: a device whose battery fell is not in worse condition, it is a used
+  // device that was used.
+  const gradeAtSale = options.gradeAtSale;
+  const cosmeticGrade = checklist.find((entry) => entry.key === "cosmetic_grade")?.grade;
 
-  if (condition.length) {
+  if (gradeAtSale && cosmeticGrade) {
+    const regrade = regradeOnReturn({ gradeAtSale, cosmeticGrade });
+    if (regrade.regraded) {
+      return {
+        outcome: "REVISED_OFFER",
+        reason: regrade.reason,
+        regrade,
+      };
+    }
+  }
+
+  const broken = ["powers_on", "screen_touch"].filter(failed);
+  if (broken.length) {
     return {
       outcome: "REVISED_OFFER",
-      reason: `The device is in worse condition than described (${condition.join(", ")}).`,
+      reason: `The device does not work as described (${broken.join(", ")}).`,
     };
   }
 
@@ -135,14 +177,13 @@ function suggestOutcome({ checklist = [], reasonCode, faultClaimed = false }) {
  * where an opened-but-perfect device goes is a commercial decision about
  * supplier terms and wholesale rates, not something a checklist knows.
  */
-function suggestDisposition({ checklist = [], outcome }) {
+function suggestDisposition({ checklist = [], outcome, gradeAtSale }) {
   if (outcome === "REJECT") return null;
 
-  if (resultOf(checklist, "seal_intact") === "pass") {
-    return {
-      type: "RESTOCK_NEW",
-      reason: "The factory seal is unbroken, so this is still a new device.",
-    };
+  const cosmeticGrade = checklist.find((entry) => entry.key === "cosmetic_grade")?.grade;
+
+  if (cosmeticGrade === GRADES.FAIL) {
+    return { type: "SCRAP", reason: "Cracked, liquid damaged, or structurally damaged." };
   }
 
   if (resultOf(checklist, "powers_on") === "fail") {
@@ -152,35 +193,46 @@ function suggestDisposition({ checklist = [], outcome }) {
     };
   }
 
-  // Opened but working. The plan's working default until UpCell decides where
-  // these actually go; recorded as OPEN_BOX either way, so changing the
-  // destination later is a policy change rather than a rebuild.
+  // The common case, and the whole reason per-unit records make this simple:
+  // the device goes back onto its own listing. Only the grade decides whether
+  // it goes back unchanged or re-priced.
+  const regrade = regradeOnReturn({ gradeAtSale, cosmeticGrade });
+
   return {
-    type: "OPEN_BOX",
-    reason: "Opened but in working order. Routed to wholesale until UpCell decides otherwise.",
+    type: regrade.disposition === "SCRAP" ? "SCRAP" : regrade.disposition,
+    grade: regrade.to,
+    reason: regrade.reason,
+    regraded: regrade.regraded,
   };
 }
 
 /**
- * A letter grade for the device, from the condition answers.
+ * The grade the device gets, from the two axes.
  *
- * Used for wholesale batching and for reporting, not for the refund — money
- * comes from the itemised deductions, each tied to a finding, so that a
- * customer asking "why is this less" gets a list rather than a letter.
+ * Used for relisting and reporting, not for the refund — money comes from
+ * itemised deductions each tied to a finding and a photo, so a customer asking
+ * "why is this less" gets a list rather than a letter.
  */
 function gradeFrom(checklist = []) {
   const failed = (key) => resultOf(checklist, key) === "fail";
 
-  if (failed("imei_matches") || failed("liquid_damage") || failed("powers_on")) return "FAIL";
+  if (failed("imei_matches") || failed("liquid_damage") || failed("powers_on")) {
+    return GRADES.FAIL;
+  }
 
-  const cosmetic = ["body_condition", "accessories"].filter(failed).length;
-  const functional = ["screen_touch", "battery_health"].filter(failed).length;
+  const batteryHealth = checklist.find((entry) => entry.key === "battery_health")?.value;
+  const cosmeticGrade = checklist.find((entry) => entry.key === "cosmetic_grade")?.grade;
 
-  if (functional) return "C";
-  if (cosmetic >= 2) return "C";
-  if (cosmetic === 1) return "B";
-  return "A";
+  return finalGrade({ batteryHealth, cosmeticGrade });
 }
+
+/** The battery reading, for the record and the relisting. Never a grade input
+ * on a return, and never a deduction. */
+const batteryHealthFrom = (checklist = []) =>
+  checklist.find((entry) => entry.key === "battery_health")?.value ?? null;
+
+const cosmeticGradeFrom = (checklist = []) =>
+  checklist.find((entry) => entry.key === "cosmetic_grade")?.grade ?? null;
 
 /**
  * When each photo may be deleted.
@@ -204,6 +256,9 @@ function stampPurgeDates(photos = [], now = new Date()) {
 
 module.exports = {
   validateInspection,
+  batteryHealthFrom,
+  cosmeticGradeFrom,
+  batteryBand,
   suggestOutcome,
   suggestDisposition,
   gradeFrom,

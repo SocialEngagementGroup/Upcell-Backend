@@ -64,10 +64,21 @@ const RETURN_STATUSES = Object.values(RETURN_STATUS);
 // first.
 const ALLOWED_TRANSITIONS = {
   Submitted: ["ReturnApproved", "Rejected", "Cancelled", "Expired"],
-  ReturnApproved: ["LabelIssued", "DeviceReceived", "Rejected", "Cancelled", "Expired"],
-  // DeviceReceived stays reachable directly: a customer can walk a device in,
-  // and a return posted before labels existed has no carrier events at all.
-  LabelIssued: ["InTransit", "Delivered", "DeviceReceived", "Expired", "Cancelled", "Rejected"],
+  ReturnApproved: ["LabelIssued", "InTransit", "Rejected", "Cancelled", "Expired"],
+  // A device is received from InTransit or Delivered and from nowhere else.
+  //
+  // The point is that something has to say the parcel is actually moving
+  // before anyone can say it arrived. A request sitting at LabelIssued has a
+  // label printed and nothing more, and letting that jump straight to received
+  // is how a return gets marked complete for a box still on a customer's
+  // kitchen table.
+  //
+  // While tracking is manual this costs one extra click: staff mark it in
+  // transit, then received. Once the FedEx Track API is polling (R.14) the
+  // first of those happens on its own. A device walked into the shop takes
+  // the same route — mark it in transit, then received — which is honest
+  // enough, since it did travel.
+  LabelIssued: ["InTransit", "Delivered", "Expired", "Cancelled", "Rejected"],
   InTransit: ["Delivered", "DeviceReceived", "Rejected"],
   Delivered: ["DeviceReceived", "Rejected"],
   DeviceReceived: ["InInspection", "Approved", "Rejected"],
@@ -113,8 +124,47 @@ const TERMINAL_STATUSES = RETURN_STATUSES.filter(
 const CLOCK_PAUSED_STATUSES = ["ActionRequired", "RevisedOffer"];
 
 // Photos are kept indefinitely once a return has gone wrong, because these are
-// the cases that turn into a dispute months later. The purge job reads this.
+// exactly the cases that turn into an argument months later and the photos are
+// the only evidence of what actually arrived.
+//
+// A revised offer counts however it ended. An offer that was accepted is still
+// a return where money was withheld, and the customer can come back about it
+// long after the case looks closed — so `Approved` and `Refunded` are held too
+// when an offer happened, which the purge decides per request rather than by
+// status alone.
 const PHOTO_HOLD_STATUSES = ["Rejected", "ReturnShipped", "RevisedOffer"];
+
+// Events that mean this return had money withheld or was refused, whatever
+// status it ended in. The purge reads the timeline for these.
+const PHOTO_HOLD_EVENTS = [
+  "revised_offer_sent",
+  "revised_offer_accepted",
+  "revised_offer_declined",
+  "revised_offer_expired",
+];
+
+/**
+ * Whether this return's inspection photos are frozen.
+ *
+ * Three reasons, and any one of them holds: the return is in a state that went
+ * wrong, an offer happened at some point in its history, or somebody marked it
+ * disputed by hand.
+ *
+ * It lives here rather than in the purge job because two things ask it — the
+ * job that deletes, and the report that says how many are being kept. Those
+ * two answers have to be the same one.
+ */
+function photosAreHeld(request) {
+  if (request?.disputed) return { held: true, why: "disputed" };
+  if (PHOTO_HOLD_STATUSES.includes(request?.status)) return { held: true, why: "status" };
+
+  const hadOffer = (request?.timeline || []).some(
+    (entry) => PHOTO_HOLD_EVENTS.includes(entry?.event)
+  );
+  if (hadOffer) return { held: true, why: "revised_offer" };
+
+  return { held: false };
+}
 
 const isReturnStatus = (status) =>
   Object.prototype.hasOwnProperty.call(ALLOWED_TRANSITIONS, status);
@@ -149,6 +199,8 @@ module.exports = {
   TERMINAL_STATUSES,
   CLOCK_PAUSED_STATUSES,
   PHOTO_HOLD_STATUSES,
+  PHOTO_HOLD_EVENTS,
+  photosAreHeld,
   isReturnStatus,
   canTransition,
   transitionError,

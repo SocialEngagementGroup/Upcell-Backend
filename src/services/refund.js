@@ -73,23 +73,17 @@ function calculateRefund(order, { itemIds, reasonCode, waiveRestockingFee = fals
 
   const itemsTotal = totalPaidOf(refundableItems);
 
-  // The fee is only for a customer who changed their mind.
+  // There is no restocking fee.
   //
-  // It used to be charged on every return unless a staff member remembered to
-  // waive it by hand, which meant a customer returning a device that would not
-  // power on was billed 15% for UpCell's own fault unless somebody caught it.
-  // Now the reason decides: PREFERENCE pays it, FULFILMENT, PRODUCT_FAULT and
-  // LOGISTICS never do.
+  // It was 15% on a change of mind, then briefly nothing on a faulty device,
+  // and is now nothing at all: UpCell's policy matches Back Market, which is
+  // what its customers compare it against, and free returns are the part of
+  // that they actually notice.
   //
-  // A reason that is absent or unrecognised charges nothing. That is the safe
-  // direction to be wrong in - it errs toward the customer, and a staff member
-  // reading the note can still apply the fee deliberately. Silently taking 15%
-  // from someone because a code did not parse is not recoverable once the money
-  // has moved.
-  const feeAppliesToReason = reasonCode ? restockingFeeApplies(reasonCode) : false;
-  const restockingFee = (!feeAppliesToReason || waiveRestockingFee)
-    ? 0
-    : round2(itemsTotal * RESTOCKING_FEE_RATE);
+  // The field stays in the response, always zero, because the admin panel and
+  // the refund email both render it and a missing key reads as a bug. The
+  // waive flag is still honoured so an older client cannot break on it.
+  const restockingFee = 0;
 
   // Tax is shared out by what the returned items cost, not recalculated as 8%
   // of them. Two reasons: a full return then hands back exactly the figure that

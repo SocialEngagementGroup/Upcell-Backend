@@ -32,6 +32,10 @@ const CLOUDINARY_FOLDERS = {
   // (90 days, or when a disputed case closes) and nothing on the site ever
   // renders them.
   RETURNS: `${CLOUDINARY_ROOT}/returns`,
+  // Inspection photos, one folder per RMA. Subfoldering by RMA is what makes
+  // a purge legible: everything belonging to one return is in one place, and
+  // a person looking at the media library can see what a case holds.
+  RETURNS_INSPECTIONS: `${CLOUDINARY_ROOT}/returns/inspections`,
 };
 
 // Product uploads are additionally allowed one level deeper, one folder per
@@ -40,13 +44,40 @@ const PRODUCT_FAMILY_FOLDERS = PRODUCT_FAMILIES.map(
   (family) => `${CLOUDINARY_FOLDERS.PRODUCTS}/${family}`
 );
 
+// Anything under this prefix is a return record and may be deleted on a
+// schedule. Anything outside it is catalogue or marketing imagery and must
+// never be touched by the purge — deleting the product photos is not something
+// UpCell recovers from.
+const RETURNS_PREFIX = `${CLOUDINARY_ROOT}/returns/`;
+
+// One RMA's inspection photos.
+const inspectionFolder = (rmaNumber) => {
+  const safe = slugify(rmaNumber) || "unfiled";
+  return `${CLOUDINARY_FOLDERS.RETURNS_INSPECTIONS}/${safe}`;
+};
+
+// Whether a public_id belongs to the returns tree at all. The purge asks this
+// before every delete, and a false answer stops the delete rather than
+// logging a warning: the whole point is that it cannot reach the catalogue.
+const isReturnsAsset = (publicId) =>
+  typeof publicId === "string" && publicId.startsWith(RETURNS_PREFIX);
+
 const ALLOWED_UPLOAD_FOLDERS = [
   ...Object.values(CLOUDINARY_FOLDERS),
   ...PRODUCT_FAMILY_FOLDERS,
 ];
 
+// A per-RMA inspection folder is allowed even though it is not in the fixed
+// list, because the RMA is part of the path. Checked by prefix rather than by
+// membership, and the RMA is slugified first so a caller cannot walk out of
+// the tree with a "../".
+const isInspectionFolder = (folder) =>
+  typeof folder === "string"
+  && folder.startsWith(`${CLOUDINARY_FOLDERS.RETURNS_INSPECTIONS}/`)
+  && !folder.includes("..");
+
 function isAllowedFolder(folder) {
-  return ALLOWED_UPLOAD_FOLDERS.includes(folder);
+  return ALLOWED_UPLOAD_FOLDERS.includes(folder) || isInspectionFolder(folder);
 }
 
 // Maps free-text product/category naming onto one of the fixed family folders.
@@ -103,6 +134,10 @@ function buildPublicId({ parts = [], sourceKey }) {
 
 module.exports = {
   CLOUDINARY_ROOT,
+  RETURNS_PREFIX,
+  inspectionFolder,
+  isReturnsAsset,
+  isInspectionFolder,
   CLOUDINARY_FOLDERS,
   PRODUCT_FAMILIES,
   PRODUCT_FAMILY_FOLDERS,

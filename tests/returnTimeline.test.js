@@ -118,15 +118,15 @@ describe("applyTransition", () => {
     const request = req("Submitted");
 
     applyTransition(request, "ReturnApproved", { actor: "staff1", actorType: "staff" });
+    applyTransition(request, "InTransit", { actor: "staff2", actorType: "staff" });
     applyTransition(request, "DeviceReceived", { actor: "staff2", actorType: "staff" });
-    applyTransition(request, "Approved", { actor: "staff1", actorType: "staff" });
 
     expect(request.timeline.map((entry) => `${entry.from}->${entry.to}`)).toEqual([
       "Submitted->ReturnApproved",
-      "ReturnApproved->DeviceReceived",
-      "DeviceReceived->Approved",
+      "ReturnApproved->InTransit",
+      "InTransit->DeviceReceived",
     ]);
     // Who did which step is the part that settles a dispute.
-    expect(request.timeline.map((entry) => entry.actor)).toEqual(["staff1", "staff2", "staff1"]);
+    expect(request.timeline.map((entry) => entry.actor)).toEqual(["staff1", "staff2", "staff2"]);
   });
 });

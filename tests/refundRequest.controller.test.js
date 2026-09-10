@@ -40,14 +40,25 @@ const makeReqRes = (body = {}, { params = {}, query = {}, user } = {}) => {
   // eslint-disable-next-line prefer-const
   let res;
   res = {
-    statusCode: 200,
+    // Deliberately not 200. A controller that throws never calls res.status,
+    // and a 200 default makes that read as success — which is exactly how a
+    // ReferenceError in a handler passed its own test until it was chased
+    // down by hand.
+    statusCode: null,
     body: undefined,
     // Express's own res.set and res.send, which the CSV export uses.
     headers: {},
     status(code) { this.statusCode = code; return this; },
     set(name, value) { res.headers[name] = value; return this; },
     send: jest.fn(function capture(payload) { res.body = payload; return this; }),
-    json: jest.fn(function capture(payload) { res.body = payload; return this; }),
+    // Express sends 200 when a handler calls res.json without a status, so the
+    // stub does too. A handler that throws calls neither, and statusCode stays
+    // null — which is the distinction the default of 200 used to hide.
+    json: jest.fn(function capture(payload) {
+      if (res.statusCode === null) res.statusCode = 200;
+      res.body = payload;
+      return this;
+    }),
   };
   return { req, res, next: jest.fn() };
 };
@@ -78,8 +89,9 @@ const requestDoc = (overrides = {}) => ({
   userId: "user_1",
   email: "buyer@example.com",
   itemIds: ["p1"],
-  // The reason decides whether the 15% restocking fee applies. These tests
-  // assert 849.15 — 999 minus the fee — so they are change-of-mind returns.
+  // A change-of-mind return. Since V3.1 the reason no longer changes what is
+  // refunded — there is no restocking fee on any route — but it still decides
+  // who pays the postage.
   reasonCode: "CHANGED_MIND",
   status: "Submitted",
   save: jest.fn().mockResolvedValue(true),
@@ -117,7 +129,7 @@ beforeEach(() => {
 });
 
 describe("getRefundableItems — what the customer sees before the form", () => {
-  it("lists only returnable items, with the fee stated", async () => {
+  it("lists only returnable items, and says returns are free", async () => {
     Order.findById.mockResolvedValue(paidOrder());
 
     const { req, res, next } = makeReqRes({}, { params: { id: "a".repeat(24) }, user: CUSTOMER });
@@ -126,7 +138,9 @@ describe("getRefundableItems — what the customer sees before the form", () => 
     const body = res.json.mock.calls[0][0];
     expect(body.ok).toBe(true);
     expect(body.items).toHaveLength(2);
-    expect(body.feeNotice).toContain("15%");
+    // The reversal, in the one sentence the customer actually reads.
+    expect(body.feeNotice).toMatch(/free/i);
+    expect(body.feeNotice).not.toMatch(/15%/);
   });
 
   // Authentication alone is not enough: changing the id in the URL must not
@@ -332,7 +346,7 @@ describe("updateRefundRequestStatus — the workflow", () => {
   });
 
   it("stamps who received the device and when", async () => {
-    const request = requestDoc({ status: "ReturnApproved" });
+    const request = requestDoc({ status: "InTransit" });
     RefundRequest.findById.mockResolvedValue(request);
     Order.findById.mockResolvedValue(paidOrder());
 
@@ -378,7 +392,7 @@ describe("updateRefundRequestStatus — the workflow", () => {
     await controller.updateRefundRequestStatus(req, res, next);
 
     // 999 minus the 15% restocking fee.
-    expect(order.refund.amount).toBe(849.15);
+    expect(order.refund.amount).toBe(999);
     expect(order.refund.approvedBy).toBe("yasir@upcellit.com");
     expect(order.status).toBe("Refunded");
   });
@@ -396,7 +410,7 @@ describe("updateRefundRequestStatus — the workflow", () => {
 
     expect(request.inspectionNotes).toBe("Minor scuff on the back");
     expect(request.inspectedBy).toBe("yasir@upcellit.com");
-    expect(request.calculatedAmount).toBe(849.15);
+    expect(request.calculatedAmount).toBe(999);
   });
 
   it("refuses to approve an order that was already refunded", async () => {
@@ -417,7 +431,7 @@ describe("updateRefundRequestStatus — the workflow", () => {
   // somewhere else.
   it("marks the money entered at the bank when moving to Refunded", async () => {
     const order = paidOrder({
-      refund: { approvedAt: new Date(), amount: 849.15, itemsTotal: 999, restockingFee: 149.85 },
+      refund: { approvedAt: new Date(), amount: 999, itemsTotal: 999, restockingFee: 149.85 },
     });
     RefundRequest.findById.mockResolvedValue(requestDoc({ status: "Approved" }));
     Order.findById.mockResolvedValue(order);
@@ -443,7 +457,7 @@ describe("updateRefundRequestStatus — the workflow", () => {
   });
 
   it("writes an audit entry naming who moved it", async () => {
-    RefundRequest.findById.mockResolvedValue(requestDoc({ status: "ReturnApproved" }));
+    RefundRequest.findById.mockResolvedValue(requestDoc({ status: "InTransit" }));
     Order.findById.mockResolvedValue(paidOrder());
 
     const { req, res, next } = makeReqRes({ status: "DeviceReceived" }, { params: { id: "req1" }, user: STAFF });
@@ -636,11 +650,13 @@ describe("the return form is told the policy for the reason it picked", () => {
     const body = await ask();
 
     expect(body.reasons.length).toBeGreaterThan(10);
+    // MISSING_ITEMS is gone — UpCell ships devices only, nothing in the box.
+    expect(body.reasons.map((entry) => entry.code)).not.toContain("MISSING_ITEMS");
     const changedMind = body.reasons.find((entry) => entry.code === "CHANGED_MIND");
     expect(changedMind).toMatchObject({
-      windowDays: 14,
-      customerPaysPostage: true,
-      restockingFee: true,
+      windowDays: 30,
+      customerPaysPostage: false,
+      restockingFee: false,
     });
   });
 
@@ -664,11 +680,12 @@ describe("the return form is told the policy for the reason it picked", () => {
     expect((await ask()).estimate).toBeNull();
   });
 
-  it("deducts the fee on a change-of-mind return", async () => {
+  it("deducts nothing on a change-of-mind return either", async () => {
+    // The reversal: this used to be 15% and the customer's postage.
     const body = await ask({ reasonCode: "CHANGED_MIND" });
 
-    expect(body.estimate.restockingFee).toBeGreaterThan(0);
-    expect(body.estimate.customerPaysPostage).toBe(true);
+    expect(body.estimate.restockingFee).toBe(0);
+    expect(body.estimate.customerPaysPostage).toBe(false);
   });
 
   it("deducts nothing when the device is faulty", async () => {
@@ -686,14 +703,16 @@ describe("the return form is told the policy for the reason it picked", () => {
     expect(body.feeNotice).toMatch(/No restocking fee/i);
   });
 
-  it("shortens the window when the reason is a change of mind", async () => {
+  it("gives every reason the same 30-day window", async () => {
     const changeOfMind = await ask({ reasonCode: "CHANGED_MIND" });
     const faulty = await ask({ reasonCode: "WONT_POWER_ON" });
 
-    expect(changeOfMind.windowDays).toBe(14);
+    expect(changeOfMind.windowDays).toBe(30);
     expect(faulty.windowDays).toBe(30);
-    expect(new Date(changeOfMind.closesAt).getTime())
-      .toBeLessThan(new Date(faulty.closesAt).getTime());
+    // Same day, not the same millisecond — the two calls are a tick apart and
+    // the window is measured from the order, not from now.
+    expect(new Date(changeOfMind.closesAt).toDateString())
+      .toBe(new Date(faulty.closesAt).toDateString());
   });
 });
 
@@ -837,10 +856,10 @@ describe("receiving a device", () => {
     return { request, res };
   };
 
-  it("can be received from every state a parcel can be in", async () => {
-    // A device can arrive after a label was issued, while the carrier still
-    // says in transit, or after it says delivered. All three happen.
-    for (const from of ["ReturnApproved", "LabelIssued", "InTransit", "Delivered"]) {
+  it("can be received once the parcel is moving or has landed", async () => {
+    // Something has to say the parcel is actually on its way before anyone can
+    // say it arrived.
+    for (const from of ["InTransit", "Delivered"]) {
       const { request, res } = await receive(from);
 
       expect(res.statusCode).toBe(200);
@@ -849,14 +868,14 @@ describe("receiving a device", () => {
   });
 
   it("records who took it in, and when", async () => {
-    const { request } = await receive("LabelIssued");
+    const { request } = await receive("InTransit");
 
     expect(request.receivedBy).toBe(STAFF.email);
     expect(request.receivedAt).toBeInstanceOf(Date);
   });
 
   it("tells the customer it arrived", async () => {
-    await receive("InTransit");
+    await receive("Delivered");
 
     expect(mockSendMail).toHaveBeenCalled();
   });
@@ -873,8 +892,11 @@ describe("receiving a device", () => {
 describe("submitInspection", () => {
   const { CHECKLIST_ITEMS } = require("../src/constants/inspectionChecklist");
 
-  const allPass = (overrides = {}) =>
-    CHECKLIST_ITEMS.map((item) => ({ key: item.key, result: overrides[item.key] || "pass" }));
+  const allPass = (overrides = {}) => CHECKLIST_ITEMS.map((item) => {
+    if (item.measured) return { key: item.key, value: overrides[item.key] ?? 92 };
+    if (item.graded) return { key: item.key, grade: overrides[item.key] || "EXCELLENT" };
+    return { key: item.key, result: overrides[item.key] || "pass" };
+  });
 
   const fivePhotos = Array.from({ length: 5 }, (_, index) => ({
     url: `https://cdn/p${index}.jpg`,
@@ -959,13 +981,34 @@ describe("submitInspection", () => {
     expect(request.status).toBe("Rejected");
   });
 
-  it("offers less for a device in worse condition than described", async () => {
-    const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+  it("offers less when the device came back a grade lower than it sold at", async () => {
+    const request = requestDoc({
+      status: "DeviceReceived",
+      device: { gradeAtSale: "EXCELLENT" },
+      timeline: [],
+    });
 
-    const { res } = await inspect(request, { checklist: allPass({ body_condition: "fail" }) });
+    const { res } = await inspect(request, { checklist: allPass({ cosmetic_grade: "GOOD" }) });
 
     expect(request.status).toBe("RevisedOffer");
-    expect(res.body.grade).toBe("B");
+    expect(res.body.grade).toBe("GOOD");
+  });
+
+  it("refunds in full when only the battery fell", async () => {
+    // Sold at 92%, back at 81%, looking the same. Nothing deducted, nothing
+    // re-graded — this is the rule the whole policy turns on.
+    const request = requestDoc({
+      status: "DeviceReceived",
+      device: { gradeAtSale: "EXCELLENT" },
+      timeline: [],
+    });
+
+    const { res } = await inspect(request, {
+      checklist: allPass({ battery_health: 81, cosmetic_grade: "EXCELLENT" }),
+    });
+
+    expect(res.body.suggested.outcome).toBe("FULL_REFUND");
+    expect(res.body.suggested.disposition.regraded).toBe(false);
   });
 
   it("only demands the fault check when the customer claimed a fault", async () => {
@@ -980,20 +1023,30 @@ describe("submitInspection", () => {
     expect(res.statusCode).toBe(200);
   });
 
-  it("suggests putting a sealed device back into new stock", async () => {
-    const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+  it("relists a device that came back as it left", async () => {
+    const request = requestDoc({
+      status: "DeviceReceived",
+      device: { gradeAtSale: "EXCELLENT" },
+      timeline: [],
+    });
 
     const { res } = await inspect(request);
 
-    expect(res.body.suggested.disposition.type).toBe("RESTOCK_NEW");
+    expect(res.body.suggested.disposition.type).toBe("RELIST");
   });
 
-  it("marks an opened but working device OPEN_BOX", async () => {
-    const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+  it("relists a device that dropped a grade, re-graded", async () => {
+    const request = requestDoc({
+      status: "DeviceReceived",
+      device: { gradeAtSale: "EXCELLENT" },
+      timeline: [],
+    });
 
-    const { res } = await inspect(request, { checklist: allPass({ seal_intact: "fail" }) });
+    const { res } = await inspect(request, { checklist: allPass({ cosmetic_grade: "FAIR" }) });
 
-    expect(res.body.suggested.disposition.type).toBe("OPEN_BOX");
+    expect(res.body.suggested.disposition).toMatchObject({
+      type: "RELIST_REGRADED", grade: "FAIR",
+    });
   });
 
   it("writes the outcome into the timeline, with the grade", async () => {
@@ -1005,7 +1058,7 @@ describe("submitInspection", () => {
       event: "inspection_completed",
       actor: STAFF.email,
     });
-    expect(request.timeline.at(-1).meta.grade).toBe("A");
+    expect(request.timeline.at(-1).meta.grade).toBe("EXCELLENT");
   });
 
   it("lets an inspector resume a device that was blocked and then cleared", async () => {
@@ -1026,7 +1079,7 @@ describe("offerRevisedRefund", () => {
     timeline: [],
     inspection: {
       checklist: [
-        { key: "body_condition", result: "fail" },
+        { key: "cosmetic_grade", result: "fail" },
         { key: "powers_on", result: "pass" },
       ],
       findings: "Deep scratch across the back",
@@ -1043,7 +1096,8 @@ describe("offerRevisedRefund", () => {
       {
         deductions: [{
           type: "DAMAGE", amount: 100,
-          reason: "Deep scratch across the back", findingKey: "body_condition",
+          reason: "Deep scratch across the back", findingKey: "cosmetic_grade",
+          photoIds: ["upcell/returns/photo-1"],
         }],
         ...body,
       },
@@ -1060,7 +1114,7 @@ describe("offerRevisedRefund", () => {
 
     expect(res.statusCode).toBe(200);
     expect(request.status).toBe("RevisedOffer");
-    expect(request.refundBreakdown.offeredAmount).toBe(749.15);
+    expect(request.refundBreakdown.offeredAmount).toBe(899);
   });
 
   it("computes the offered amount rather than taking one from the request", async () => {
@@ -1070,7 +1124,7 @@ describe("offerRevisedRefund", () => {
     // at all, and one supplied would be ignored.
     const { res } = await offer(request, { offeredAmount: 1 });
 
-    expect(res.body.offeredAmount).toBe(749.15);
+    expect(res.body.offeredAmount).toBe(899);
   });
 
   it("gives the customer five days to answer", async () => {
@@ -1100,6 +1154,7 @@ describe("offerRevisedRefund", () => {
     const { res } = await offer(request, {
       deductions: [{
         type: "DAMAGE", amount: 100, reason: "Something", findingKey: "powers_on",
+        photoIds: ["upcell/returns/photo-1"],
       }],
     });
 
@@ -1124,13 +1179,36 @@ describe("offerRevisedRefund", () => {
     expect(request.accessToken.length).toBeGreaterThan(20);
   });
 
-  it("keeps the same token when an offer is revised again", async () => {
-    // A new token would break the link in an email the customer already has open.
+  it("keeps a token the request already had", async () => {
+    // A new token would break the link in an email the customer already has
+    // open, so one is minted once and never replaced.
     const request = inspected({ accessToken: "existing-token-value-kept-as-is" });
 
     await offer(request);
 
     expect(request.accessToken).toBe("existing-token-value-kept-as-is");
+  });
+
+  it("refuses a second offer on the same return", async () => {
+    // A second one re-opens a number the customer already has five days to
+    // think about, and the accept link in their inbox still points at the
+    // first amount.
+    const request = inspected({
+      refundBreakdown: { offeredAmount: 700, offerExpiresAt: new Date() },
+    });
+
+    const { res } = await offer(request);
+
+    expect(res.statusCode).toBe(409);
+    expect(res.body.offeredAmount).toBe(700);
+  });
+
+  it("will not offer on a return that is already in RevisedOffer", async () => {
+    const request = inspected({ status: "RevisedOffer" });
+
+    const { res } = await offer(request);
+
+    expect(res.statusCode).toBe(400);
   });
 });
 
@@ -1253,8 +1331,11 @@ describe("respondToRevisedOffer", () => {
 // R.8 — the clock, and money actually leaving.
 describe("the SLA clock follows the status", () => {
   const { CHECKLIST_ITEMS } = require("../src/constants/inspectionChecklist");
-  const allPass = (overrides = {}) =>
-    CHECKLIST_ITEMS.map((item) => ({ key: item.key, result: overrides[item.key] || "pass" }));
+  const allPass = (overrides = {}) => CHECKLIST_ITEMS.map((item) => {
+    if (item.measured) return { key: item.key, value: overrides[item.key] ?? 92 };
+    if (item.graded) return { key: item.key, grade: overrides[item.key] || "EXCELLENT" };
+    return { key: item.key, result: overrides[item.key] || "pass" };
+  });
   const fivePhotos = Array.from({ length: 5 }, (_, i) => ({
     url: `https://cdn/p${i}.jpg`, publicId: `upcell/returns/p${i}`,
   }));
@@ -1302,7 +1383,7 @@ describe("settleRefundRequest", () => {
   const approved = (overrides = {}) => requestDoc({
     status: "Approved",
     rmaNumber: "RMA-2026-00412",
-    calculatedAmount: 849.15,
+    calculatedAmount: 999,
     timeline: [],
     ...overrides,
   });
@@ -1311,7 +1392,7 @@ describe("settleRefundRequest", () => {
     RefundRequest.findById.mockResolvedValue(request);
     Order.findById.mockResolvedValue(paidOrder());
     const { req, res, next } = makeReqRes(
-      { method: "BANK_TRANSFER", amount: 849.15, reference: "TRF-99182", ...body },
+      { method: "BANK_TRANSFER", amount: 999, reference: "TRF-99182", ...body },
       { params: { id: "req1" }, user: STAFF }
     );
     await controller.settleRefundRequest(req, res, next);
@@ -1325,7 +1406,7 @@ describe("settleRefundRequest", () => {
 
     expect(res.statusCode).toBe(200);
     expect(request.status).toBe("Refunded");
-    expect(request.resolution.settlementAmount).toBe(849.15);
+    expect(request.resolution.settlementAmount).toBe(999);
     expect(request.resolution.settledBy).toBe(STAFF.email);
   });
 
@@ -1370,7 +1451,7 @@ describe("settleRefundRequest", () => {
 
   it("checks against the revised amount when there was an offer", async () => {
     const request = approved({
-      calculatedAmount: 849.15,
+      calculatedAmount: 999,
       refundBreakdown: { offeredAmount: 700, finalAmount: 700 },
     });
 
@@ -1615,68 +1696,131 @@ describe("recordDisposition", () => {
     status: "Refunded",
     rmaNumber: "RMA-2026-00412",
     itemIds: ["p1"],
-    inspection: { grade: "A" },
+    inspection: { finalGrade: "EXCELLENT" },
     timeline: [],
     ...overrides,
   });
 
-  const decide = async (request, body = {}) => {
+  const decide = async (request, body = {}, { source = "UNKNOWN", modified = 1 } = {}) => {
     RefundRequest.findById.mockResolvedValue(request);
-    SingleVariation.updateOne = jest.fn(async () => ({ modifiedCount: 1 }));
+    SingleVariation.updateOne = jest.fn(async () => ({ modifiedCount: modified }));
+    SingleVariation.findById = jest.fn(() => ({
+      select: () => ({ lean: async () => ({ acquisitionSource: source }) }),
+    }));
 
     const { req, res, next } = makeReqRes(
-      { type: "RESTOCK_NEW", ...body },
+      { type: "RELIST", grade: "EXCELLENT", ...body },
       { params: { id: "req1" }, user: STAFF }
     );
     await controller.recordDisposition(req, res, next);
+    if (next.mock.calls.length) throw next.mock.calls[0][0];
     return { res, request, SingleVariation };
   };
 
-  it("puts a sealed device back on sale", async () => {
+  it("puts the unit's own listing back up", async () => {
     const request = accepted();
 
     const { res } = await decide(request);
 
     expect(res.statusCode).toBe(200);
-    expect(res.body.restocked).toBe(true);
-    expect(SingleVariation.updateOne).toHaveBeenCalled();
-    expect(request.disposition.type).toBe("RESTOCK_NEW");
+    expect(res.body.relisted).toBe(true);
+    expect(request.disposition.type).toBe("RELIST");
+    expect(request.disposition.relistedAt).toBeInstanceOf(Date);
   });
 
-  it("does not put an opened device back on sale", async () => {
+  it("re-prices when the grade dropped", async () => {
     const request = accepted();
 
-    const { res } = await decide(request, { type: "OPEN_BOX", grade: "A" });
+    const { res, SingleVariation: model } = await decide(request, {
+      type: "RELIST_REGRADED", grade: "GOOD", price: 499,
+    });
 
-    expect(res.body.restocked).toBe(false);
-    expect(SingleVariation.updateOne).not.toHaveBeenCalled();
+    expect(res.body.relisted).toBe(true);
+    expect(model.updateOne.mock.calls[0][1].$set.price).toBe(499);
   });
 
-  it("hands back an internal record for anything not restocked", async () => {
+  it("refuses a re-grade with no new price", async () => {
     const request = accepted();
 
-    const { res } = await decide(request, { type: "WHOLESALE", grade: "B" });
+    const { res } = await decide(request, { type: "RELIST_REGRADED", grade: "GOOD" });
+
+    expect(res.statusCode).toBe(400);
+    expect(request.disposition).toBeUndefined();
+  });
+
+  it("does not relist a device going to wholesale", async () => {
+    const request = accepted();
+
+    const { res, SingleVariation: model } = await decide(request, {
+      type: "WHOLESALE", grade: "FAIR",
+    });
+
+    expect(res.body.relisted).toBe(false);
+    expect(model.updateOne).not.toHaveBeenCalled();
+  });
+
+  it("hands back an internal record for anything not relisted", async () => {
+    const request = accepted();
+
+    const { res } = await decide(request, { type: "WHOLESALE", grade: "FAIR" });
 
     expect(res.body.internalRecord).toMatchObject({
-      disposition: "WHOLESALE", grade: "B", rmaNumber: "RMA-2026-00412",
+      disposition: "WHOLESALE", grade: "FAIR", rmaNumber: "RMA-2026-00412",
     });
   });
 
-  it("warns when the restock did not actually change the shelf", async () => {
-    // Otherwise a device stays off sale that everyone believes is on it.
+  it("refuses the supplier route for a device bought from an individual", async () => {
+    // There is nobody to send it back to.
     const request = accepted();
-    RefundRequest.findById.mockResolvedValue(request);
-    SingleVariation.updateOne = jest.fn(async () => ({ modifiedCount: 0 }));
 
-    const { req, res, next } = makeReqRes(
-      { type: "RESTOCK_NEW" }, { params: { id: "req1" }, user: STAFF }
+    const { res } = await decide(
+      request,
+      { type: "RETURN_TO_SUPPLIER", grade: "FAIL", reason: "DOA inside terms" },
+      { source: "INDIVIDUAL" }
     );
-    await controller.recordDisposition(req, res, next);
 
-    expect(res.body.restocked).toBe(false);
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatch(/individual/i);
+  });
+
+  it("allows it for bulk stock", async () => {
+    const request = accepted();
+
+    const { res } = await decide(
+      request,
+      { type: "RETURN_TO_SUPPLIER", grade: "FAIL", reason: "DOA inside terms" },
+      { source: "BULK" }
+    );
+
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("warns when the relist did not actually change the shelf", async () => {
+    // Otherwise a device stays off sale that everyone believes is back on it.
+    const request = accepted();
+
+    const { res } = await decide(request, {}, { modified: 0 });
+
+    expect(res.body.relisted).toBe(false);
     expect(res.body.warning).toMatch(/could not be put back on sale/i);
     // The decision is still recorded — the device did come back.
-    expect(request.disposition.type).toBe("RESTOCK_NEW");
+    expect(request.disposition.type).toBe("RELIST");
+  });
+
+  it("refuses a write-off with no reason", async () => {
+    const request = accepted();
+
+    const { res } = await decide(request, { type: "SCRAP", grade: "FAIL" });
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("falls back to the grade inspection worked out", async () => {
+    const request = accepted();
+
+    await decide(request, { grade: undefined });
+
+    expect(request.disposition.grade).toBe("EXCELLENT");
   });
 
   it("records who decided, and writes it into the timeline", async () => {
@@ -1690,15 +1834,6 @@ describe("recordDisposition", () => {
     });
   });
 
-  it("refuses a write-off with no reason", async () => {
-    const request = accepted();
-
-    const { res } = await decide(request, { type: "SCRAP", grade: "FAIL" });
-
-    expect(res.statusCode).toBe(400);
-    expect(request.disposition).toBeUndefined();
-  });
-
   it("will not route a device that is still going back to the customer", async () => {
     const request = accepted({ status: "Rejected" });
 
@@ -1710,7 +1845,7 @@ describe("recordDisposition", () => {
   it("keeps the IMEI, which is the only thing tying a shelf to a return", async () => {
     const request = accepted();
 
-    await decide(request, { type: "WHOLESALE", grade: "B", imei: "353916000000000" });
+    await decide(request, { type: "WHOLESALE", grade: "FAIR", imei: "353916000000000" });
 
     expect(request.device.imei).toBe("353916000000000");
   });
@@ -1865,11 +2000,11 @@ describe("exportReturnsCsv", () => {
     const res = await exportCsv([{
       rmaNumber: "RMA-1", status: "Closed",
       disposition: { type: "OPEN_BOX", grade: "B" },
-      resolution: { outcome: "FULL_REFUND", settlementAmount: 849.15 },
+      resolution: { outcome: "FULL_REFUND", settlementAmount: 999 },
     }]);
 
     expect(res.body).toContain("OPEN_BOX");
-    expect(res.body).toContain("849.15");
+    expect(res.body).toContain("999");
     expect(res.body).not.toContain("{");
   });
 
@@ -1885,5 +2020,254 @@ describe("exportReturnsCsv", () => {
     const res = await exportCsv([]);
 
     expect(res.body).toBe("");
+  });
+});
+
+// V3.3 — when the customer's 30 days started.
+describe("overrideReturnWindow", () => {
+  const override = async (request, body = {}) => {
+    RefundRequest.findById.mockResolvedValue(request);
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res, next } = makeReqRes(
+      {
+        startDate: new Date("2026-09-05"),
+        note: "Customer emailed to say it arrived on the 5th",
+        ...body,
+      },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.overrideReturnWindow(req, res, next);
+    if (next.mock.calls.length) throw next.mock.calls[0][0];
+    return { res, request };
+  };
+
+  it("moves the date the window started from", async () => {
+    // The record is sometimes wrong: a carrier marks a parcel delivered when
+    // it reaches a depot, and the customer has an email saying otherwise.
+    const request = requestDoc({ timeline: [] });
+
+    const { res } = await override(request);
+
+    expect(res.statusCode).toBe(200);
+    expect(request.window.startedFrom).toBe("STAFF_OVERRIDE");
+    expect(request.window.startDate).toEqual(new Date("2026-09-05"));
+  });
+
+  it("moves the closing date with it", async () => {
+    const request = requestDoc({ timeline: [] });
+
+    await override(request);
+
+    // 30 days from the overridden start, not from delivery.
+    expect(request.window.expiresAt).toEqual(new Date("2026-10-05"));
+  });
+
+  it("refuses an override with no note", async () => {
+    // It decides whether a return is inside the window, so it moves money.
+    // With two or three staff able to do it, an unexplained override is
+    // indistinguishable from a favour.
+    const request = requestDoc({ timeline: [] });
+
+    const { res } = await override(request, { note: "" });
+
+    expect(res.statusCode).toBe(400);
+    expect(request.window).toBeUndefined();
+  });
+
+  it("refuses a date in the future", async () => {
+    const request = requestDoc({ timeline: [] });
+
+    const { res } = await override(request, {
+      startDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    });
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("records who moved it and what they said", async () => {
+    const request = requestDoc({ timeline: [] });
+
+    await override(request);
+
+    expect(request.window.overrideBy).toBe(STAFF.email);
+    expect(request.timeline.at(-1)).toMatchObject({
+      event: "window_overridden", actorType: "staff",
+    });
+    expect(request.timeline.at(-1).meta.note).toMatch(/arrived on the 5th/);
+  });
+});
+
+// V3.6 — freezing the inspection photos past their ninety days.
+describe("setDisputeHold", () => {
+  const hold = async (request, body) => {
+    RefundRequest.findById.mockResolvedValue(request);
+
+    const { req, res, next } = makeReqRes(body, { params: { id: "req1" }, user: STAFF });
+    await controller.setDisputeHold(req, res, next);
+    if (next.mock.calls.length) throw next.mock.calls[0][0];
+    return { res, request };
+  };
+
+  it("freezes the photos", async () => {
+    const request = requestDoc({ status: "Refunded", timeline: [] });
+
+    const { res } = await hold(request, { disputed: true, reason: "Chargeback filed" });
+
+    expect(res.statusCode).toBe(200);
+    expect(request.disputed).toBe(true);
+    expect(request.save).toHaveBeenCalled();
+  });
+
+  it("records who applied it and why", async () => {
+    // A hold that appears without a name on it is worse than no hold: nobody
+    // knows what has to close before it can be lifted.
+    const request = requestDoc({ status: "Refunded", timeline: [] });
+
+    await hold(request, { disputed: true, reason: "Solicitor letter received" });
+
+    expect(request.timeline.at(-1)).toMatchObject({
+      event: "dispute_hold_applied", actor: STAFF.email, actorType: "staff",
+    });
+    expect(request.timeline.at(-1).meta.reason).toMatch(/solicitor/i);
+    expect(AuditLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "refund_request.dispute_hold_applied" })
+    );
+  });
+
+  it("lifts it again, and logs that too", async () => {
+    const request = requestDoc({ status: "Refunded", disputed: true, timeline: [] });
+
+    const { res } = await hold(request, { disputed: false });
+
+    expect(res.statusCode).toBe(200);
+    expect(request.disputed).toBe(false);
+    expect(request.timeline.at(-1).event).toBe("dispute_hold_lifted");
+  });
+
+  it("deletes nothing when the hold is lifted", async () => {
+    // The photos become eligible again on the next purge run, with their
+    // original dates. Lifting a hold is not a delete button.
+    const photos = [{ publicId: "upcell/returns/inspections/rma-1/a", purgeAfter: new Date("2026-01-01") }];
+    const request = requestDoc({ status: "Refunded", disputed: true, timeline: [], inspection: { photos } });
+
+    await hold(request, { disputed: false });
+
+    expect(request.inspection.photos).toEqual(photos);
+  });
+
+  it("does not write a second event for a hold that is already on", async () => {
+    // The timeline is the dispute record. Repeating a PATCH should not fill
+    // it with entries that say nothing happened.
+    const request = requestDoc({ status: "Refunded", disputed: true, timeline: [] });
+
+    const { res } = await hold(request, { disputed: true, reason: "Chargeback filed" });
+
+    expect(res.body.unchanged).toBe(true);
+    expect(request.timeline).toHaveLength(0);
+    expect(request.save).not.toHaveBeenCalled();
+  });
+
+  it("404s on a return that is not there", async () => {
+    RefundRequest.findById.mockResolvedValue(null);
+
+    const { req, res, next } = makeReqRes(
+      { disputed: true, reason: "Chargeback filed" },
+      { params: { id: "nope" }, user: STAFF }
+    );
+    await controller.setDisputeHold(req, res, next);
+
+    expect(res.statusCode).toBe(404);
+  });
+});
+
+// V3.7 — what the two option endpoints tell the bench form.
+describe("the option lists the admin forms are built from", () => {
+  const SingleVariation = require("../src/models/singleVariation.model");
+
+  const ask = async (fn, query = {}) => {
+    const { req, res, next } = makeReqRes({}, { query, user: STAFF });
+    await fn(req, res, next);
+    if (next.mock.calls.length) throw next.mock.calls[0][0];
+    return res;
+  };
+
+  describe("dispositions", () => {
+    it("says what each route makes the form do", async () => {
+      // The form reads these rather than keeping its own copy of the rules.
+      // A second copy drifts, and the one that drifts is always the one in
+      // front of the person filling it in.
+      const res = await ask(controller.getDispositions);
+      const byType = Object.fromEntries(res.body.dispositions.map((d) => [d.type, d]));
+
+      expect(byType.RELIST).toMatchObject({ relists: true, reprices: false, requiresReason: false });
+      expect(byType.RELIST_REGRADED).toMatchObject({ relists: true, reprices: true });
+      expect(byType.RETURN_TO_SUPPLIER).toMatchObject({ requiresReason: true, requiresBulkSource: true });
+      expect(byType.SCRAP).toMatchObject({ relists: false, requiresReason: true });
+    });
+
+    it("sends the grade scale, so the form cannot offer one the server refuses", async () => {
+      const res = await ask(controller.getDispositions);
+
+      expect(res.body.grades).toEqual(["EXCELLENT", "GOOD", "FAIR", "FAIL"]);
+    });
+
+    it("closes the supplier route for a device bought from an individual", async () => {
+      // Answered before the staff member picks it, rather than after they
+      // have chosen a route and typed a reason.
+      RefundRequest.findById.mockReturnValue({
+        select: () => ({ lean: async () => ({ itemIds: ["p1"] }) }),
+      });
+      SingleVariation.findById = jest.fn(() => ({
+        select: () => ({ lean: async () => ({ acquisitionSource: "INDIVIDUAL" }) }),
+      }));
+
+      const res = await ask(controller.getDispositions, { requestId: "req1" });
+      const supplier = res.body.dispositions.find((d) => d.type === "RETURN_TO_SUPPLIER");
+
+      expect(supplier.unavailableReason).toMatch(/individual/i);
+      expect(res.body.dispositions.filter((d) => d.unavailableReason)).toHaveLength(1);
+    });
+
+    it("leaves every route open when the source was never recorded", async () => {
+      // The field is new and most of the catalogue is not filled in. Hiding a
+      // legitimate route on every existing device would cost real recovery
+      // value.
+      RefundRequest.findById.mockReturnValue({
+        select: () => ({ lean: async () => ({ itemIds: ["p1"] }) }),
+      });
+      SingleVariation.findById = jest.fn(() => ({
+        select: () => ({ lean: async () => ({ acquisitionSource: "UNKNOWN" }) }),
+      }));
+
+      const res = await ask(controller.getDispositions, { requestId: "req1" });
+
+      expect(res.body.dispositions.every((d) => !d.unavailableReason)).toBe(true);
+    });
+
+    it("says nothing about availability when no request was named", async () => {
+      const res = await ask(controller.getDispositions);
+
+      expect(res.body.dispositions.every((d) => !("unavailableReason" in d))).toBe(true);
+    });
+  });
+
+  describe("inspection checklist", () => {
+    it("marks the two checks that do not answer with pass or fail", async () => {
+      // Without these the form draws three buttons for a battery percentage
+      // and the server rejects everything it sends.
+      const res = await ask(controller.getInspectionChecklist);
+      const byKey = Object.fromEntries(res.body.items.map((item) => [item.key, item]));
+
+      expect(byKey.battery_health).toMatchObject({ measured: true, neverDeducts: true });
+      expect(byKey.cosmetic_grade).toMatchObject({ graded: true });
+      expect(byKey.powers_on).toMatchObject({ measured: false, graded: false });
+    });
+
+    it("sends the grade scale the graded check answers on", async () => {
+      const res = await ask(controller.getInspectionChecklist);
+
+      expect(res.body.grades).toEqual(["EXCELLENT", "GOOD", "FAIR", "FAIL"]);
+    });
   });
 });

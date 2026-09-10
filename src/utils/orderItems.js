@@ -41,6 +41,11 @@ function convertLineItems(lineItems) {
         quantity,
         unitPriceCents: Math.round(lineTotalCents / quantity),
         lineTotalCents,
+        // Carried, never derived: an order migrated from the legacy shape has
+        // whatever the line recorded at the time, which for anything sold
+        // before intake captured identifiers is nothing at all.
+        imei: metadata.imei || undefined,
+        serialNumber: metadata.serialNumber || undefined,
       });
       continue;
     }

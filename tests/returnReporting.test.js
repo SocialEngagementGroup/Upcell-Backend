@@ -184,6 +184,28 @@ describe("revised offers", () => {
   });
 });
 
+// V3.6 — the number has to match what is actually still in Cloudinary.
+describe("photos still held", () => {
+  it("counts every reason the purge job holds for, not just the status", () => {
+    // The report and the purge job read the same rule. If this counted only
+    // the three "gone wrong" statuses it would under-report the photos that
+    // are really being kept, which is the opposite of what a retention
+    // report is for.
+    const requests = [
+      req({ status: "Rejected" }),
+      req({ status: "Refunded", timeline: [{ event: "revised_offer_accepted" }] }),
+      req({ status: "Refunded", disputed: true }),
+      req({ status: "Refunded" }),
+    ];
+
+    expect(buildReturnMetrics({ requests }).underDisputeHold).toBe(3);
+  });
+
+  it("is zero when nothing is held", () => {
+    expect(buildReturnMetrics({ requests: [req(), req()] }).underDisputeHold).toBe(0);
+  });
+});
+
 describe("dispositions", () => {
   it("counts the mix", () => {
     const requests = [

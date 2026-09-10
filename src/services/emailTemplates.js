@@ -283,7 +283,8 @@ function refundApprovedEmail({ orderId, itemNames, itemsTotal, restockingFee, ta
     itemRows +
     detailRow("Items total", money(itemsTotal)) +
     (restockingFee > 0
-      ? detailRow("Restocking fee (15%)", `&minus;${money(restockingFee)}`)
+      // Only shown if an old refund still carries one. Nothing charges it now.
+      ? detailRow("Restocking fee", `&minus;${money(restockingFee)}`)
       : "") +
     // Shown as its own line rather than folded into the total: a customer
     // checking the figure against their card statement is adding up the same
@@ -339,7 +340,7 @@ const paragraphs = (text) =>
     )
     .join("");
 
-function refundRequestReceivedEmail({ requestId, orderId, itemNames, restockingFee = true, customerPaysPostage = true }) {
+function refundRequestReceivedEmail({ requestId, orderId, itemNames }) {
   const rows =
     detailRow("Request ID", `#${escapeHtml(requestId)}`) +
     detailRow("Order ID", `#${escapeHtml(orderId)}`) +
@@ -354,15 +355,11 @@ function refundRequestReceivedEmail({ requestId, orderId, itemNames, restockingF
       headline: "Return request received",
       // Says plainly that nothing has been agreed yet. A customer who reads
       // this as approval will post a phone before being told where to send it.
-      // What this customer is actually charged, not what a change-of-mind
-      // return is charged. This used to promise a 15% fee to everyone,
-      // including someone returning a device that would not power on.
+      //
+      // No fee and no postage warning: returns are free in both directions,
+      // whatever the reason. This used to promise 15% to everyone.
       subtext:
-        "Thanks — we have your request and will review it shortly. Please don't send anything back yet: we'll email you the return address and instructions once it's approved. "
-        + (restockingFee
-          ? "A 15% restocking fee applies to change-of-mind returns, and shipping is not refunded."
-          : "No restocking fee applies to this return, and "
-            + (customerPaysPostage ? "shipping is not refunded." : "we'll cover the return postage.")),
+        "Thanks — we have your request and will review it shortly. Please don't send anything back yet: we'll email you a prepaid label and the return address once it's approved. Returns are free, and the sales tax you paid comes back with the refund.",
       detailRowsHtml: rows,
       ctaLabel: "View Order",
       ctaHref: ACCOUNT_URL,

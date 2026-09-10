@@ -32,7 +32,7 @@ describe("returnWindowClosesAt — counted from delivery, not from the order dat
     const closes = returnWindowClosesAt(order);
 
     expect(closes.getTime() - new Date(order.deliveredAt).getTime()).toBe(
-      RETURN_WINDOW_DAYS * DAY_MS
+      30 * DAY_MS
     );
   });
 

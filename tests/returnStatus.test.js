@@ -63,8 +63,23 @@ describe("the moves that matter", () => {
     expect(canTransition("Delivered", "InInspection")).toBe(false);
   });
 
-  it("lets a device be walked in without any carrier events", () => {
-    expect(canTransition("ReturnApproved", "DeviceReceived")).toBe(true);
+  it("will not mark a device received straight off a printed label", () => {
+    // A request at LabelIssued has a label and nothing more. Jumping to
+    // received is how a return gets marked complete for a box still on a
+    // customer's kitchen table.
+    expect(canTransition("LabelIssued", "DeviceReceived")).toBe(false);
+    expect(canTransition("ReturnApproved", "DeviceReceived")).toBe(false);
+  });
+
+  it("receives only from in transit or delivered", () => {
+    expect(canTransition("InTransit", "DeviceReceived")).toBe(true);
+    expect(canTransition("Delivered", "DeviceReceived")).toBe(true);
+  });
+
+  it("lets staff mark a parcel in transit by hand while tracking is manual", () => {
+    // One extra click until the FedEx Track API polls for it.
+    expect(canTransition("ReturnApproved", "InTransit")).toBe(true);
+    expect(canTransition("LabelIssued", "InTransit")).toBe(true);
   });
 
   it("allows rejection from every stage before money moves", () => {

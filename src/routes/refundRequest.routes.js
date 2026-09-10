@@ -8,6 +8,8 @@ const {
   refundRequestStatusSchema,
   returnLabelSchema,
   inspectionSubmitSchema,
+  windowOverrideSchema,
+  disputeHoldSchema,
   revisedOfferSchema,
   settlementSchema,
   dispositionSchema,
@@ -31,6 +33,8 @@ const {
   getShipBackQueue,
   getDispositions,
   recordDisposition,
+  overrideReturnWindow,
+  setDisputeHold,
   getReturnsReport,
   exportReturnsCsv,
 } = require("../controllers/refundRequest.controller");
@@ -158,5 +162,26 @@ router.patch(
 // whole reporting phase exists to answer.
 router.get("/admin-returns-report", verifyToken, requireAdmin, getReturnsReport);
 router.get("/admin-returns-report.csv", verifyToken, requireAdmin, exportReturnsCsv);
+
+router.patch(
+  "/admin-refund-requests/:id/window",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  validateRequest(windowOverrideSchema),
+  overrideReturnWindow
+);
+
+// Freezing the inspection photos past their ninety days. Admin only, and
+// logged both ways: a hold that appears and disappears without a name on it is
+// worse than no hold.
+router.patch(
+  "/admin-refund-requests/:id/dispute-hold",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  validateRequest(disputeHoldSchema),
+  setDisputeHold
+);
 
 module.exports = router;

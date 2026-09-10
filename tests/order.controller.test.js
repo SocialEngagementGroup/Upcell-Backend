@@ -473,7 +473,7 @@ describe("processRefund", () => {
   });
 
   it("refuses a second refund on an order already refunded", async () => {
-    const order = paidOrder({ refund: { approvedAt: new Date(), amount: 849.15 } });
+    const order = paidOrder({ refund: { approvedAt: new Date(), amount: 999 } });
     Order.findById.mockResolvedValue(order);
 
     const { req, res } = makeReqRes({ reasonCode: "CHANGED_MIND" }, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
@@ -493,8 +493,8 @@ describe("processRefund", () => {
     expect(res.statusCode).toBe(200);
     expect(order.status).toBe("Refunded");
     expect(order.paid).toBe(true);
-    expect(order.refund.amount).toBe(849.15);
-    expect(order.refund.restockingFee).toBe(149.85);
+    expect(order.refund.amount).toBe(999);
+    expect(order.refund.restockingFee).toBe(0);
     expect(order.refund.approvedBy).toBe("admin@upcellit.com");
     expect(order.refund.approvedAt).toBeInstanceOf(Date);
     expect(order.save).toHaveBeenCalled();
@@ -509,7 +509,7 @@ describe("processRefund", () => {
     expect(AuditLog.create).toHaveBeenCalledWith(
       expect.objectContaining({
         action: "order.refund_processed",
-        metadata: expect.objectContaining({ refundAmount: 849.15, itemsTotal: 999 }),
+        metadata: expect.objectContaining({ refundAmount: 999, itemsTotal: 999 }),
       })
     );
   });
@@ -558,7 +558,7 @@ describe("processRefund", () => {
     await orderController.processRefund(req, res, jest.fn());
 
     const body = res.json.mock.calls[0][0];
-    expect(body.message).toContain("849.15");
+    expect(body.message).toContain("999");
     expect(body.message.toLowerCase()).toContain("enter");
   });
 
@@ -576,7 +576,7 @@ describe("processRefund", () => {
       expect.objectContaining({ type: "order", relatedId: "order1" })
     );
     const notification = Notification.create.mock.calls[0][0];
-    expect(notification.message).toContain("849.15");
+    expect(notification.message).toContain("999");
     expect(notification.message).toContain("Business Center");
   });
 
@@ -596,7 +596,7 @@ describe("processRefund", () => {
 describe("markRefundEnteredAtBank — the manual step, recorded", () => {
   const refundedOrder = (overrides = {}) => ({
     _id: "order1",
-    refund: { amount: 849.15, approvedAt: new Date("2026-09-06T10:00:00Z") },
+    refund: { amount: 999, approvedAt: new Date("2026-09-06T10:00:00Z") },
     save: jest.fn().mockResolvedValue(true),
     ...overrides,
   });
@@ -637,7 +637,7 @@ describe("markRefundEnteredAtBank — the manual step, recorded", () => {
     Order.findById.mockResolvedValue(
       refundedOrder({
         refund: {
-          amount: 849.15,
+          amount: 999,
           approvedAt: new Date(),
           enteredAtBankAt: new Date(),
           enteredAtBankBy: "yasir@upcellit.com",

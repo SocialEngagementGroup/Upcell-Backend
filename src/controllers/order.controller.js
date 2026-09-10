@@ -198,6 +198,13 @@ async function updateOrderStatus(req, res, next) {
     // getClientOrders below.
     order.paid = !UNPAID_STATUSES.includes(status);
 
+    // Stamped the first time an order ships, and left alone after — for the
+    // same reason deliveredAt is. It is the fallback the return window uses
+    // when a delivery was never recorded.
+    if (status === "Shipped" && !order.shippedAt) {
+      order.shippedAt = new Date();
+    }
+
     // Stamped the first time an order reaches Delivered, and left alone after.
     // The 30-day return window counts from this date, so a status set back to
     // Shipped and forward to Delivered again must not hand the customer a fresh

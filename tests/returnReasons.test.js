@@ -32,73 +32,47 @@ describe("return reasons — the code decides the policy", () => {
 });
 
 describe("return window", () => {
-  it("gives change-of-mind 14 days", () => {
-    expect(returnWindowDays("CHANGED_MIND")).toBe(14);
-    expect(returnWindowDays("FOUND_BETTER_PRICE")).toBe(14);
-    expect(returnWindowDays("NO_LONGER_NEEDED")).toBe(14);
+  it("gives every reason 30 days", () => {
+    // It used to be 14 for a change of mind. That made the shorter window
+    // depend on a customer correctly classifying their own problem, and put
+    // UpCell below the policy its customers compare it against.
+    for (const code of RETURN_REASON_CODES) {
+      expect(returnWindowDays(code)).toBe(30);
+    }
   });
 
-  it("gives a faulty or wrong device 30 days", () => {
-    expect(returnWindowDays("WONT_POWER_ON")).toBe(30);
-    expect(returnWindowDays("WRONG_MODEL")).toBe(30);
-    expect(returnWindowDays("ARRIVED_DAMAGED_BOX")).toBe(30);
-  });
-
-  it("gives OTHER and unknown codes the longer window, never the shorter", () => {
-    // Cutting someone off early because the reason list did not fit their case
-    // is the wrong way to be wrong.
-    expect(returnWindowDays("OTHER")).toBe(30);
+  it("gives 30 days for an unknown or absent code too", () => {
     expect(returnWindowDays("MADE_UP")).toBe(30);
     expect(returnWindowDays(undefined)).toBe(30);
   });
 });
 
-describe("fault attribution and who pays postage", () => {
-  it("blames the customer only for changing their mind", () => {
+describe("fault attribution", () => {
+  it("still separates the customer's choice from UpCell's mistake", () => {
+    // It no longer changes what anyone pays. It is what makes a pattern of
+    // bad-faith returns visible when inspection overturns it.
     expect(faultAttributionFor("CHANGED_MIND")).toBe("CUSTOMER");
-    expect(customerPaysInboundPostage("CHANGED_MIND")).toBe(true);
-  });
-
-  it("blames UpCell for its own mistakes, faults and logistics", () => {
-    for (const code of ["WRONG_MODEL", "WONT_POWER_ON", "NEVER_ARRIVED", "NOT_AS_DESCRIBED"]) {
-      expect(faultAttributionFor(code)).toBe("UPCELL");
-      expect(customerPaysInboundPostage(code)).toBe(false);
-    }
+    expect(faultAttributionFor("WONT_POWER_ON")).toBe("UPCELL");
+    expect(faultAttributionFor("NEVER_ARRIVED")).toBe("UPCELL");
   });
 
   it("refuses to guess for OTHER", () => {
-    // null is not a failure here. It means a person has to read the note and
-    // decide, and a guess would silently settle who pays.
     expect(faultAttributionFor("OTHER")).toBeNull();
     expect(faultAttributionFor("MADE_UP")).toBeNull();
   });
 });
 
-describe("restocking fee", () => {
-  it("applies to change-of-mind returns", () => {
-    expect(restockingFeeApplies("CHANGED_MIND")).toBe(true);
-    expect(restockingFeeApplies("FOUND_BETTER_PRICE")).toBe(true);
-    expect(restockingFeeApplies("NO_LONGER_NEEDED")).toBe(true);
-  });
-
-  it("never applies when the device is faulty, wrong, or arrived damaged", () => {
-    // This is the live bug it replaces: the fee was charged on everything
-    // unless staff waived it, so a broken phone cost the customer 15%.
-    const upcellsFault = [
-      "WONT_POWER_ON", "BATTERY_ISSUE", "SCREEN_OR_TOUCH", "CAMERA_ISSUE",
-      "NETWORK_OR_SIM", "OVERHEATING", "ACTIVATION_LOCKED", "PHYSICAL_DAMAGE_ON_ARRIVAL",
-      "WRONG_MODEL", "WRONG_STORAGE", "WRONG_COLOR", "MISSING_ITEMS", "NOT_AS_DESCRIBED",
-      "ARRIVED_LATE", "ARRIVED_DAMAGED_BOX", "NEVER_ARRIVED",
-    ];
-
-    for (const code of upcellsFault) {
-      expect(restockingFeeApplies(code)).toBe(false);
+describe("what the customer pays", () => {
+  it("charges nobody for postage, whatever the reason", () => {
+    for (const code of RETURN_REASON_CODES) {
+      expect(customerPaysInboundPostage(code)).toBe(false);
     }
   });
 
-  it("does not apply to OTHER or an unknown code", () => {
-    expect(restockingFeeApplies("OTHER")).toBe(false);
-    expect(restockingFeeApplies("MADE_UP")).toBe(false);
+  it("charges no restocking fee, whatever the reason", () => {
+    for (const code of RETURN_REASON_CODES) {
+      expect(restockingFeeApplies(code)).toBe(false);
+    }
   });
 });
 
@@ -108,10 +82,11 @@ describe("returnPolicyFor — everything about one reason in one call", () => {
       code: "CHANGED_MIND",
       known: true,
       category: "PREFERENCE",
-      windowDays: 14,
+      windowDays: 30,
       faultAttribution: "CUSTOMER",
-      customerPaysPostage: true,
-      restockingFee: true,
+      // Free either way now, and said out loud rather than left to inference.
+      customerPaysPostage: false,
+      restockingFee: false,
       requiresNote: false,
     });
   });

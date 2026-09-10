@@ -1,10 +1,15 @@
-const { calculateRefund, RESTOCKING_FEE_RATE } = require("../src/services/refund");
+const { calculateRefund } = require("../src/services/refund");
 
-// Matches the worked example the client confirmed, as extended by their
-// 9 Sep 2026 answer on tax:
-//   Devices $2,198.00 − 15% ($329.70) + tax $175.84 = $2,044.14
-// The fee is taken on the goods only and never on the tax; shipping stays
+// The refund is the goods plus the tax paid on them. Nothing is deducted.
+//
+//   Devices $2,198.00 + tax $175.84 = $2,373.84
+//
+// There is no restocking fee under any reason - the policy now matches Back
+// Market, which is what UpCell's customers compare it against. Shipping stays
 // out of it entirely, because UpCell bears that cost on a return.
+//
+// The tests below kept their reason codes even though the reason no longer
+// changes the arithmetic. They document that it does not.
 const deviceLine = (productId, name, totalPaid, quantity = 1) => ({
   quantity,
   price_data: {
@@ -39,9 +44,9 @@ describe("calculateRefund — the client's confirmed rule, exactly", () => {
 
     expect(result.ok).toBe(true);
     expect(result.itemsTotal).toBe(2198);
-    expect(result.restockingFee).toBe(329.7);
+    expect(result.restockingFee).toBe(0);
     expect(result.taxRefunded).toBe(175.84);
-    expect(result.refundAmount).toBe(2044.14);
+    expect(result.refundAmount).toBe(2373.84);
   });
 
   it("returns the whole tax on a full return, and never refunds shipping", () => {
@@ -56,7 +61,7 @@ describe("calculateRefund — the client's confirmed rule, exactly", () => {
 
     expect(result.itemsTotal).toBe(999);
     expect(result.taxRefunded).toBe(79.92);
-    expect(result.refundAmount).toBe(929.07);
+    expect(result.refundAmount).toBe(1078.92);
   });
 
   it("refunds nothing in tax on an order placed before UpCell charged any", () => {
@@ -68,17 +73,18 @@ describe("calculateRefund — the client's confirmed rule, exactly", () => {
     const result = calculateRefund(order, { reasonCode: "CHANGED_MIND" });
 
     expect(result.taxRefunded).toBe(0);
-    expect(result.refundAmount).toBe(849.15);
+    expect(result.refundAmount).toBe(999);
   });
 
-  it("takes the 15% on the goods only, never on the tax", () => {
-    // $1,000 of goods, $80 of tax. The fee is $150, not $162.
+  it("hands back the goods and the tax paid on them, with nothing deducted", () => {
+    // $1,000 of goods, $80 of tax. The customer gets $1,080 - there is no fee
+    // on the goods and there never was one on the tax.
     const order = { line_items: [deviceLine("p1", "iPad", 1000), taxLine(80)] };
 
     const result = calculateRefund(order, { reasonCode: "CHANGED_MIND" });
 
-    expect(result.restockingFee).toBe(150);
-    expect(result.refundAmount).toBe(930);
+    expect(result.restockingFee).toBe(0);
+    expect(result.refundAmount).toBe(1080);
   });
 
   it("refunds only the items named, on a multi-item order", () => {
@@ -93,11 +99,11 @@ describe("calculateRefund — the client's confirmed rule, exactly", () => {
     const result = calculateRefund(order, { itemIds: ["p2"], reasonCode: "CHANGED_MIND" });
 
     expect(result.itemsTotal).toBe(39);
-    expect(result.restockingFee).toBe(5.85);
+    expect(result.restockingFee).toBe(0);
     // Tax is shared out by price: $39 of $1,038 of goods, so $3.12 of the
     // $83.04 charged. The customer keeps the tax on the phone they kept.
     expect(result.taxRefunded).toBe(3.12);
-    expect(result.refundAmount).toBe(36.27);
+    expect(result.refundAmount).toBe(42.12);
     expect(result.refundableItems).toHaveLength(1);
   });
 
@@ -142,82 +148,74 @@ describe("calculateRefund — the client's confirmed rule, exactly", () => {
     expect(result.ok).toBe(false);
   });
 
-  it("adds two quantities of the same device correctly before taking the fee", () => {
-    // totalPaid on a line already reflects quantity (price × qty, set once at
-    // checkout) — the calculation must not multiply it again.
+  it("adds two quantities of the same device correctly", () => {
+    // totalPaid on a line already reflects quantity (price x qty, set once at
+    // checkout) - the calculation must not multiply it again.
     const order = { line_items: [deviceLine("p1", "iPhone 16", 1998, 2)] };
 
     const result = calculateRefund(order, { reasonCode: "CHANGED_MIND" });
 
     expect(result.itemsTotal).toBe(1998);
-    expect(result.restockingFee).toBe(299.7);
+    expect(result.refundAmount).toBe(1998);
   });
 
-  it("rounds to the cent on a figure that does not divide evenly", () => {
-    // 33.33 * 0.15 = 4.9995 — must round to a real number of cents, not carry
-    // a third decimal into a dollar figure a human has to type by hand.
-    const result = calculateRefund({ line_items: [deviceLine("p1", "iPad", 33.33)] }, { reasonCode: "CHANGED_MIND" });
+  it("rounds the tax share to the cent, not to a third decimal", () => {
+    // A figure a human types into a bank by hand cannot carry a fraction of a
+    // cent. The fee used to be where this showed up; the tax share is now.
+    const order = { line_items: [deviceLine("p1", "iPad", 33.33), taxLine(2.67)] };
 
-    expect(result.restockingFee).toBe(5);
-    expect(result.refundAmount).toBe(28.33);
+    const result = calculateRefund(order, { reasonCode: "CHANGED_MIND" });
+
+    expect(result.refundAmount).toBe(36);
+    expect(Number.isInteger(Math.round(result.refundAmount * 100))).toBe(true);
   });
 
-  it("15% is the actual rate constant, not a copy of it", () => {
-    expect(RESTOCKING_FEE_RATE).toBe(0.15);
+  it("never charges a restocking fee, whatever the reason", () => {
+    // The rate constant is gone. This is what replaced it: the guarantee that
+    // no reason code can put a deduction back.
+    const order = { line_items: [deviceLine("p1", "iPad", 1000)] };
+
+    for (const reasonCode of ["CHANGED_MIND", "WONT_POWER_ON", "OTHER", undefined]) {
+      expect(calculateRefund(order, { reasonCode }).restockingFee).toBe(0);
+    }
   });
 });
 
-describe("the restocking fee follows the reason, not the staff member's memory", () => {
-  // The order shape these use is the same one the tests above build.
+describe("no reason code can put a deduction back", () => {
   const order = { line_items: [deviceLine("p1", "iPhone 15", 1000)] };
 
-  it("charges 15% when the customer simply changed their mind", () => {
+  it("charges nothing when the customer simply changed their mind", () => {
+    // This is the policy reversal. It used to be 15%, and the reason it is not
+    // any more is that free returns are what UpCell's customers compare it on.
     const result = calculateRefund(order, { reasonCode: "CHANGED_MIND" });
 
-    expect(result.restockingFee).toBe(150);
+    expect(result.restockingFee).toBe(0);
+    expect(result.refundAmount).toBe(1000);
   });
 
   it("charges nothing when the device would not power on", () => {
-    // The bug this replaces: the fee was charged on everything unless a staff
-    // member remembered to waive it, so UpCell billed customers 15% for its
-    // own faulty devices.
     const result = calculateRefund(order, { reasonCode: "WONT_POWER_ON" });
 
     expect(result.restockingFee).toBe(0);
     expect(result.refundAmount).toBe(1000);
   });
 
-  it("charges nothing when UpCell sent the wrong device", () => {
-    expect(calculateRefund(order, { reasonCode: "WRONG_MODEL" }).restockingFee).toBe(0);
-  });
+  it("charges nothing for every reason there is", () => {
+    const {
+      RETURN_REASON_CODES,
+    } = require("../src/constants/returnReasons");
 
-  it("charges nothing when the parcel never arrived", () => {
-    expect(calculateRefund(order, { reasonCode: "NEVER_ARRIVED" }).restockingFee).toBe(0);
+    for (const reasonCode of RETURN_REASON_CODES) {
+      expect(calculateRefund(order, { reasonCode }).restockingFee).toBe(0);
+    }
   });
 
   it("charges nothing when no reason was given at all", () => {
-    // Erring toward the customer is recoverable; taking 15% by accident is not,
-    // once the money has moved.
     expect(calculateRefund(order, {}).restockingFee).toBe(0);
   });
 
-  it("charges nothing for an unrecognised code", () => {
-    expect(calculateRefund(order, { reasonCode: "MADE_UP" }).restockingFee).toBe(0);
-  });
-
-  it("still lets staff waive the fee on a change-of-mind return", () => {
-    const result = calculateRefund(order, {
-      reasonCode: "CHANGED_MIND",
-      waiveRestockingFee: true,
-      waiveReason: "Goodwill — long-standing customer",
-    });
-
-    expect(result.restockingFee).toBe(0);
-    expect(result.restockingFeeWaived).toBe(true);
-  });
-
-  it("still demands a reason to waive it", () => {
-    const result = calculateRefund(order, { reasonCode: "CHANGED_MIND", waiveRestockingFee: true });
+  it("still refuses to waive without a reason, so an older client cannot break", () => {
+    const result = calculateRefund(order, { waiveRestockingFee: true });
 
     expect(result.ok).toBe(false);
   });

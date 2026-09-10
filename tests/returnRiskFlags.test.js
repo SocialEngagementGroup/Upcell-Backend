@@ -25,7 +25,7 @@ const order = (overrides = {}) => ({
 const codes = (flags) => flags.map((flag) => flag.code);
 
 describe("outside the window", () => {
-  it("does not flag a change-of-mind return inside 14 days", () => {
+  it("does not flag a return well inside the window", () => {
     const flags = buildReturnFlags({
       request: request({ createdAt: daysBefore(0) }),
       order: order({ deliveredAt: daysBefore(13) }),
@@ -35,20 +35,31 @@ describe("outside the window", () => {
     expect(codes(flags)).not.toContain("OUTSIDE_WINDOW");
   });
 
-  it("flags a change-of-mind return asked for on day 15", () => {
+  it("does not flag day 15 any more — every reason gets 30 days", () => {
+    // This used to be outside a 14-day change-of-mind window.
     const flags = buildReturnFlags({
       request: request({ createdAt: now }),
       order: order({ deliveredAt: daysBefore(15) }),
       now,
     });
 
+    expect(codes(flags)).not.toContain("OUTSIDE_WINDOW");
+  });
+
+  it("flags one asked for on day 31", () => {
+    const flags = buildReturnFlags({
+      request: request({ createdAt: now }),
+      order: order({ deliveredAt: daysBefore(31) }),
+      now,
+    });
+
     expect(codes(flags)).toContain("OUTSIDE_WINDOW");
   });
 
-  it("does not flag a faulty device at day 15, because that window is 30 days", () => {
+  it("does not flag day 30 itself", () => {
     const flags = buildReturnFlags({
-      request: request({ reasonCode: "WONT_POWER_ON", faultAttribution: "UPCELL", createdAt: now }),
-      order: order({ deliveredAt: daysBefore(15) }),
+      request: request({ createdAt: now }),
+      order: order({ deliveredAt: daysBefore(30) }),
       now,
     });
 
@@ -116,8 +127,8 @@ describe("repeat returner", () => {
 
 describe("attribution", () => {
   it("flags a reason and an attribution that disagree", () => {
-    // Somebody changed one without the other, and the money follows the stored
-    // value — so postage and the 15% fee are now decided by the wrong one.
+    // Somebody changed one without the other. It no longer changes what
+    // anyone pays, but it does mean the reporting blames the wrong party.
     const flags = buildReturnFlags({
       request: request({ reasonCode: "WONT_POWER_ON", faultAttribution: "CUSTOMER" }),
       order: order(),

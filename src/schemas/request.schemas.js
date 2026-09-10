@@ -1,5 +1,11 @@
 const { z } = require("zod");
 const { RETURN_REASON_CODES } = require("../constants/returnReasons");
+const {
+  normalizeImei,
+  normalizeSerial,
+  isValidImei,
+  isValidSerial,
+} = require("../utils/deviceIdentity");
 
 const numericField = z.preprocess((value) => {
   if (value === "" || value === null || typeof value === "undefined") return undefined;
@@ -68,8 +74,38 @@ const productSchema = z.object({
   outOfStock: z.boolean().optional(),
 });
 
+// The identifiers of one physical device, typed by hand off a box or a
+// settings screen. Validated rather than stored as given: an IMEI carries its
+// own check digit, so a transposed pair can be caught at the keyboard instead
+// of six months later when a returned phone cannot be matched to any order.
+//
+// An empty box means "not recorded", which is normal, so it becomes undefined
+// rather than an empty string — a stored "" would collide with every other one
+// under the unique index.
+const imeiField = z
+  .string()
+  .trim()
+  .transform((value) => normalizeImei(value))
+  .refine(
+    (value) => value === "" || isValidImei(value),
+    "IMEI must be 15 digits and pass its check digit — check for a mistyped or swapped digit"
+  )
+  .transform((value) => value || undefined);
+
+const serialField = z
+  .string()
+  .trim()
+  .transform((value) => normalizeSerial(value))
+  .refine(
+    (value) => value === "" || isValidSerial(value),
+    "Serial number must be 8 to 20 letters and digits"
+  )
+  .transform((value) => value || undefined);
+
 const productVariantSchema = z.object({
   storage: trimmedString("Storage", 1, 40),
+  imei: imeiField.optional(),
+  serialNumber: serialField.optional(),
   color: z.object({
     name: z.string().min(1, "Color name is required"),
     value: z.string().optional(),
@@ -130,6 +166,11 @@ const productBatchSchema = z.object({
     // two rows can differ, and picking one for them would be a guess.
     .superRefine((variants, ctx) => {
       const seen = new Map();
+      // One physical device cannot be two rows. Caught here as well as by the
+      // unique index, because a pasted column of IMEIs is exactly where the
+      // same number lands twice, and the form can say which two rows clash
+      // where a database error cannot.
+      const seenIdentifiers = new Map();
 
       variants.forEach((variant, index) => {
         const key = `${String(variant.storage || "").trim().toLowerCase()}|${String(variant.color?.name || "").trim().toLowerCase()}`;
@@ -137,14 +178,30 @@ const productBatchSchema = z.object({
 
         if (first === undefined) {
           seen.set(key, index);
-          return;
+        } else {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [index],
+            message: `Variants ${first + 1} and ${index + 1} are both ${variant.storage} in ${variant.color?.name}. Each storage and colour pair can only appear once.`,
+          });
         }
 
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [index],
-          message: `Variants ${first + 1} and ${index + 1} are both ${variant.storage} in ${variant.color?.name}. Each storage and colour pair can only appear once.`,
-        });
+        for (const [label, value] of [["IMEI", variant.imei], ["serial number", variant.serialNumber]]) {
+          if (!value) continue;
+          const at = `${label}:${value}`;
+          const firstSeen = seenIdentifiers.get(at);
+
+          if (firstSeen === undefined) {
+            seenIdentifiers.set(at, index);
+            continue;
+          }
+
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [index],
+            message: `Variants ${firstSeen + 1} and ${index + 1} have the same ${label} (${value}). One device cannot be two units.`,
+          });
+        }
       });
     }),
 });
@@ -304,14 +361,16 @@ const contactSubmissionSchema = z.object({
 // handles it next has to know and it cannot be recovered once the device has
 // left the bench.
 const dispositionSchema = z.object({
-  type: z.enum(["RESTOCK_NEW", "OPEN_BOX", "RETURN_TO_SUPPLIER", "WHOLESALE", "SCRAP"]),
-  grade: z.enum(["A", "B", "C", "FAIL"]).optional(),
+  type: z.enum(["RELIST", "RELIST_REGRADED", "RETURN_TO_SUPPLIER", "WHOLESALE", "SCRAP"]),
+  grade: z.enum(["EXCELLENT", "GOOD", "FAIR", "FAIL"]).optional(),
+  // Required by services/returnDisposition.js when the grade dropped: the
+  // system knows the device fell from Excellent to Good, but not what a Good
+  // one of these is worth this month.
+  price: optionalNumericField,
   reason: z.string().trim().max(500).optional(),
-  // Recorded here when inspection did not capture it. The only thing tying a
-  // device on a shelf to the return it came from.
+  // The only thing tying a device on a shelf to the return it came from.
   imei: z.string().trim().max(40).optional(),
 });
-
 // Recording that the customer has been paid.
 //
 // Nothing here moves money - it is the record that a person did. Which fields
@@ -349,6 +408,33 @@ const revisedOfferSchema = z.object({
   findings: z.string().trim().max(2000).optional(),
 });
 
+// The condition scale, read from the same constant the grading service uses
+// so a new grade cannot exist in one place and not the other.
+const RETURN_GRADES = Object.values(require("../constants/grading").GRADES);
+
+// Moving the date a customer's return window started from.
+//
+// The note is required and has a minimum length on purpose: this decides
+// whether a return is inside the window, so it moves money, and an override
+// with "ok" in the box cannot be defended months later.
+const windowOverrideSchema = z.object({
+  startDate: z.coerce.date(),
+  note: z.string().trim().min(10, "Say why you are changing this date").max(500),
+});
+
+// Freezing a return's photos past their ninety days, or letting them go.
+//
+// The reason is required when switching it on and cannot be switched on
+// without one: a hold with no reason is a hold nobody can lift, because the
+// next person has no way to tell whether the case closed.
+const disputeHoldSchema = z.object({
+  disputed: z.boolean(),
+  reason: z.string().trim().max(500).optional(),
+}).refine(
+  (value) => !value.disputed || String(value.reason || "").trim().length >= 5,
+  { path: ["reason"], message: "Say why this return is on hold" }
+);
+
 // A completed inspection.
 //
 // Loose here on purpose: the real rules - every check answered, at least five
@@ -361,6 +447,16 @@ const inspectionSubmitSchema = z.object({
       key: z.string().trim().min(1),
       result: z.enum(["pass", "fail", "na"]),
       note: z.string().trim().max(500).optional(),
+      // Two checks answer with more than pass or fail, and both must be listed
+      // here: validation replaces req.body wholesale, so a field this schema
+      // does not name is stripped before the service ever sees it. Left out,
+      // the battery reading and the cosmetic grade arrive as undefined and
+      // every inspection is rejected for not having them.
+      //
+      // The battery percentage. Recorded, never a deduction.
+      value: z.coerce.number().min(0).max(100).optional(),
+      // The cosmetic grade. One of the two axes the final grade is the lower of.
+      grade: z.enum(RETURN_GRADES).optional(),
     }))
     .min(1, "The checklist has not been filled in")
     .max(40),
@@ -376,8 +472,18 @@ const inspectionSubmitSchema = z.object({
     .max(30, "That is more photos than an inspection needs"),
   findings: z.string().trim().max(2000).optional(),
   // Staff may override the computed grade; the checklist still decides the
-  // suggested outcome.
-  grade: z.enum(["A", "B", "C", "FAIL"]).optional(),
+  // suggested outcome. The same scale the catalogue uses — A/B/C was the old
+  // internal one and no longer exists anywhere else.
+  grade: z.enum(RETURN_GRADES).optional(),
+  // Read off the device on the bench. The server compares it against what the
+  // order says was sold rather than trusting the checklist tick, so the
+  // "IMEI / serial matches the order" answer has something behind it.
+  device: z
+    .object({
+      imei: imeiField.optional(),
+      serial: serialField.optional(),
+    })
+    .optional(),
 });
 
 // Attaching a return label bought by hand in FedEx Ship Manager.
@@ -506,6 +612,8 @@ module.exports = {
   refundRequestStatusSchema,
   returnLabelSchema,
   inspectionSubmitSchema,
+  windowOverrideSchema,
+  disputeHoldSchema,
   revisedOfferSchema,
   settlementSchema,
   dispositionSchema,

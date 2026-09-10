@@ -1,20 +1,15 @@
 // Why a customer is sending a device back.
 //
-// The code the customer picks decides three things on its own, with no staff
-// judgement and no second question on the form:
+// The code no longer decides who pays or what is charged, because under the
+// current policy neither varies: every return is free, in both directions, and
+// there is no restocking fee. What the code still decides is how the return is
+// reported, and it still carries an attribution — UpCell's fault or the
+// customer's — because that is what surfaces a pattern of bad-faith returns
+// when inspection overturns it.
 //
-//   category          which return window applies (14 days or 30)
-//   faultAttribution  who pays the postage back
-//   restocking fee    charged, or not
-//
-// That is the whole point of grouping them. Before this, the reason was free
-// text and the 15% fee was charged on every return unless a staff member
-// remembered to waive it — so a customer returning a phone that would not power
-// on was charged 15% for the privilege unless someone caught it by hand.
-//
-// UPCELL means the return is UpCell's doing: wrong item, faulty device, damaged
-// in transit. CUSTOMER means the customer simply changed their mind. Only the
-// second pays postage, and only the second pays a fee.
+// This replaces an earlier policy where a change of mind cost the customer
+// postage and 15%. Matching Back Market, which is what UpCell's customers
+// compare against, is worth more than the fee was.
 
 const RETURN_REASON_CATEGORIES = {
   PREFERENCE: "PREFERENCE",
@@ -24,10 +19,11 @@ const RETURN_REASON_CATEGORIES = {
 };
 
 // Every code, with the category it belongs to and the words a customer sees.
-// Adding a code here is all that is needed — window, postage and fee follow
-// from the category without another edit anywhere.
+// Adding a code here is all that is needed — the category decides how it is
+// reported and nothing else has to change.
 const RETURN_REASONS = {
-  // The customer changed their mind. Their choice, so their postage and the fee.
+  // The customer changed their mind. Still free to return, still no fee — this
+  // grouping only separates their choice from UpCell's mistake in the numbers.
   CHANGED_MIND: { category: "PREFERENCE", label: "Changed my mind" },
   FOUND_BETTER_PRICE: { category: "PREFERENCE", label: "Found a better price" },
   NO_LONGER_NEEDED: { category: "PREFERENCE", label: "No longer needed" },
@@ -36,7 +32,6 @@ const RETURN_REASONS = {
   WRONG_MODEL: { category: "FULFILMENT", label: "Wrong model sent" },
   WRONG_STORAGE: { category: "FULFILMENT", label: "Wrong storage size sent" },
   WRONG_COLOR: { category: "FULFILMENT", label: "Wrong colour sent" },
-  MISSING_ITEMS: { category: "FULFILMENT", label: "Items missing from the box" },
   NOT_AS_DESCRIBED: { category: "FULFILMENT", label: "Not as described" },
 
   // The device itself is faulty.
@@ -65,55 +60,45 @@ const RETURN_REASON_CODES = Object.keys(RETURN_REASONS);
 // Only a customer's own change of mind is the customer's cost.
 const CUSTOMER_FAULT_CATEGORIES = [RETURN_REASON_CATEGORIES.PREFERENCE];
 
-// How long the customer has, counted from delivery.
+// How long the customer has, counted from the start of the window.
 //
-// A device that is broken or wrong is UpCell's problem for longer than one the
-// customer simply decided against — 30 days against 14. OTHER gets the longer
-// window on purpose: it is the code used when the list did not fit, and cutting
-// someone off early over a wording gap is the wrong way to be wrong.
-const RETURN_WINDOW_DAYS = {
-  PREFERENCE: 14,
-  FULFILMENT: 30,
-  PRODUCT_FAULT: 30,
-  LOGISTICS: 30,
-};
-
-const DEFAULT_RETURN_WINDOW_DAYS = 30;
+// Thirty days for every reason. The earlier split — 14 days for a change of
+// mind, 30 for a fault — made the shorter window depend on the customer
+// correctly classifying their own problem, and put UpCell below the policy its
+// customers compare it against.
+const RETURN_WINDOW_DAYS = 30;
 
 const isReturnReasonCode = (code) =>
   Object.prototype.hasOwnProperty.call(RETURN_REASONS, code);
 
 const reasonCategory = (code) => (isReturnReasonCode(code) ? RETURN_REASONS[code].category : null);
 
-// Days from delivery for this reason. An unknown or absent code gets the longer
-// window rather than the shorter one, for the same reason OTHER does.
-function returnWindowDays(code) {
-  const category = reasonCategory(code);
-  return RETURN_WINDOW_DAYS[category] || DEFAULT_RETURN_WINDOW_DAYS;
-}
+// Days from the window start. The same for every reason now, kept as a
+// function so callers do not have to know that.
+const returnWindowDays = () => RETURN_WINDOW_DAYS;
 
 // UPCELL, CUSTOMER, or null when it cannot be decided from the code alone.
 //
-// null is not a failure — it is OTHER, and it means a staff member has to read
-// the note and say. Returning a guess here would be worse than returning
-// nothing, because the guess silently decides who pays.
+// Reporting only. It no longer changes what anyone pays — returns are free
+// either way — but a device returned as "will not power on" that powers on
+// fine is re-attributed at inspection, and that is what a pattern of bad-faith
+// returns looks like in the numbers.
+//
+// null is not a failure: it is OTHER, and it means a person has to read the
+// note and say.
 function faultAttributionFor(code) {
   const category = reasonCategory(code);
   if (!category) return null;
   return CUSTOMER_FAULT_CATEGORIES.includes(category) ? "CUSTOMER" : "UPCELL";
 }
 
-// Whether the customer pays to send it back. Same rule as the fee, kept as its
-// own function because they are separate policies that happen to agree today.
-const customerPaysInboundPostage = (code) => faultAttributionFor(code) === "CUSTOMER";
+// Nobody pays to send a device back, in either direction. Kept as a function
+// rather than deleted so the callers that ask read as a policy question with a
+// settled answer, rather than as an assumption nobody wrote down.
+const customerPaysInboundPostage = () => false;
 
-// Whether the 15% restocking fee applies.
-//
-// Change of mind only. A faulty, wrong, or damaged device is never charged it —
-// that was the live bug this replaces. OTHER returns false: with attribution
-// undecided, the safe default is not to take money off the customer, and staff
-// can still apply the fee by hand once they have read the note.
-const restockingFeeApplies = (code) => reasonCategory(code) === RETURN_REASON_CATEGORIES.PREFERENCE;
+// There is no restocking fee, under any reason.
+const restockingFeeApplies = () => false;
 
 // Everything the rest of the system needs about one reason, in one call.
 function returnPolicyFor(code) {
@@ -121,10 +106,12 @@ function returnPolicyFor(code) {
     code,
     known: isReturnReasonCode(code),
     category: reasonCategory(code),
-    windowDays: returnWindowDays(code),
+    windowDays: RETURN_WINDOW_DAYS,
     faultAttribution: faultAttributionFor(code),
-    customerPaysPostage: customerPaysInboundPostage(code),
-    restockingFee: restockingFeeApplies(code),
+    // Both false for every reason now. Still returned so the form can say so
+    // out loud rather than the customer having to infer it from silence.
+    customerPaysPostage: false,
+    restockingFee: false,
     // OTHER is the only code that cannot stand on its own.
     requiresNote: code === "OTHER",
   };
@@ -135,7 +122,7 @@ module.exports = {
   RETURN_REASON_CODES,
   RETURN_REASON_CATEGORIES,
   RETURN_WINDOW_DAYS,
-  DEFAULT_RETURN_WINDOW_DAYS,
+  DEFAULT_RETURN_WINDOW_DAYS: RETURN_WINDOW_DAYS,
   isReturnReasonCode,
   reasonCategory,
   returnWindowDays,
