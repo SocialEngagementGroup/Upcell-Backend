@@ -456,6 +456,45 @@ const tradeInQuoteSchema = z.object({
   answers: z.record(z.string(), z.any()).optional().default({}),
 });
 
+// Editing one model's price.
+//
+// Every field optional: the admin screen sends only what changed, so a form
+// that never touched the multipliers cannot blank them by omission.
+const priceBookEntrySchema = z.object({
+  basePrice: numericField.refine((value) => value >= 0, "A price cannot be negative").optional(),
+  displayName: z.string().trim().min(1).max(120).optional(),
+  active: z.boolean().optional(),
+  // A multiplier above 1 would pay more than the base price for a worse
+  // device, which is always a typo.
+  storageMultipliers: z.record(z.string(), z.number().min(0).max(3)).optional(),
+  carrierAdjustments: z.record(z.string(), z.number().min(0).max(3)).optional(),
+});
+
+// Replacing one device type's questions.
+const questionSetSchema = z.object({
+  questions: z
+    .array(z.object({
+      id: z.string().trim().min(1),
+      question: z.string().trim().min(1).max(300),
+      subtitle: z.string().trim().max(300).optional(),
+      type: z.enum(["boolean", "choice"]),
+      options: z
+        .array(z.object({
+          id: z.string().trim().min(1),
+          title: z.string().trim().min(1).max(120),
+          desc: z.string().trim().max(300).optional(),
+          // Never above 1: the best answer is what the base price assumes, so
+          // nothing can be worth more than it.
+          multiplier: z.number().min(0).max(1),
+        }))
+        .optional(),
+      noMultiplier: z.number().min(0).max(1).optional(),
+      terminal: z.boolean().optional(),
+    }))
+    .min(1, "A device type needs at least one question")
+    .max(20),
+});
+
 // Marking an order shipped.
 //
 // Deliberately loose on the tracking number, matching returnShipping.js: a
@@ -649,6 +688,8 @@ module.exports = {
   orderShipmentSchema,
   orderLinkRequestSchema,
   tradeInQuoteSchema,
+  priceBookEntrySchema,
+  questionSetSchema,
   disputeHoldSchema,
   revisedOfferSchema,
   settlementSchema,

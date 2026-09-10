@@ -3,10 +3,18 @@ const { verifyToken, requireAdmin } = require("../middleware/auth.middleware");
 const { validateRequest } = require("../middleware/validate.middleware");
 const { publicFormLimiter } = require("../middleware/rateLimit.middleware");
 const { validateObjectIdParam } = require("../middleware/validateObjectId.middleware");
-const { tradeInRequestSchema, tradeInQuoteSchema } = require("../schemas/request.schemas");
+const {
+  tradeInRequestSchema,
+  tradeInQuoteSchema,
+  priceBookEntrySchema,
+  questionSetSchema,
+} = require("../schemas/request.schemas");
 const {
   getTradeInCatalog,
   getTradeInQuote,
+  getAdminPriceBook,
+  updatePriceBookEntry,
+  updateQuestionSet,
 } = require("../controllers/tradeInCatalog.controller");
 const {
   createTradeInRequest,
@@ -19,6 +27,30 @@ const {
 // cached: the same answer for everyone, and it changes when staff edit a
 // price rather than when a customer does anything.
 router.get("/trade-in-catalog", getTradeInCatalog);
+
+// The price book, for the people who set the prices. Until this existed the
+// numbers were seeded and then unreachable — a developer for every change.
+router.get("/admin-trade-in-pricebook", verifyToken, requireAdmin, getAdminPriceBook);
+
+// One model at a time. A bulk write lets a stale tab overwrite somebody
+// else's edit with no way to tell afterwards.
+router.patch(
+  "/admin-trade-in-pricebook/:modelKey",
+  verifyToken,
+  requireAdmin,
+  validateRequest(priceBookEntrySchema),
+  updatePriceBookEntry
+);
+
+// A whole set at a time, unlike the prices: the questions are an ordered list
+// whose order and multipliers only make sense together.
+router.put(
+  "/admin-trade-in-questions/:deviceType",
+  verifyToken,
+  requireAdmin,
+  validateRequest(questionSetSchema),
+  updateQuestionSet
+);
 
 // What this exact device is worth. Rate limited like the other public writes
 // even though it writes nothing — it is the one endpoint somebody would hammer
