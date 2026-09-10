@@ -322,7 +322,10 @@ const tradeInRequestSchema = z.object({
   carrier: z.string().trim().max(80, "Carrier must be 80 characters or fewer").optional(),
   carrierTitle: z.string().trim().max(120, "Carrier title must be 120 characters or fewer").optional(),
   storage: trimmedString("Storage", 1, 40),
-  estimate: numericField.refine((value) => value >= 0, "Estimate must be zero or more"),
+  // Accepted and ignored. The server recomputes the price and stores its own
+  // figure; this is kept optional so an older page still submits, and recorded
+  // as clientEstimateCents so a disagreement is visible rather than silent.
+  estimate: numericField.refine((value) => value >= 0, "Estimate must be zero or more").optional(),
   answers: z.record(z.string(), z.any()).optional().default({}),
   name: trimmedString("Name", 2, 120),
   email: emailField,
@@ -443,6 +446,14 @@ const disputeHoldSchema = z.object({
 const orderLinkRequestSchema = z.object({
   orderId: z.string().trim().regex(/^[0-9a-fA-F]{24}$/, "Enter the order ID from your confirmation email"),
   email: emailField,
+});
+
+// Asking what a device is worth, before submitting anything.
+const tradeInQuoteSchema = z.object({
+  modelKey: trimmedString("Model", 1, 120),
+  storage: z.string().trim().max(40).optional(),
+  carrier: z.string().trim().max(80).optional(),
+  answers: z.record(z.string(), z.any()).optional().default({}),
 });
 
 // Marking an order shipped.
@@ -637,6 +648,7 @@ module.exports = {
   windowOverrideSchema,
   orderShipmentSchema,
   orderLinkRequestSchema,
+  tradeInQuoteSchema,
   disputeHoldSchema,
   revisedOfferSchema,
   settlementSchema,

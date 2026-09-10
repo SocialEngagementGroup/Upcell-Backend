@@ -296,3 +296,42 @@ describe("an answer to a question this device was never asked", () => {
     expect(invented.estimateCents).toBe(asked.estimateCents);
   });
 });
+
+// The hole this whole phase exists to close.
+describe("the submitted estimate is not the stored one", () => {
+  const modelKey = "iphone15pro";
+  const answers = { powersOn: true, functional: true, cracked: true, screenCondition: "flawless", bodyCondition: "flawless" };
+
+  it("prices the device from the book, whatever the browser claims", () => {
+    // Posting estimate: 9999 put nine thousand dollars in front of staff as an
+    // offer to honour, and nothing anywhere contradicted it.
+    const priced = quote({
+      priceBook: bookFor(modelKey), questions: questionsFor(modelKey),
+      storage: "256GB", carrier: "unlocked", answers,
+    });
+
+    expect(priced.estimateCents).toBe(66100);
+    expect(priced.estimateCents).not.toBe(999900);
+  });
+
+  it("produces the same number for the quote and the submit", () => {
+    // They are the same call. A page that quoted one figure and stored another
+    // is the same bug in a quieter form.
+    const args = { priceBook: bookFor(modelKey), questions: questionsFor(modelKey), storage: "256GB", answers };
+
+    expect(quote(args).estimateCents).toBe(quote(args).estimateCents);
+  });
+
+  it("keeps the arithmetic, so a disputed quote can be answered", () => {
+    const priced = quote({
+      priceBook: bookFor(modelKey), questions: questionsFor(modelKey),
+      storage: "256GB", carrier: "unlocked", answers,
+    });
+
+    // Every step is named and reproducible from the record alone, without
+    // rerunning today's prices over an old request.
+    expect(priced.breakdown.map((entry) => entry.step))
+      .toEqual(["base", "storage:256GB", "carrier:unlocked"]);
+    expect(priced.priceBookVersion).toBe(1);
+  });
+});

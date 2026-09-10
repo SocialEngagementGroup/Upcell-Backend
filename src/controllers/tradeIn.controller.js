@@ -1,4 +1,7 @@
 const mongoose = require("mongoose");
+const TradeInPriceBook = require("../models/tradeInPriceBook.model");
+const TradeInQuestion = require("../models/tradeInQuestion.model");
+const { quote, toDollars } = require("../services/tradeInPricing");
 const { TradeInRequest, tradeInStatusEnum } = require("../models/tradeInRequest.model");
 const { EmailConfig } = require("../models/emailConfig.model");
 const { Notification } = require("../models/notification.model");
@@ -181,9 +184,53 @@ async function notifyTradeInStatusChange(request) {
   });
 }
 
+// Fourteen days, matching the quote the customer was shown.
+const QUOTE_DAYS = 14;
+
 async function createTradeInRequest(req, res, next) {
   try {
-    const request = await TradeInRequest.create(req.body);
+    const { estimate: clientEstimate, ...submitted } = req.body || {};
+
+    // The client's number is read for the record and never for the price.
+    //
+    // This endpoint used to store whatever arrived. Posting `estimate: 9999`
+    // put nine thousand dollars in front of staff as an offer to honour, and
+    // nothing anywhere would have contradicted it.
+    const priceBook = await TradeInPriceBook.findOne({
+      modelKey: submitted.model,
+      active: true,
+    }).lean();
+
+    if (!priceBook) {
+      return res.status(400).json({
+        error: "We are not quoting for that model at the moment.",
+      });
+    }
+
+    const set = await TradeInQuestion.findOne({ deviceType: priceBook.deviceType }).lean();
+
+    const priced = quote({
+      priceBook,
+      questions: set?.questions || [],
+      storage: submitted.storage,
+      carrier: submitted.carrier,
+      answers: submitted.answers || {},
+    });
+
+    if (!priced.ok) return res.status(400).json({ error: priced.error });
+
+    const request = await TradeInRequest.create({
+      ...submitted,
+      estimate: toDollars(priced.estimateCents),
+      estimateCents: priced.estimateCents,
+      clientEstimateCents: Number.isFinite(Number(clientEstimate))
+        ? Math.round(Number(clientEstimate) * 100)
+        : undefined,
+      quoteBreakdown: priced.breakdown,
+      priceBookVersion: priced.priceBookVersion,
+      quoteExpiresAt: new Date(Date.now() + QUOTE_DAYS * 24 * 60 * 60 * 1000),
+    });
+
     res.status(201).json(request);
 
     notifyNewTradeIn(request).catch((error) => {
