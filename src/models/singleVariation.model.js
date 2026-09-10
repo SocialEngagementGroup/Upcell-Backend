@@ -1,4 +1,9 @@
 const mongoose = require("mongoose");
+const {
+  DEVICE_TYPES,
+  CARRIER_STATUSES,
+  REFURB_STATES,
+} = require("../constants/deviceIdentity");
 
 const singleVariationSchema = new mongoose.Schema({
     parentCatagory: { type: mongoose.Schema.Types.ObjectId },
@@ -44,6 +49,34 @@ const singleVariationSchema = new mongoose.Schema({
     // filled in, so blocking the supplier route on every existing device would
     // cost real recovery value. Only a source known to be an individual
     // blocks it.
+    // Whether the handset is tied to a carrier. Shown on the product page,
+    // because "unlocked" is the first thing a phone buyer checks and the last
+    // thing they want to discover after it arrives.
+    carrierStatus: {
+      type: String,
+      enum: CARRIER_STATUSES,
+      default: "UNLOCKED",
+    },
+
+    // What kind of thing this row is, which decides what identifies it: a
+    // phone shows an IMEI, a tablet or laptop shows a serial, an accessory
+    // shows neither and never will.
+    deviceType: {
+      type: String,
+      enum: DEVICE_TYPES,
+    },
+
+    // Whether it can be sold as it stands. Separate from outOfStock, which
+    // says whether it is on the shelf: a device with a battery below 80% is
+    // in the building, works, and still must not be listed until the battery
+    // is replaced.
+    refurbState: {
+      type: String,
+      enum: REFURB_STATES,
+      default: "SELLABLE",
+      index: true,
+    },
+
     acquisitionSource: {
       type: String,
       enum: ["BULK", "INDIVIDUAL", "UNKNOWN"],

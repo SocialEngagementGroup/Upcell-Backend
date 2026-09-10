@@ -83,7 +83,7 @@ describe("getShopProducts — the shop page's data source", () => {
       // imagePublicId is the fallback resolveProductImage uses when the image
       // manifest has no photo for a product. Dropping it from this projection
       // broke the image on every newly added product.
-      "slug imagePublicId imageIsGeneric parentCatagory productName categoryName description storage color price image outOfStock"
+      "slug imagePublicId imageIsGeneric parentCatagory productName categoryName description storage color price image outOfStock cosmeticGrade batteryHealth carrierStatus deviceType"
     );
   });
 
@@ -528,5 +528,46 @@ describe("editing keeps variant documents, deleting is refused when ordered", ()
 
     expect(res.statusCode).toBe(200);
     expect(SingleVariation.deleteMany).toHaveBeenCalled();
+  });
+});
+
+// T08 — a listing has to pass two separate questions.
+describe("what the shop is willing to show", () => {
+  const product = require("../src/controllers/product.controller");
+  const SingleVariation = require("../src/models/singleVariation.model");
+
+  const makeRes = () => {
+    const res = { statusCode: null, body: null, headers: {} };
+    res.set = (k, v) => { res.headers[k] = v; return res; };
+    res.status = (c) => { res.statusCode = c; return res; };
+    res.json = (p) => { res.body = p; return res; };
+    return res;
+  };
+
+  it("hides a device that cannot be sold as it stands", async () => {
+    // refurbState and outOfStock answer different questions. A phone with a
+    // battery below 80% works and is in the building — and must not be listed
+    // until the battery is replaced.
+    SingleVariation.find.mockReturnValue({ sort: () => ({ lean: async () => [] }) });
+
+    await product.getShopProducts({}, makeRes(), jest.fn());
+
+    const [filter] = SingleVariation.find.mock.calls[0];
+    expect(filter.refurbState).toEqual({ $nin: ["NEEDS_BATTERY", "NEEDS_REPAIR"] });
+  });
+
+  it("still shows a row written before the field existed", async () => {
+    // $nin rather than $eq: every one of the 956 was backfilled, but a new row
+    // created by a path that forgets to set it should not silently vanish from
+    // the shop.
+    const { deviceTypeFromCategory } = require("../src/constants/deviceIdentity");
+    expect(deviceTypeFromCategory("iPhone Pro")).toBe("PHONE");
+
+    SingleVariation.find.mockReturnValue({ sort: () => ({ lean: async () => [] }) });
+    await product.getShopProducts({}, makeRes(), jest.fn());
+
+    const [filter] = SingleVariation.find.mock.calls[0];
+    // undefined is not in the list, so it passes.
+    expect(filter.refurbState.$nin).not.toContain(undefined);
   });
 });

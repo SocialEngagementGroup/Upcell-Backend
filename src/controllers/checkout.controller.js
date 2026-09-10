@@ -4,6 +4,7 @@ const PaymentEventLog = require("../models/paymentEventLog.model");
 const { round2 } = require("../utils/money");
 const { convertLineItems } = require("../utils/orderItems");
 const { calculateTax } = require("../services/salesTax");
+const { hasIdentity, identityRequired } = require("../constants/deviceIdentity");
 const {
   guestFieldsFor,
   issueGuestToken,
@@ -372,6 +373,32 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
   // this function and the conversion helper have fallen out of sync with
   // each other, which is worth knowing about immediately rather than
   // shipping an order silently missing part of its own total.
+  // Every unit going out has to be identifiable.
+  //
+  // Off until X9 — the physical audit — has happened: 954 of the 956 rows in
+  // the catalogue have no IMEI or serial recorded, so enforcing this today
+  // would refuse checkout for almost the whole shop. The flag is what that
+  // audit unlocks, and the check is written now so turning it on is a Vercel
+  // setting rather than a release.
+  if (identityRequired()) {
+    const unidentified = productsInfo.filter((product) => !hasIdentity(product).ok);
+
+    if (unidentified.length) {
+      const error = new Error(
+        "Some items in your cart cannot be sold right now. Please contact support."
+      );
+      error.status = 409;
+      // Named for staff, not shown to the customer: the message above is what
+      // they see, and a list of IMEIs would mean nothing to them.
+      error.details = unidentified.map((product) => ({
+        productId: String(product._id),
+        productName: product.productName,
+        missing: hasIdentity(product).missing,
+      }));
+      throw error;
+    }
+  }
+
   // A guest gets a token instead of a user id, and the plaintext is returned
   // to the caller because the receipt email is the only place it can be sent.
   const guest = guestFieldsFor({ user: req.user });

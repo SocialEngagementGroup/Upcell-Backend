@@ -8,9 +8,20 @@ const Order = require("../models/order.model");
 // checkout work on them, but they are offered on a device's own page and
 // must never appear in a listing, a search, a filter, or as a variant of a
 // phone. Lookups by id deliberately do not use this.
-const BROWSABLE = { isAccessory: { $ne: true } };
+const BROWSABLE = {
+  isAccessory: { $ne: true },
+  // A device with a battery below 80% works and is in the building, and must
+  // still not be on the shop. refurbState says whether a unit can be sold as
+  // it stands; outOfStock says whether it is on the shelf. They are different
+  // questions and a listing has to pass both.
+  //
+  // $ne rather than $eq so a row written before this field existed is still
+  // browsable — every one of the 956 was backfilled to SELLABLE, but a new
+  // row created by a path that forgets to set it should not vanish.
+  refurbState: { $nin: ["NEEDS_BATTERY", "NEEDS_REPAIR"] },
+};
 
-const productCardFields = "slug imagePublicId imageIsGeneric parentCatagory productName categoryName description storage color price image outOfStock";
+const productCardFields = "slug imagePublicId imageIsGeneric parentCatagory productName categoryName description storage color price image outOfStock cosmeticGrade batteryHealth carrierStatus deviceType";
 
 // The fields the admin product-management pages (AllProduct, AddProduct)
 // actually render or edit — confirmed by grepping SingleProductGroup.jsx and
