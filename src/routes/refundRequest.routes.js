@@ -26,6 +26,7 @@ const {
   submitInspection,
   offerRevisedRefund,
   respondToRevisedOffer,
+  getRevisedOffer,
   settleRefundRequest,
   getReturnsDashboard,
   shipRejectedDeviceBack,
@@ -104,6 +105,17 @@ router.patch(
 // login wall here is how an offer times out and a device gets posted back for
 // no reason. The unguessable token on the request is what authorises it, and it
 // grants exactly this one return. Rate limited like the other public writes.
+// What the page shows before the customer commits: the amount, the
+// deductions and what was found. Read-only, same token, same 404 for a bad
+// one. Rate limited so the token cannot be brute-forced any faster than the
+// write can.
+router.get(
+  "/returns/:id",
+  publicFormLimiter,
+  validateObjectIdParam(),
+  getRevisedOffer
+);
+
 router.post(
   "/returns/:id/:decision",
   publicFormLimiter,

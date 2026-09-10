@@ -2271,3 +2271,110 @@ describe("the option lists the admin forms are built from", () => {
     });
   });
 });
+
+// The page the revised-offer email links to. Until now that link went to a
+// 404, the offer expired unanswered after five days, and UpCell posted the
+// device back at its own cost.
+describe("getRevisedOffer", () => {
+  const offer = (overrides = {}) => requestDoc({
+    rmaNumber: "RMA-2026-00412",
+    status: "RevisedOffer",
+    accessToken: "the-real-token",
+    productName: "iPhone 15 Pro",
+    calculatedAmount: 999,
+    refundBreakdown: {
+      refundAmount: 999,
+      offeredAmount: 849,
+      offerExpiresAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
+      deductions: [{ type: "DAMAGE", amount: 150, reason: "Cracked back glass" }],
+    },
+    inspection: { findings: "Back glass cracked across two panels." },
+    ...overrides,
+  });
+
+  const ask = async (doc, token) => {
+    RefundRequest.findById.mockReturnValue({ select: () => doc });
+
+    const { req, res, next } = makeReqRes({}, { params: { id: "req1" }, query: { token } });
+    await controller.getRevisedOffer(req, res, next);
+    if (next.mock.calls.length) throw next.mock.calls[0][0];
+    return res;
+  };
+
+  it("shows the amount, the deductions and what was found", async () => {
+    const res = await ask(offer(), "the-real-token");
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toMatchObject({
+      rmaNumber: "RMA-2026-00412",
+      answerable: true,
+      originalAmount: 999,
+      offeredAmount: 849,
+      findings: "Back glass cracked across two panels.",
+    });
+    expect(res.body.deductions).toEqual([
+      { type: "DAMAGE", amount: 150, reason: "Cracked back glass" },
+    ]);
+  });
+
+  it("never sends the timeline, the inspection or any staff field", async () => {
+    // The document carries the dispute record, photos, notes and the names of
+    // whoever handled it. An allowlist is the only version of this that stays
+    // correct when somebody adds a field next month.
+    const doc = offer();
+    doc.timeline = [{ event: "revised_offer_sent", actor: "yasir@upcellit.com" }];
+    doc.inspection.photos = [{ url: "https://cdn/x.jpg", publicId: "p1" }];
+    doc.disposition = { decidedBy: "yasir@upcellit.com" };
+
+    const res = await ask(doc, "the-real-token");
+
+    const body = JSON.stringify(res.body);
+    expect(body).not.toMatch(/timeline|photos|publicId|decidedBy|upcellit\.com/);
+    expect(Object.keys(res.body).sort()).toEqual([
+      "answerable", "deductions", "expired", "findings", "offerExpiresAt",
+      "offeredAmount", "originalAmount", "productName", "rmaNumber", "status",
+    ]);
+  });
+
+  it("answers 404 for a wrong token", async () => {
+    const res = await ask(offer(), "not-the-token");
+
+    expect(res.statusCode).toBe(404);
+    expect(res.body.offeredAmount).toBeUndefined();
+  });
+
+  it("answers 404 for a missing return, the same as a wrong token", async () => {
+    // Two different answers would turn this into a way of finding out which
+    // ids exist.
+    const missing = await ask(null, "the-real-token");
+    const wrong = await ask(offer(), "nope");
+
+    expect(missing.statusCode).toBe(404);
+    expect(missing.body).toEqual(wrong.body);
+  });
+
+  it("answers 404 when no token is given at all", async () => {
+    expect((await ask(offer(), undefined)).statusCode).toBe(404);
+  });
+
+  it("says it is not answerable once it has been answered", async () => {
+    const res = await ask(offer({ status: "Approved" }), "the-real-token");
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.answerable).toBe(false);
+    expect(res.body.status).toBe("Approved");
+  });
+
+  it("says it is not answerable once it has expired", async () => {
+    const res = await ask(offer({
+      refundBreakdown: {
+        offeredAmount: 849,
+        offerExpiresAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
+        deductions: [],
+      },
+    }), "the-real-token");
+
+    expect(res.body.expired).toBe(true);
+    expect(res.body.answerable).toBe(false);
+  });
+});

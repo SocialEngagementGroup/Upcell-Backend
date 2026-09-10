@@ -1159,6 +1159,51 @@ async function offerRevisedRefund(req, res, next) {
  * Accepting moves to Approved and the money follows the normal settlement path.
  * Declining rejects, which sends the device back at UpCell's cost.
  */
+/**
+ * The offer itself, for the page the email links to.
+ *
+ * The same token rule as the answer below, and the same deliberate silence:
+ * a missing return and a wrong token both answer 404, so this cannot be used
+ * to find out which ids exist.
+ *
+ * Allowlisted rather than stripped. The request document carries the
+ * inspection, the timeline, staff names and internal notes, and none of that
+ * belongs on a page reachable with a link. Listing what may leave is the only
+ * version of this that stays correct when a field is added later.
+ */
+async function getRevisedOffer(req, res, next) {
+  try {
+    const request = await RefundRequest.findById(req.params.id || null).select("+accessToken");
+
+    if (!request || !tokensMatch(req.query?.token, request.accessToken)) {
+      return res.status(404).json({ error: "This link is not valid." });
+    }
+
+    const breakdown = request.refundBreakdown || {};
+
+    return res.status(200).json({
+      rmaNumber: request.rmaNumber,
+      status: request.status,
+      // Only while it is still answerable. Once it is not, the page says so
+      // rather than offering a button that cannot work.
+      answerable: request.status === "RevisedOffer" && !offerHasExpired(request),
+      expired: offerHasExpired(request),
+      originalAmount: breakdown.refundAmount ?? request.calculatedAmount ?? null,
+      offeredAmount: breakdown.offeredAmount ?? null,
+      offerExpiresAt: breakdown.offerExpiresAt ?? null,
+      deductions: (breakdown.deductions || []).map((entry) => ({
+        type: entry.type,
+        amount: entry.amount,
+        reason: entry.reason,
+      })),
+      findings: request.inspection?.findings || null,
+      productName: request.productName || null,
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 async function respondToRevisedOffer(req, res, next) {
   try {
     const decision = req.params.decision;
@@ -1961,6 +2006,7 @@ module.exports = {
   submitInspection,
   offerRevisedRefund,
   respondToRevisedOffer,
+  getRevisedOffer,
   settleRefundRequest,
   getReturnsDashboard,
   shipRejectedDeviceBack,
