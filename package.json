@@ -8,7 +8,6 @@
     "start": "node index.js",
     "nodemon": "nodemon index.js",
     "dev": "nodemon index.js",
-    "check-db": "node check-db.js",
     "reconcile": "node scripts/reconcile.js",
     "clear-test-data": "node scripts/clear-test-data.js",
     "seed-accessories": "node scripts/seed-accessories.js"
