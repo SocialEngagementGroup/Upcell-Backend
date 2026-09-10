@@ -2,19 +2,43 @@ const ParentProduct = require("../models/parentProduct.model");
 const ShopCategory = require("../models/shopCategory.model");
 const { SHOP_CATEGORY_DEFAULTS } = require("../constants/shopCategoryDefaults");
 
-async function ensureShopCategories() {
-  const existing = await ShopCategory.find().lean();
-  const existingNames = new Set(existing.map((item) => item.modelName));
-  const missing = SHOP_CATEGORY_DEFAULTS.filter((item) => !existingNames.has(item.modelName));
+// The ten shop categories are seeded on first use rather than by a migration,
+// so a fresh database comes up working. That is worth keeping. What is not
+// worth keeping is doing it on every request: the check is a round trip, and
+// on a shared Atlas tier a round trip is about 300ms whatever it asks for.
+// This endpoint returns ten rows that change a few times a year and was
+// paying that twice.
+//
+// Held as a promise rather than a boolean so two requests arriving together
+// wait on the same seed instead of both writing. Cleared on failure, so a
+// connection that was not ready yet is retried on the next request instead of
+// leaving the categories missing for the life of the process.
+let seeding = null;
 
-  if (missing.length) {
-    await ShopCategory.insertMany(missing);
+async function ensureShopCategories() {
+  if (!seeding) {
+    seeding = (async () => {
+      const existing = await ShopCategory.find({}, "modelName").lean();
+      const existingNames = new Set(existing.map((item) => item.modelName));
+      const missing = SHOP_CATEGORY_DEFAULTS.filter(
+        (item) => !existingNames.has(item.modelName)
+      );
+
+      if (missing.length) {
+        await ShopCategory.insertMany(missing);
+      }
+    })().catch((error) => {
+      seeding = null;
+      throw error;
+    });
   }
+
+  return seeding;
 }
 
 async function getCategories(req, res, next) {
   try {
-    const product = await ParentProduct.find();
+    const product = await ParentProduct.find().lean();
     res.json(product);
   } catch (error) {
     next(error);
@@ -62,7 +86,7 @@ async function getCategoriesWithProductCounts(req, res, next) {
 
 async function getCategoryById(req, res, next) {
   try {
-    const product = await ParentProduct.findById(req.params.id);
+    const product = await ParentProduct.findById(req.params.id).lean();
     if (!product) return res.status(404).json({ error: "Product family not found" });
     res.json(product);
   } catch (error) {
@@ -73,7 +97,7 @@ async function getCategoryById(req, res, next) {
 async function getShopCategories(req, res, next) {
   try {
     await ensureShopCategories();
-    const categories = await ShopCategory.find().sort({ modelName: 1 });
+    const categories = await ShopCategory.find().sort({ modelName: 1 }).lean();
     res.json(categories);
   } catch (error) {
     next(error);

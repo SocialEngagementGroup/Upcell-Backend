@@ -5,7 +5,6 @@ const { validateObjectIdParam } = require("../middleware/validateObjectId.middle
 const { cartLimiter } = require("../middleware/rateLimit.middleware");
 const { productCreateSchema, productSchema, productFilterSchema } = require("../schemas/request.schemas");
 const {
-  getProducts,
   getAdminProducts,
   getProduct,
   getProductsByParent,
@@ -21,7 +20,6 @@ const {
   getAccessories,
 } = require("../controllers/product.controller");
 
-router.get("/product", getProducts);
 // AllProduct/AddProduct's own lean data source — see getAdminProducts.
 router.get("/admin-products", verifyToken, requireAdmin, getAdminProducts);
 router.get("/products/shop", getShopProducts);

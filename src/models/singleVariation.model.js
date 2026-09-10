@@ -1,7 +1,7 @@
 const mongoose = require("mongoose");
 
 const singleVariationSchema = new mongoose.Schema({
-    parentCatagory: {type: mongoose.Schema.Types.ObjectId, index: true},
+    parentCatagory: { type: mongoose.Schema.Types.ObjectId },
     // The readable half of /product/iphone-air/iphone-air-256gb-space-black,
     // built from name + storage + colour by src/utils/slug.js.
     //
@@ -10,8 +10,8 @@ const singleVariationSchema = new mongoose.Schema({
     // existed has none, and without sparse every one of those missing values
     // would collide with every other as a duplicate null.
     slug: String,
-    productName: { type: String, index: true },
-    categoryName: { type: String, index: true },
+    productName: { type: String },
+    categoryName: { type: String },
     categoryId: { type: mongoose.Schema.Types.ObjectId, ref: "ShopCategory" },
     description: String,
     storage: { type: String, index: true },
@@ -139,6 +139,11 @@ singleVariationSchema.index(
   { serialNumber: 1 },
   { unique: true, partialFilterExpression: { serialNumber: { $type: "string" } } }
 );
+// parentCatagory, productName and categoryName have no index of their own.
+// Each is the first field of one of the three compound indexes below, and
+// MongoDB serves a prefix query from a compound index — so a separate
+// single-field index would be a second copy that only costs writes. On one
+// row per physical device, every product save pays for every index.
 singleVariationSchema.index({ parentCatagory: 1, outOfStock: 1, price: 1 });
 singleVariationSchema.index({ categoryName: 1, storage: 1, price: 1 });
 singleVariationSchema.index({ productName: 1, price: 1 });

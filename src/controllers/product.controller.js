@@ -85,15 +85,6 @@ const groupProductCards = (products = []) => {
   return Array.from(map.values()).map(normalizeProductCard);
 };
 
-async function getProducts(req, res, next) {
-  try {
-    const allProduct = await SingleVariation.find().lean();
-    res.json(allProduct);
-  } catch (error) {
-    next(error);
-  }
-}
-
 // AllProduct and AddProduct both need the entire catalog in memory for
 // instant client-side search and duplicate-name detection while typing — the
 // same reasoning that kept the shop page's own filtering client-side (see
@@ -736,7 +727,6 @@ async function getAccessories(req, res, next) {
 
 
 module.exports = {
-  getProducts,
   getAdminProducts,
   getProduct,
   getProductsByParent,
