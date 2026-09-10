@@ -435,6 +435,18 @@ const disputeHoldSchema = z.object({
   { path: ["reason"], message: "Say why this return is on hold" }
 );
 
+// Marking an order shipped.
+//
+// Deliberately loose on the tracking number, matching returnShipping.js: a
+// strict pattern rejects a real number the moment a carrier changes theirs,
+// which strands a real parcel to prevent a typo. The service applies the same
+// rule; this is the outer guard.
+const orderShipmentSchema = z.object({
+  carrier: z.string().trim().min(1),
+  trackingNumber: z.string().trim().min(1),
+  labelUrl: z.string().trim().url().optional().or(z.literal("")),
+});
+
 // A completed inspection.
 //
 // Loose here on purpose: the real rules - every check answered, at least five
@@ -613,6 +625,7 @@ module.exports = {
   returnLabelSchema,
   inspectionSubmitSchema,
   windowOverrideSchema,
+  orderShipmentSchema,
   disputeHoldSchema,
   revisedOfferSchema,
   settlementSchema,

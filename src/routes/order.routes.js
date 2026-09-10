@@ -3,10 +3,11 @@ const { verifyToken, requireAdmin, optionalAuth } = require("../middleware/auth.
 const { validateRequest } = require("../middleware/validate.middleware");
 const { validateObjectIdParam } = require("../middleware/validateObjectId.middleware");
 const {checkoutLimiter, orderLookupLimiter } = require("../middleware/rateLimit.middleware");
-const { orderSchema, refundSchema } = require("../schemas/request.schemas");
+const { orderSchema, refundSchema, orderShipmentSchema } = require("../schemas/request.schemas");
 const {
   getOrder,
   getTaxRate,
+  recordOrderShipment,
   getAdminOrders,
   getAdminOrdersByDate,
   updateOrderStatus,
@@ -18,6 +19,18 @@ const {
 
 // The shop's tax rate. No auth: it is on every price the site quotes.
 router.get("/tax-rate", getTaxRate);
+
+// Marking an order shipped. Staff buy the label by hand in the carrier's own
+// tool and paste the number back here — the same manual first phase the
+// returns side runs on.
+router.patch(
+  "/admin-orders/:id/shipment",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  validateRequest(orderShipmentSchema),
+  recordOrderShipment
+);
 
 router.get("/order/:id", orderLookupLimiter, optionalAuth, getOrder);
 router.get("/admin-orders/:status", verifyToken, requireAdmin, getAdminOrders);

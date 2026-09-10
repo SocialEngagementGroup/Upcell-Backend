@@ -76,6 +76,14 @@ function toCustomerOrder(order) {
     shippedAt: source.shippedAt,
     deliveredAt: source.deliveredAt,
 
+    // Where the parcel is. shippedBy is a staff name and stays behind.
+    fulfilment: source.fulfilment?.trackingNumber
+      ? {
+          carrier: source.fulfilment.carrier,
+          trackingNumber: source.fulfilment.trackingNumber,
+        }
+      : undefined,
+
     // What they were refunded, not who approved it or when it was keyed in.
     refund: source.refund
       ? {

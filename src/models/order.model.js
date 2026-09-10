@@ -138,6 +138,22 @@ const OrderSchema = new Schema(
     // the order genuinely is paid, and rewriting status to "payment failed"
     // would hide a charge that really happened. A person has to resolve it,
     // which is why the reason is stored in words rather than a code.
+    // How the order got to the customer.
+    //
+    // No shippedAt or deliveredAt in here on purpose, even though a shipment
+    // is what sets them. Both already exist at the top level and the return
+    // window reads them — resolveWindowStart falls back to shippedAt + 3 days
+    // when no delivery was recorded. A second copy is a second thing to keep
+    // in step, and the day they disagree the customer's 30 days start on the
+    // wrong date.
+    fulfilment: {
+      carrier: String,
+      trackingNumber: String,
+      labelUrl: String,
+      // Who marked it shipped. Not shown to the customer.
+      shippedBy: String,
+    },
+
     fulfilmentBlocked: { type: Boolean, default: false },
     fulfilmentBlockReason: String,
     // When the review pending window ran out and nothing had actioned it. The
@@ -219,6 +235,11 @@ OrderSchema.index({ boaTransactionUuid: 1 }, { unique: true, sparse: true });
 // because Manual orders and orders still pending never had a bank transaction.
 OrderSchema.index({ boaTransactionId: 1 }, { unique: true, sparse: true });
 OrderSchema.index({ email: 1, paid: 1 });
+// Two orders sharing a tracking number means one parcel, two answers. Sparse
+// because most orders have not shipped yet, and those must not all collide on
+// a missing value.
+OrderSchema.index({ "fulfilment.trackingNumber": 1 }, { sparse: true });
+
 OrderSchema.index({ status: 1, updatedAt: -1 });
 OrderSchema.index({ createdAt: 1 });
 

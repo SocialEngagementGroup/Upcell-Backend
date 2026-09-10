@@ -769,3 +769,185 @@ describe("markRefundEnteredAtBank — the manual step, recorded", () => {
     );
   });
 });
+
+// T02 — where the parcel is. Until now an order was paid for and then went
+// quiet: nothing on the record said which carrier had it or what the number
+// was, so "where is my order" could only be answered by a person.
+// This file's res.json is a bare jest.fn(), so the payload it was called with
+// is the only place the response body exists.
+const sent = (res) => res.json.mock.calls[0][0];
+
+describe("recordOrderShipment", () => {
+  const { trackingUrlFor } = orderController;
+
+  const shippable = (overrides = {}) => ({
+    _id: "order1",
+    email: "buyer@example.com",
+    paid: true,
+    status: "Processing",
+    items: [{ name: "iPhone 15 Pro" }],
+    save: jest.fn().mockResolvedValue(true),
+    ...overrides,
+  });
+
+  const ship = async (order, body = {}) => {
+    Order.findById.mockResolvedValue(order);
+    Order.findOne.mockReturnValue({ select: () => ({ lean: async () => null }) });
+
+    const { req, res, next } = makeReqRes(
+      { carrier: "FedEx", trackingNumber: "794657312345", ...body },
+      { params: { id: "6a79f7298341f33d9a65b0b7" }, user: { id: "u1", email: "yasir@upcellit.com", role: "admin" } }
+    );
+    await orderController.recordOrderShipment(req, res, next);
+    if (next.mock.calls.length) throw next.mock.calls[0][0];
+    return { res, order };
+  };
+
+  it("records the carrier and tracking number and moves the order to Shipped", async () => {
+    const order = shippable();
+    const { res } = await ship(order);
+
+    // Not res.statusCode: this file's helper starts at 200, so that would
+    // pass for a controller that answered nothing at all.
+    expect(sent(res)).toMatchObject({ ok: true, status: "Shipped" });
+    expect(order.fulfilment).toMatchObject({ carrier: "FedEx", trackingNumber: "794657312345" });
+    expect(order.status).toBe("Shipped");
+  });
+
+  it("stamps shippedAt, because the return window counts from it", async () => {
+    // resolveWindowStart falls back to shippedAt + 3 business days when no
+    // delivery was ever recorded.
+    const order = shippable();
+    await ship(order);
+
+    expect(order.shippedAt).toBeInstanceOf(Date);
+  });
+
+  it("leaves shippedAt alone when a number is corrected later", async () => {
+    // Otherwise fixing a typo hands the customer a fresh return window.
+    const first = new Date("2026-09-01T10:00:00Z");
+    const order = shippable({ shippedAt: first, fulfilment: { trackingNumber: "OLD123456" } });
+
+    await ship(order, { trackingNumber: "794657312345" });
+
+    expect(order.shippedAt).toEqual(first);
+  });
+
+  it("refuses a shipment with no tracking number", async () => {
+    const { res } = await ship(shippable(), { trackingNumber: "" });
+
+    expect(res.statusCode).toBe(400);
+    expect(sent(res).error).toMatch(/tracking number/i);
+  });
+
+  it("refuses a carrier it does not know", async () => {
+    const { res } = await ship(shippable(), { carrier: "Pigeon" });
+
+    expect(res.statusCode).toBe(400);
+    expect(sent(res).error).toMatch(/carrier/i);
+  });
+
+  it("refuses a tracking number already on another order", async () => {
+    // One parcel, one order. Otherwise a customer tracking theirs sees
+    // somebody else's, and a carrier update lands on the wrong record.
+    const order = shippable();
+    Order.findById.mockResolvedValue(order);
+    Order.findOne.mockReturnValue({ select: () => ({ lean: async () => ({ _id: "other-order" }) }) });
+
+    const { req, res, next } = makeReqRes(
+      { carrier: "FedEx", trackingNumber: "794657312345" },
+      { params: { id: "6a79f7298341f33d9a65b0b7" }, user: { role: "admin" } }
+    );
+    await orderController.recordOrderShipment(req, res, next);
+
+    expect(res.statusCode).toBe(409);
+    expect(sent(res).trackingNumberInUse).toBe("other-order");
+    expect(order.save).not.toHaveBeenCalled();
+  });
+
+  it("refuses to ship an order that has not been paid for", async () => {
+    const { res } = await ship(shippable({ paid: false }));
+
+    expect(res.statusCode).toBe(400);
+    expect(sent(res).error).toMatch(/paid/i);
+  });
+
+  it("emails the customer the first time, and not again on a correction", async () => {
+    // "Your order is on its way" twice, for one parcel, reads as two parcels.
+    const first = await ship(shippable());
+    expect(sent(first.res).emailed).toBe(true);
+
+    const again = await ship(shippable({ fulfilment: { trackingNumber: "OLD123456" } }));
+    expect(sent(again.res).emailed).toBe(false);
+  });
+
+  it("records who marked it shipped, and keeps that off the customer view", async () => {
+    const { order } = await ship(shippable());
+    expect(order.fulfilment.shippedBy).toBe("yasir@upcellit.com");
+
+    const { toCustomerOrder } = require("../src/utils/orderView");
+    const view = toCustomerOrder({ _id: "order1", fulfilment: order.fulfilment });
+
+    expect(view.fulfilment).toEqual({ carrier: "FedEx", trackingNumber: "794657312345" });
+    expect(view.fulfilment.shippedBy).toBeUndefined();
+    expect(view.fulfilment.labelUrl).toBeUndefined();
+  });
+
+  it("404s an order that is not there", async () => {
+    Order.findById.mockResolvedValue(null);
+
+    const { req, res, next } = makeReqRes(
+      { carrier: "FedEx", trackingNumber: "794657312345" },
+      { params: { id: "6a79f7298341f33d9a65b0b7" }, user: { role: "admin" } }
+    );
+    await orderController.recordOrderShipment(req, res, next);
+
+    expect(res.statusCode).toBe(404);
+  });
+
+  describe("tracking links", () => {
+    it("builds one for each carrier that has a tracking page", () => {
+      expect(trackingUrlFor("FedEx", "794657312345")).toMatch(/fedex\.com.*794657312345/);
+      expect(trackingUrlFor("UPS", "1Z999AA10123456784")).toMatch(/ups\.com/);
+      expect(trackingUrlFor("USPS", "9400111899223197428490")).toMatch(/usps\.com/);
+      expect(trackingUrlFor("DHL", "1234567890")).toMatch(/dhl\.com/);
+    });
+
+    it("gives none for Other, rather than a guess that 404s", () => {
+      // A dead link is worse than the number on its own, which a customer can
+      // paste anywhere.
+      expect(trackingUrlFor("Other", "12345678")).toBeNull();
+    });
+
+    it("escapes the number into the URL", () => {
+      expect(trackingUrlFor("FedEx", "abc def")).toContain("abc%20def");
+    });
+  });
+});
+
+describe("orderShippedEmail", () => {
+  const { orderShippedEmail } = require("../src/services/emailTemplates");
+
+  it("puts the tracking number in the subject and the link in the button", () => {
+    const { subject, html } = orderShippedEmail({
+      orderId: "order1",
+      carrier: "FedEx",
+      trackingNumber: "794657312345",
+      trackingUrl: "https://www.fedex.com/fedextrack/?trknbr=794657312345",
+      itemNames: ["iPhone 15 Pro"],
+    });
+
+    expect(subject).toContain("794657312345");
+    expect(html).toContain("https://www.fedex.com/fedextrack/?trknbr=794657312345");
+    expect(html).toContain("Track Your Order");
+    expect(html).toContain("iPhone 15 Pro");
+  });
+
+  it("falls back to the account page when the carrier has no tracking page", () => {
+    const { html } = orderShippedEmail({
+      orderId: "order1", carrier: "Other", trackingNumber: "12345678", trackingUrl: null,
+    });
+
+    expect(html).toContain("View Your Order");
+  });
+});

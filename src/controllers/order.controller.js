@@ -3,6 +3,7 @@ const { Resend } = require("resend");
 const Order = require("../models/order.model");
 const { toCustomerOrder, ownsOrder } = require("../utils/orderView");
 const { salesTaxRate } = require("../services/salesTax");
+const { validateShipment } = require("../services/returnShipping");
 const AuditLog = require("../models/auditLog.model");
 const { Notification } = require("../models/notification.model");
 const { makeOrderObjAndTotal } = require("./checkout.controller");
@@ -12,6 +13,7 @@ const {
   adminOrderStatusEmail,
   adminNewOrderEmail,
   refundApprovedEmail,
+  orderShippedEmail,
 } = require("../services/emailTemplates");
 const { calculateRefund } = require("../services/refund");
 const {
@@ -190,6 +192,128 @@ const ORDER_STATUS_VALUES = ["pending_payment", "under_review", "Processing", "S
 // paid would put revenue on the dashboard that may never arrive.
 const UNPAID_STATUSES = ["pending_payment", "under_review", "payment failed"];
 const DELIVERED_STATUS = "Delivered";
+
+// Where each carrier's own tracking page lives.
+//
+// Built here rather than stored, so a carrier changing its URL is one edit and
+// not a migration over every order ever shipped. "Other" gets no link: a
+// guessed URL that 404s is worse than the number on its own, which a customer
+// can paste anywhere.
+const TRACKING_URLS = {
+  FedEx: (n) => `https://www.fedex.com/fedextrack/?trknbr=${encodeURIComponent(n)}`,
+  UPS: (n) => `https://www.ups.com/track?tracknum=${encodeURIComponent(n)}`,
+  USPS: (n) => `https://tools.usps.com/go/TrackConfirmAction?tLabels=${encodeURIComponent(n)}`,
+  DHL: (n) => `https://www.dhl.com/en/express/tracking.html?AWB=${encodeURIComponent(n)}`,
+};
+
+const trackingUrlFor = (carrier, trackingNumber) =>
+  (TRACKING_URLS[carrier] ? TRACKING_URLS[carrier](trackingNumber) : null);
+
+/**
+ * Records that an order has shipped, and tells the customer.
+ *
+ * Staff buy the label by hand in the carrier's own tool and paste the number
+ * back here — the same manual first phase the returns side runs on, and the
+ * same validator, so the two cannot drift on what a tracking number looks
+ * like.
+ *
+ * Moving to Shipped goes through the same statement that stamps shippedAt
+ * everywhere else, because the return window counts from it when no delivery
+ * is ever recorded.
+ */
+async function recordOrderShipment(req, res, next) {
+  try {
+    const { carrier, trackingNumber, labelUrl } = req.body || {};
+
+    const order = await Order.findById(req.params.id || null);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+
+    if (!order.paid) {
+      // Shipping an unpaid order is either a mistake or a decision somebody
+      // should make deliberately, on the order, not by pasting a number.
+      return res.status(400).json({ error: "This order has not been paid for yet." });
+    }
+
+    const shipment = validateShipment({ carrier, trackingNumber, labelUrl });
+    if (!shipment.ok) return res.status(400).json({ error: shipment.error });
+
+    // One parcel, one order. Two orders sharing a number means a customer
+    // tracking theirs sees somebody else's parcel, and a carrier update lands
+    // on the wrong record.
+    const clash = await Order.findOne({
+      "fulfilment.trackingNumber": shipment.trackingNumber,
+      _id: { $ne: order._id },
+    })
+      .select("_id")
+      .lean();
+
+    if (clash) {
+      return res.status(409).json({
+        error: "That tracking number is already on another order.",
+        trackingNumberInUse: String(clash._id),
+      });
+    }
+
+    const alreadyShipped = Boolean(order.fulfilment?.trackingNumber);
+
+    order.fulfilment = {
+      carrier: shipment.carrier,
+      trackingNumber: shipment.trackingNumber,
+      labelUrl: shipment.labelUrl,
+      shippedBy: req.user?.email || req.user?.id,
+    };
+
+    order.status = "Shipped";
+    order.paid = true;
+    // Stamped once, and left alone if this is a correction to the number.
+    if (!order.shippedAt) order.shippedAt = new Date();
+
+    await order.save();
+
+    AuditLog.create({
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      action: alreadyShipped ? "order.shipment_corrected" : "order.shipped",
+      targetType: "Order",
+      targetId: order._id,
+      metadata: {
+        carrier: shipment.carrier,
+        trackingNumber: shipment.trackingNumber,
+      },
+    }).catch((error) => {
+      console.error("[audit] order.shipped log failed:", error);
+    });
+
+    // Only on the first shipment. Correcting a typo should not send a second
+    // "your order is on its way" to somebody who has already had one.
+    if (!alreadyShipped && order.email) {
+      const { subject, html } = orderShippedEmail({
+        orderId: order._id,
+        carrier: shipment.carrier,
+        trackingNumber: shipment.trackingNumber,
+        trackingUrl: trackingUrlFor(shipment.carrier, shipment.trackingNumber),
+        itemNames: (order.items || []).map((item) => item.name).filter(Boolean),
+      });
+
+      resend.emails
+        .send({ from: orderEmailFrom, to: [order.email], subject, html })
+        .catch((error) => console.error("[email] order shipped send failed:", error));
+    }
+
+    return res.status(200).json({
+      ok: true,
+      status: order.status,
+      fulfilment: {
+        carrier: order.fulfilment.carrier,
+        trackingNumber: order.fulfilment.trackingNumber,
+        trackingUrl: trackingUrlFor(shipment.carrier, shipment.trackingNumber),
+      },
+      emailed: !alreadyShipped,
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
 
 async function updateOrderStatus(req, res, next) {
   const { orderId, status } = req.body;
@@ -529,6 +653,8 @@ async function markRefundEnteredAtBank(req, res, next) {
 
 module.exports = {
   getOrder,
+  recordOrderShipment,
+  trackingUrlFor,
   getTaxRate,
   getAdminOrders,
   getAdminOrdersByDate,

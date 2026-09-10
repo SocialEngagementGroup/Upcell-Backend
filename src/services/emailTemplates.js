@@ -404,6 +404,38 @@ function returnLabelIssuedEmail({ rmaNumber, orderId, carrier, trackingNumber, l
   };
 }
 
+// The one email a customer actually waits for.
+//
+// Tracking number in the rows and the carrier's own page behind the button:
+// "where is my order" is the question support answers most, and it is answered
+// here or it is answered by a person.
+function orderShippedEmail({ orderId, carrier, trackingNumber, trackingUrl, itemNames }) {
+  const rows =
+    detailRow("Order ID", `#${escapeHtml(orderId)}`) +
+    detailRow("Carrier", escapeHtml(carrier)) +
+    detailRow("Tracking number", escapeHtml(trackingNumber)) +
+    (itemNames && itemNames.length
+      ? `<tr><td colspan="2" style="padding:12px 0 4px 0;font-family:${FONT};font-size:14px;color:#9A9A9A;">On its way</td></tr>`
+        + itemNameRows(itemNames)
+      : "");
+
+  return {
+    subject: `Your UpCell order has shipped — ${trackingNumber}`,
+    html: emailShell({
+      preheader: `${carrier} has your order. Track it with ${trackingNumber}.`,
+      badgeGlyph: "&#128666;",
+      headline: "Your order is on its way",
+      subtext:
+        `${escapeHtml(carrier)} has your parcel. Tracking can take a few hours to show its first scan, `
+        + "so don't worry if it looks quiet at first.",
+      detailRowsHtml: rows,
+      ctaLabel: trackingUrl ? "Track Your Order" : "View Your Order",
+      ctaHref: trackingUrl || ACCOUNT_URL,
+      footerNote: "You're receiving this because you placed an order with UpCell.",
+    }),
+  };
+}
+
 // The offer of less than the full refund, and why.
 //
 // Every deduction is listed with the finding behind it, because a smaller
@@ -781,6 +813,7 @@ module.exports = {
   refundApprovedEmail,
   refundRequestReceivedEmail,
   returnLabelIssuedEmail,
+  orderShippedEmail,
   revisedOfferEmail,
   returnReminderEmail,
   returnExpiredEmail,
