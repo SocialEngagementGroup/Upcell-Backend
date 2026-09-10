@@ -34,6 +34,7 @@ const AuditLog = require("../src/models/auditLog.model");
 const { Notification } = require("../src/models/notification.model");
 const RefundRequest = require("../src/models/refundRequest.model");
 const controller = require("../src/controllers/refundRequest.controller");
+const { hashToken } = require("../src/utils/accessToken");
 
 const makeReqRes = (body = {}, { params = {}, query = {}, user } = {}) => {
   const req = { body, params, query, user };
@@ -1170,23 +1171,29 @@ describe("offerRevisedRefund", () => {
     expect(res.statusCode).toBe(400);
   });
 
-  it("mints an access token so the email links work", async () => {
+  it("stores a hash, never the token that goes in the email", async () => {
+    // select:false hides a field from a query that did not ask for it. It is
+    // not storage protection, and a plaintext token in the database is a
+    // working link for anyone who can read a backup.
     const request = inspected();
 
     await offer(request);
 
-    expect(request.accessToken).toEqual(expect.any(String));
-    expect(request.accessToken.length).toBeGreaterThan(20);
+    expect(request.accessToken).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it("keeps a token the request already had", async () => {
-    // A new token would break the link in an email the customer already has
-    // open, so one is minted once and never replaced.
-    const request = inspected({ accessToken: "existing-token-value-kept-as-is" });
+  it("mints a new token on every offer", async () => {
+    // The plaintext cannot be recovered from the hash, so an old link cannot
+    // be rebuilt — which settles the rotation question. It is the behaviour to
+    // want anyway: two live links answering one offer is two ways to get a
+    // different answer, and the email a customer should act on is the one with
+    // the current amount in it.
+    const first = inspected({ accessToken: "a".repeat(64) });
 
-    await offer(request);
+    await offer(first);
 
-    expect(request.accessToken).toBe("existing-token-value-kept-as-is");
+    expect(first.accessToken).not.toBe("a".repeat(64));
+    expect(first.accessToken).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it("refuses a second offer on the same return", async () => {
@@ -1215,7 +1222,7 @@ describe("offerRevisedRefund", () => {
 describe("respondToRevisedOffer", () => {
   const offered = (overrides = {}) => requestDoc({
     status: "RevisedOffer",
-    accessToken: "the-real-token",
+    accessToken: hashToken("the-real-token"),
     refundBreakdown: {
       offeredAmount: 749.15,
       offerExpiresAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
@@ -2279,7 +2286,7 @@ describe("getRevisedOffer", () => {
   const offer = (overrides = {}) => requestDoc({
     rmaNumber: "RMA-2026-00412",
     status: "RevisedOffer",
-    accessToken: "the-real-token",
+    accessToken: hashToken("the-real-token"),
     productName: "iPhone 15 Pro",
     calculatedAmount: 999,
     refundBreakdown: {

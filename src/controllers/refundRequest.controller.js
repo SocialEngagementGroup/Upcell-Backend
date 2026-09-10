@@ -42,7 +42,11 @@ const {
   offerExpiryFrom,
   offerHasExpired,
 } = require("../services/revisedOffer");
-const { createAccessToken, tokensMatch } = require("../utils/accessToken");
+const {
+  createAccessToken,
+  hashToken,
+  tokenMatchesHash,
+} = require("../utils/accessToken");
 const { startClock, syncClockToStatus, isOverdue, hoursRemaining } = require("../services/returnSla");
 const {
   validateDisposition,
@@ -1026,8 +1030,11 @@ function moveStatus(request, to, options) {
   syncClockToStatus(request, to);
   return result;
 }
-const offerLink = (request, action) =>
-  `${SITE_URL}/returns/${request._id}/${action}?token=${request.accessToken}`;
+// Takes the token rather than reading it off the request, because the request
+// only holds the hash. A link built from that would be a link nothing can
+// answer — and it would look completely normal.
+const offerLink = (request, action, token) =>
+  `${SITE_URL}/returns/${request._id}/${action}?token=${encodeURIComponent(token)}`;
 
 /**
  * Offers the customer less than the full refund, itemised.
@@ -1098,9 +1105,18 @@ async function offerRevisedRefund(req, res, next) {
       offerExpiresAt: expiresAt,
     };
 
-    // Minted once and kept. A new token on every offer would break the link in
-    // an email the customer already has open.
-    if (!request.accessToken) request.accessToken = createAccessToken();
+    // A fresh token on every offer, and only its hash is stored.
+    //
+    // The plaintext exists in this variable and in the email that carries it,
+    // nowhere else — so a copy of the database is not a set of working links.
+    // That also means it cannot be recovered to rebuild an old link, which
+    // decides the rotation question: a second offer mints a new token and the
+    // link in the superseded email stops working. That is the behaviour to
+    // want anyway. Two live links to answer one offer is two ways to get a
+    // different answer, and the email a customer should be acting on is the
+    // one with the current amount in it.
+    const plainToken = createAccessToken();
+    request.accessToken = hashToken(plainToken);
 
     {
       const moved = moveStatus(request, "RevisedOffer", {
@@ -1122,8 +1138,8 @@ async function offerRevisedRefund(req, res, next) {
         offeredAmount: offer.offeredAmount,
         deductions: offer.deductions,
         findings: findings || request.inspection?.findings,
-        acceptUrl: offerLink(request, "accept"),
-        declineUrl: offerLink(request, "decline"),
+        acceptUrl: offerLink(request, "accept", plainToken),
+        declineUrl: offerLink(request, "decline", plainToken),
         expiresAt,
       })
     );
@@ -1175,7 +1191,7 @@ async function getRevisedOffer(req, res, next) {
   try {
     const request = await RefundRequest.findById(req.params.id || null).select("+accessToken");
 
-    if (!request || !tokensMatch(req.query?.token, request.accessToken)) {
+    if (!request || !tokenMatchesHash(req.query?.token, request.accessToken)) {
       return res.status(404).json({ error: "This link is not valid." });
     }
 
@@ -1214,7 +1230,7 @@ async function respondToRevisedOffer(req, res, next) {
     const request = await RefundRequest.findById(req.params.id || null).select("+accessToken");
     // Deliberately the same answer for a missing return and a wrong token. A
     // different one tells whoever is guessing which ids exist.
-    if (!request || !tokensMatch(req.query?.token, request.accessToken)) {
+    if (!request || !tokenMatchesHash(req.query?.token, request.accessToken)) {
       return res.status(404).json({ error: "This link is not valid." });
     }
 

@@ -4,7 +4,7 @@ const {
   offerHasExpired,
   OFFER_RESPONSE_DAYS,
 } = require("../src/services/revisedOffer");
-const { createAccessToken, tokensMatch } = require("../src/utils/accessToken");
+const { createAccessToken, tokenMatchesHash, hashToken } = require("../src/utils/accessToken");
 
 const checklist = [
   { key: "cosmetic_grade", result: "fail" },
@@ -199,32 +199,57 @@ describe("access tokens", () => {
     expect(tokens.size).toBe(200);
   });
 
-  it("matches a token against itself", () => {
+  it("matches a token against the hash of itself", () => {
     const token = createAccessToken();
 
-    expect(tokensMatch(token, token)).toBe(true);
+    expect(tokenMatchesHash(token, hashToken(token))).toBe(true);
+  });
+
+  it("does not match a token against itself in plaintext", () => {
+    // The failure this rename exists to prevent. If a record still held a
+    // plaintext token, comparing against it must fail rather than quietly
+    // work — otherwise the migration looks finished when it is not.
+    const token = createAccessToken();
+
+    expect(tokenMatchesHash(token, token)).toBe(false);
+  });
+
+  it("stores something that cannot be put in a URL", () => {
+    const token = createAccessToken();
+    const stored = hashToken(token);
+
+    expect(stored).toMatch(/^[0-9a-f]{64}$/);
+    expect(stored).not.toBe(token);
+    // A stolen database gives an attacker this, and this is not a link.
+    expect(stored).not.toContain(token);
+  });
+
+  it("hashes the same token to the same digest every time", () => {
+    const token = createAccessToken();
+
+    expect(hashToken(token)).toBe(hashToken(token));
   });
 
   it("rejects a different token, including one that only differs at the end", () => {
     const token = createAccessToken();
 
-    expect(tokensMatch(token, createAccessToken())).toBe(false);
-    expect(tokensMatch(`${token.slice(0, -1)}X`, token)).toBe(false);
+    expect(tokenMatchesHash(token, hashToken(createAccessToken()))).toBe(false);
+    expect(tokenMatchesHash(`${token.slice(0, -1)}X`, hashToken(token))).toBe(false);
   });
 
   it("rejects a missing token rather than treating it as a match", () => {
     const token = createAccessToken();
 
     for (const candidate of [null, undefined, ""]) {
-      expect(tokensMatch(candidate, token)).toBe(false);
-      expect(tokensMatch(token, candidate)).toBe(false);
+      expect(tokenMatchesHash(candidate, hashToken(token))).toBe(false);
+      expect(tokenMatchesHash(token, candidate)).toBe(false);
     }
   });
 
   it("rejects a shorter or longer candidate without throwing", () => {
     const token = createAccessToken();
 
-    expect(tokensMatch("short", token)).toBe(false);
-    expect(tokensMatch(`${token}extra`, token)).toBe(false);
+    expect(tokenMatchesHash("short", token)).toBe(false);
+    expect(tokenMatchesHash(`${token}extra`, token)).toBe(false);
   });
 });
