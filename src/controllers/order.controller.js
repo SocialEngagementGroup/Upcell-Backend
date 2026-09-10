@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const { Resend } = require("resend");
 const Order = require("../models/order.model");
+const { toCustomerOrder, ownsOrder } = require("../utils/orderView");
 const AuditLog = require("../models/auditLog.model");
 const { Notification } = require("../models/notification.model");
 const { makeOrderObjAndTotal } = require("./checkout.controller");
@@ -37,14 +38,22 @@ async function getOrder(req, res, next) {
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ error: "Order not found" });
 
-    const isOwner = req.user?.role === "admin" || req.user?.email === order.email;
-    if (isOwner) {
-      return res.status(200).json(order);
+    // Anyone who is not the owner gets the same answer as a missing order.
+    //
+    // There used to be a third answer here: the document minus seven personal
+    // fields, handed to any caller who knew the id. That still carried the
+    // card brand and last four, the AVS result, the bank's transaction id, the
+    // Clerk user id, the ship-to state, every device's IMEI, and the whole
+    // refund block including which staff member keyed it in at the bank.
+    //
+    // A distinct "not yours" would also confirm that an id exists, which is
+    // exactly what somebody walking the id range is trying to learn. One
+    // answer for both.
+    if (!ownsOrder(req.user, order)) {
+      return res.status(404).json({ error: "Order not found" });
     }
 
-    const { name, email, phone, city, postal, street, country, ...safeOrder } =
-      order.toObject();
-    res.status(200).json(safeOrder);
+    res.status(200).json(toCustomerOrder(order));
   } catch (error) {
     next(error);
   }
@@ -408,7 +417,10 @@ async function getClientOrders(req, res, next) {
     const orders = await Order.find({ $or: ownership, paid: true }).sort({
       updatedAt: -1,
     });
-    res.json(orders);
+
+    // The same view the single-order route returns, so a customer cannot read
+    // a field from the list that the detail page will not show them.
+    res.json(orders.map(toCustomerOrder));
   } catch (error) {
     next(error);
   }

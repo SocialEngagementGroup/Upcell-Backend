@@ -2,7 +2,7 @@ const router = require("express").Router();
 const { verifyToken, requireAdmin, optionalAuth } = require("../middleware/auth.middleware");
 const { validateRequest } = require("../middleware/validate.middleware");
 const { validateObjectIdParam } = require("../middleware/validateObjectId.middleware");
-const { checkoutLimiter } = require("../middleware/rateLimit.middleware");
+const {checkoutLimiter, orderLookupLimiter } = require("../middleware/rateLimit.middleware");
 const { orderSchema, refundSchema } = require("../schemas/request.schemas");
 const {
   getOrder,
@@ -15,7 +15,7 @@ const {
   createOrder,
 } = require("../controllers/order.controller");
 
-router.get("/order/:id", optionalAuth, getOrder);
+router.get("/order/:id", orderLookupLimiter, optionalAuth, getOrder);
 router.get("/admin-orders/:status", verifyToken, requireAdmin, getAdminOrders);
 router.get("/admin-orders-by-data", verifyToken, requireAdmin, getAdminOrdersByDate);
 router.post("/update-order-status", verifyToken, requireAdmin, updateOrderStatus);

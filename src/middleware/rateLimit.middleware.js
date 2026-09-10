@@ -55,4 +55,24 @@ const adminLimiter = rateLimit({
   message: { error: "Too many requests. Please try again later." },
 });
 
-module.exports = { publicFormLimiter, checkoutLimiter, analyticsLimiter, cartLimiter, adminLimiter };
+// Order ids are Mongo ObjectIds. They are not guessable at random, but they
+// are partly a timestamp, so one real id narrows where its neighbours sit.
+// This is the ceiling on how fast somebody can walk that range. Generous
+// enough that a customer refreshing their confirmation page, or a household
+// on one IP, never sees it.
+const orderLookupLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests. Please try again later." },
+});
+
+module.exports = {
+  publicFormLimiter,
+  checkoutLimiter,
+  analyticsLimiter,
+  cartLimiter,
+  adminLimiter,
+  orderLookupLimiter,
+};

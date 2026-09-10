@@ -194,61 +194,164 @@ describe("updateOrderStatus — keeps the paid flag in step with status", () => 
   });
 });
 
-describe("getOrder — PII exposure guard", () => {
+describe("getOrder — who may read an order, and what of it", () => {
   const fullOrder = {
     _id: "order1",
+    userId: "user_owner",
     email: "buyer@example.com",
     name: "Jane Doe",
     phone: "1234567890",
-    city: "City",
-    postal: "12345",
     street: "123 Some St",
+    city: "City",
+    state: "OH",
+    postal: "12345",
     country: "US",
     status: "Processing",
     paid: true,
+    items: [{ productId: "p1", name: "iPhone 15", quantity: 1, lineTotalCents: 99900, imei: "353916000000000" }],
+    subtotalCents: 99900,
+    shippingCents: 0,
+    taxCents: 7992,
+    totalCents: 107892,
+    cardBrand: "visa",
+    cardLast4: "4821",
+    // None of the rest may ever leave.
+    avsResult: "Y",
+    cvnResult: "M",
+    boaTransactionId: "7284419920176543904007",
+    boaTransactionUuid: "0e5f...",
+    signedAmount: "1078.92",
+    authorizedAmount: "1078.92",
+    boaDecision: "ACCEPT",
+    reasonCode: "100",
+    refund: { amount: 999, approvedBy: "yasir@upcellit.com", enteredAtBankBy: "yasir@upcellit.com", notes: "internal" },
   };
 
-  it("returns the full order (including PII) to its owner", async () => {
+  const ask = async (user) => {
     Order.findById.mockResolvedValue({ ...fullOrder, toObject: () => fullOrder });
 
-    const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" }, user: { email: "buyer@example.com" } });
+    const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" }, user });
     await orderController.getOrder(req, res, jest.fn());
+    return res;
+  };
 
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ email: "buyer@example.com", name: "Jane Doe" }));
+  const owner = { id: "user_owner", email: "buyer@example.com", emailVerified: true };
+
+  it("gives the owner their order, matched on the Clerk user id", async () => {
+    const res = await ask(owner);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json.mock.calls[0][0]).toMatchObject({ email: "buyer@example.com", name: "Jane Doe" });
   });
 
-  it("returns the full order to an admin regardless of email match", async () => {
-    Order.findById.mockResolvedValue({ ...fullOrder, toObject: () => fullOrder });
+  it("gives it to the owner even when their account email differs from checkout", async () => {
+    // Somebody typing a different address into the checkout form used to lock
+    // them out of their own order, because ownership was an email comparison.
+    const res = await ask({ id: "user_owner", email: "different@example.com", emailVerified: true });
 
-    const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" }, user: { role: "admin", email: "admin@upcell.com" } });
-    await orderController.getOrder(req, res, jest.fn());
-
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ email: "buyer@example.com" }));
+    expect(res.statusCode).toBe(200);
+    expect(res.json.mock.calls[0][0]._id).toBe("order1");
   });
 
-  it("strips name/email/phone/address for a non-owner (or anonymous) viewer", async () => {
-    Order.findById.mockResolvedValue({ ...fullOrder, toObject: () => fullOrder });
+  it("gives it to an admin", async () => {
+    const res = await ask({ id: "user_admin", role: "admin", email: "admin@upcellit.com" });
 
-    const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" } }); // no req.user at all — anonymous viewer
-    await orderController.getOrder(req, res, jest.fn());
-
-    const returned = res.json.mock.calls[0][0];
-    expect(returned.email).toBeUndefined();
-    expect(returned.name).toBeUndefined();
-    expect(returned.phone).toBeUndefined();
-    expect(returned.street).toBeUndefined();
-    // Non-PII fields should still come through so the order summary still renders.
-    expect(returned.status).toBe("Processing");
-    expect(returned.paid).toBe(true);
+    expect(res.json.mock.calls[0][0]).toMatchObject({ email: "buyer@example.com" });
   });
 
-  it("strips PII for a logged-in user who owns a different order", async () => {
-    Order.findById.mockResolvedValue({ ...fullOrder, toObject: () => fullOrder });
+  it("404s an anonymous caller who knows the id", async () => {
+    // Not a stripped copy. Order ids are partly a timestamp, so one real id
+    // narrows where its neighbours sit — a distinct answer would confirm
+    // which of them exist.
+    const res = await ask(undefined);
 
-    const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" }, user: { email: "someone-else@example.com" } });
-    await orderController.getOrder(req, res, jest.fn());
+    expect(res.statusCode).toBe(404);
+    expect(res.json.mock.calls[0][0]).toEqual({ error: "Order not found" });
+  });
 
-    expect(res.json.mock.calls[0][0].email).toBeUndefined();
+  it("404s a different signed-in customer", async () => {
+    const res = await ask({ id: "user_someone_else", email: "someone-else@example.com", emailVerified: true });
+
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("answers a stranger exactly as it answers a missing order", async () => {
+    const stranger = await ask({ id: "user_someone_else", email: "x@example.com", emailVerified: true });
+
+    Order.findById.mockResolvedValue(null);
+    const { req, res: missing } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" } });
+    await orderController.getOrder(req, missing, jest.fn());
+
+    expect(stranger.statusCode).toBe(missing.statusCode);
+    expect(stranger.json.mock.calls[0][0]).toEqual(missing.json.mock.calls[0][0]);
+  });
+
+  it("never sends gateway, AVS or staff fields to the owner", async () => {
+    // The reason this is an allowlist. A denylist leaks every field added to
+    // the schema afterwards, silently.
+    const res = await ask(owner);
+    const body = res.json.mock.calls[0][0];
+
+    for (const leaked of [
+      "avsResult", "cvnResult", "boaTransactionId", "boaTransactionUuid",
+      "signedAmount", "authorizedAmount", "boaDecision", "reasonCode", "userId",
+    ]) {
+      expect(body[leaked]).toBeUndefined();
+    }
+
+    expect(body.refund.approvedBy).toBeUndefined();
+    expect(body.refund.enteredAtBankBy).toBeUndefined();
+    expect(body.refund.notes).toBeUndefined();
+    expect(body.refund.amount).toBe(999);
+  });
+
+  it("keeps what the owner actually needs", async () => {
+    const body = (await ask(owner)).json.mock.calls[0][0];
+
+    // Which card, for reconciling against a statement.
+    expect(body.cardBrand).toBe("visa");
+    expect(body.cardLast4).toBe("4821");
+    // The IMEI of the device they bought and paid for.
+    expect(body.items[0].imei).toBe("353916000000000");
+    // The four figures the bank was sent.
+    expect(body.totalCents).toBe(107892);
+  });
+
+  describe("orders written before userId was recorded", () => {
+    const legacy = { ...fullOrder, userId: undefined };
+
+    const askLegacy = async (user) => {
+      Order.findById.mockResolvedValue({ ...legacy, toObject: () => legacy });
+      const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" }, user });
+      await orderController.getOrder(req, res, jest.fn());
+      return res;
+    };
+
+    it("falls back to a verified email match", async () => {
+      const res = await askLegacy({ id: "user_x", email: "buyer@example.com", emailVerified: true });
+
+      expect(res.statusCode).toBe(200);
+    });
+
+    it("refuses an unverified email match", async () => {
+      // Otherwise claiming a stranger's order takes signing up with their
+      // address and never answering the confirmation mail.
+      const res = await askLegacy({ id: "user_x", email: "buyer@example.com", emailVerified: false });
+
+      expect(res.statusCode).toBe(404);
+    });
+
+    it("ignores case and whitespace", async () => {
+      const res = await askLegacy({ id: "user_x", email: "  Buyer@Example.com ", emailVerified: true });
+
+      expect(res.statusCode).toBe(200);
+    });
+
+    it("does not fall back to email when the order has a userId", async () => {
+      const res = await ask({ id: "user_x", email: "buyer@example.com", emailVerified: true });
+
+      expect(res.statusCode).toBe(404);
+    });
   });
 
   it("returns 404 for a non-existent order", async () => {
