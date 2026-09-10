@@ -79,23 +79,65 @@ const deviceTypeFor = (modelKey) => {
   return null;
 };
 
-// Only for the seed. Staff rename these in the admin screen; nothing reads
-// them but the page.
-const displayNameFor = (modelKey) => modelKey
-  .replace(/^iphone/, "iPhone ")
-  .replace(/^ipadpro/, "iPad Pro ")
-  .replace(/^ipadair/, "iPad Air ")
-  .replace(/^ipadmini/, "iPad mini ")
-  .replace(/^ipad/, "iPad ")
-  .replace(/^mbp/, "MacBook Pro ")
-  .replace(/^mba/, "MacBook Air ")
-  .replace(/^s(\d)/, "Galaxy S$1 ")
-  .replace(/^pixel/, "Pixel ")
-  .replace(/promax$/, "Pro Max")
-  .replace(/pro$/, "Pro")
-  .replace(/plus$/, "Plus")
-  .replace(/ultra$/, "Ultra")
-  .trim();
+// The names as the trade-in page already showed them, copied across with the
+// prices. Deriving them from the model key produced "iPhone 15Pro" and
+// "MacBook Pro 16 M3" — close enough to look like a bug and wrong enough to
+// look careless on the one screen where a customer is deciding whether to
+// trust the number beside it.
+//
+// Staff rename these in the admin screen. Nothing reads them but the page.
+const DISPLAY_NAMES = {
+  iphone16promax: "iPhone 16 Pro Max",
+  iphone16pro: "iPhone 16 Pro",
+  iphone16plus: "iPhone 16 Plus",
+  iphone16: "iPhone 16",
+  iphone15promax: "iPhone 15 Pro Max",
+  iphone15pro: "iPhone 15 Pro",
+  iphone15plus: "iPhone 15 Plus",
+  iphone15: "iPhone 15",
+  iphone14promax: "iPhone 14 Pro Max",
+  iphone14pro: "iPhone 14 Pro",
+  iphone14: "iPhone 14",
+  iphone13pro: "iPhone 13 Pro",
+  iphone13: "iPhone 13",
+  iphone12pro: "iPhone 12 Pro",
+  iphone12: "iPhone 12",
+  iphone11: "iPhone 11",
+  ipadprom4: "iPad Pro M4",
+  ipadpro12: "iPad Pro 12.9-inch",
+  ipadpro11: "iPad Pro 11-inch",
+  ipadairm2: "iPad Air M2",
+  ipadair5: "iPad Air (5th Gen)",
+  ipadmini6: "iPad mini (6th Gen)",
+  ipad10: "iPad (10th Gen)",
+  ipad9: "iPad (9th Gen)",
+  mbp16m3: "MacBook Pro 16\" M3",
+  mbp14m3: "MacBook Pro 14\" M3",
+  mbp16m2: "MacBook Pro 16\" M2",
+  mbp14m2: "MacBook Pro 14\" M2",
+  mba15m3: "MacBook Air 15\" M3",
+  mba13m3: "MacBook Air 13\" M3",
+  mba15m2: "MacBook Air 15\" M2",
+  mba13m2: "MacBook Air 13\" M2",
+  s25ultra: "Galaxy S25 Ultra",
+  s25plus: "Galaxy S25+",
+  s25: "Galaxy S25",
+  s24ultra: "Galaxy S24 Ultra",
+  s24plus: "Galaxy S24+",
+  s24: "Galaxy S24",
+  s23ultra: "Galaxy S23 Ultra",
+  s23plus: "Galaxy S23+",
+  s23: "Galaxy S23",
+  s22ultra: "Galaxy S22 Ultra",
+  pixel9proxl: "Pixel 9 Pro XL",
+  pixel9pro: "Pixel 9 Pro",
+  pixel9: "Pixel 9",
+  pixel9a: "Pixel 9a",
+  pixel8pro: "Pixel 8 Pro",
+  pixel8: "Pixel 8",
+  pixel8a: "Pixel 8a",
+};
+const displayNameFor = (modelKey) => DISPLAY_NAMES[modelKey] || modelKey;
 
 // ------------------------------------------------------------- questions
 const SCREEN_OPTIONS = [
