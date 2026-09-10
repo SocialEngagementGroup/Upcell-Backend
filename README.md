@@ -43,8 +43,6 @@ The backend for the UpCell platform, providing a RESTful API for product managem
    MONGODB_URL=your_mongodb_uri
    CLERK_SECRET_KEY=your_clerk_secret_key
    RESEND_KEY=your_resend_api_key
-   TEST_SECRET=your_stripe_test_secret
-   TEST_ENDPOINTSECRET=your_stripe_webhook_secret
    PORT=5001
    ```
 3. Run the server:

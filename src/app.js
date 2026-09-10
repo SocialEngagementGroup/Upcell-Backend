@@ -7,6 +7,7 @@ const compression = require("compression");
 const routes = require("./routes");
 const { corsOptions } = require("./config/cors");
 const { errorHandler } = require("./middleware/error.middleware");
+const mongoose = require("mongoose");
 
 const app = express();
 
@@ -100,6 +101,30 @@ app.use((req, res, next) => {
     ? largeBodyParser
     : defaultBodyParser;
   parser(req, res, next);
+});
+
+// Is the server up, and can it reach the database?
+//
+// Before this the only way to answer either was to open the site and wait. No
+// auth, because a monitor cannot hold a Clerk token, and nothing here is worth
+// hiding: an uptime number and whether Mongo is connected.
+//
+// Mounted before the router so a broken route file cannot take the health
+// check down with it — the one moment it is most needed.
+app.get("/health", (req, res) => {
+  // 1 is connected. Reported as a word rather than the driver's number,
+  // because the person reading this at 3am should not have to look it up.
+  const states = ["disconnected", "connected", "connecting", "disconnecting"];
+  const state = states[mongoose.connection.readyState] || "unknown";
+  const ok = mongoose.connection.readyState === 1;
+
+  // 503 when the database is unreachable, so a monitor sees a failure rather
+  // than a 200 carrying the word "disconnected" that nobody reads.
+  return res.status(ok ? 200 : 503).json({
+    ok,
+    db: state,
+    uptime: Math.round(process.uptime()),
+  });
 });
 
 app.use(routes);

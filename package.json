@@ -13,7 +13,7 @@
     "seed-accessories": "node scripts/seed-accessories.js"
   },
   "engines": {
-    "node": ">=20.9.0 <25.0.0"
+    "node": "20.x"
   },
   "author": "",
   "license": "ISC",
