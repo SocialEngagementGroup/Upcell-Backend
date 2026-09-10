@@ -1,0 +1,43 @@
+# Runs the test suite on every push to dev-sunit and every PR to main.
+#
+# There was no CI at all before this. The suite is 1,272 tests and it has
+# caught real bugs during the September work — a tax rate that read as zero
+# from an empty env var, an audit row that failed validation inside a swallowed
+# catch — but only because somebody ran it. A syntax error was committed on
+# 11 September and reached the branch precisely because nothing checked.
+name: CI
+
+on:
+  push:
+    branches: [dev-sunit]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches the engines field and what Render runs.
+          node-version: '20'
+          cache: npm
+
+      # ci, not install: it installs exactly the lockfile and fails if
+      # package.json and the lock have drifted apart, which is a thing worth
+      # failing on rather than silently resolving.
+      - run: npm ci
+
+      # No --passWithNoTests. A run that finds nothing must be a failure, or a
+      # broken glob quietly turns the whole gate into a no-op.
+      - run: npm test
+        env:
+          # The suite mocks every outbound service. These exist because
+          # validateEnv() refuses to start without them, and none is real.
+          MONGODB_URL: mongodb://localhost:27017/ci
+          CLERK_SECRET_KEY: sk_test_ci
+          RESEND_KEY: re_ci
+          EMAIL_FROM: ci@example.com
