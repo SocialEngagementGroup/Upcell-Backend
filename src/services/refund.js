@@ -16,9 +16,6 @@
 
 const { round2 } = require("../utils/money");
 
-const { restockingFeeApplies } = require("../constants/returnReasons");
-
-const RESTOCKING_FEE_RATE = 0.15;
 
 // Tax and shipping lines carry no productId — only real devices and
 // accessories do. This is the same test checkout.controller.js uses to tell
@@ -108,4 +105,4 @@ function calculateRefund(order, { itemIds, reasonCode, waiveRestockingFee = fals
   };
 }
 
-module.exports = { calculateRefund, RESTOCKING_FEE_RATE, isRefundableLine, isTaxLine };
+module.exports = { calculateRefund, isRefundableLine, isTaxLine };

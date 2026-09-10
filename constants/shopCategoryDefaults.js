@@ -13,10 +13,18 @@ const defaultDescriptions = {
   "MacBook Pro": "Professional MacBook Pro models for sustained demanding workflows.",
 };
 
+// Cloudinary public_ids, not paths.
+//
+// These used to be "/staticImages/category-iphone.png" and friends. Those
+// files were moved to Cloudinary by scripts/migrate-images-to-cloudinary.js
+// and the local copies deleted, so every category seeded from this list has
+// been carrying a URL that 404s — visible as a broken image on the admin
+// categories page. The ids match STATIC_IMAGES in the frontend, which is
+// where the same three pictures are referenced from.
 const familyImages = {
-  iPhone: [{ url: "/staticImages/category-iphone.png" }],
-  iPad: [{ url: "/staticImages/category-ipad.png" }],
-  MacBook: [{ url: "/staticImages/category-macbook.png" }],
+  iPhone: [{ publicId: "upcell/static/category-iphone--bd89b1fb" }],
+  iPad: [{ publicId: "upcell/static/category-ipad--d0e0352a" }],
+  MacBook: [{ publicId: "upcell/static/category-macbook--c365e244" }],
 };
 
 const getCategoryImages = (modelName) => {
