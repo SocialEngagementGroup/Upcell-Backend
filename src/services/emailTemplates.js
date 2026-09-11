@@ -827,6 +827,35 @@ function adminNewContactEmail({ name, email, subject, message, submissionId }) {
   };
 }
 
+// A week after the phone arrived, asking what they thought.
+//
+// Sent once per order and never chased. A second email asking for a review is
+// the point at which a shop stops sounding interested and starts sounding
+// like it wants something, and the first one has already asked.
+function reviewPromptEmail(order, items) {
+  const names = items.map((item) => item.name).filter(Boolean);
+  const first = names[0] || "your device";
+
+  const rows = names.slice(0, 4).map((name) => detailRow("Device", escapeHtml(name))).join("");
+
+  return {
+    subject: names.length > 1
+      ? "How are your devices getting on?"
+      : `How is your ${first} getting on?`,
+    html: emailShell({
+      preheader: `Tell other buyers what you think of ${escapeHtml(first)}.`,
+      badgeGlyph: "&#9733;",
+      headline: "How is it going?",
+      subtext:
+        "You've had it about a week, which is long enough to know. A couple of lines from you is worth more to the next buyer than anything we could write ourselves — and because you bought it here, your review carries a verified badge.",
+      detailRowsHtml: rows,
+      ctaLabel: "Write a review",
+      ctaHref: ACCOUNT_URL,
+      footerNote: "Not what you hoped for? Reply to this email instead and we'll put it right.",
+    }),
+  };
+}
+
 module.exports = {
   emailShell,
   adminNewContactEmail,
@@ -844,6 +873,7 @@ module.exports = {
   revisedOfferEmail,
   returnReminderEmail,
   returnExpiredEmail,
+  reviewPromptEmail,
   refundReturnInstructionsEmail,
   refundDeviceReceivedEmail,
   refundRejectedEmail,

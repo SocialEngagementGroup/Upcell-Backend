@@ -10,6 +10,19 @@ const  parentProductSchema = new mongoose.Schema({
     description: String,
     images: {type: [mongoose.Schema.Types.Mixed],
             default: [] },
+
+    // What customers have said, rolled up.
+    //
+    // Recomputed from the reviews collection whenever one is approved or
+    // hidden, rather than counted on every product page load: a page shows one
+    // average and 954 products would each be an aggregate. Stored on the
+    // parent because that is what a product page is.
+    //
+    // Not to be confused with singleVariation.reviewScore /
+    // peopleReviewed, which are seeded display numbers from before reviews
+    // existed and are not derived from anything.
+    ratingAvg: { type: Number, default: 0 },
+    ratingCount: { type: Number, default: 0 },
 }, { timestamps: true })
 
 parentProductSchema.index({ modelName: 1 });

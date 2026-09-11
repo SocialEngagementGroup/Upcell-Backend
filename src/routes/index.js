@@ -17,6 +17,7 @@ const uploadRoutes = require("./upload.routes");
 const refundRequestRoutes = require("./refundRequest.routes");
 const bankOfAmericaRoutes = require("./bankOfAmerica.routes");
 const reconciliationRoutes = require("./reconciliation.routes");
+const reviewRoutes = require("./review.routes");
 
 router.use("/", categoryRoutes);
 router.use("/", productRoutes);
@@ -35,5 +36,6 @@ router.use("/", auditLogRoutes);
 router.use("/", reconciliationRoutes);
 router.use("/", uploadRoutes);
 router.use("/", refundRequestRoutes);
+router.use("/", reviewRoutes);
 
 module.exports = router;

@@ -5,15 +5,18 @@
 // real customers the wrong thing at three in the morning.
 const { Resend } = require("resend");
 const RefundRequest = require("../models/refundRequest.model");
+const Order = require("../models/order.model");
 const {
   returnReminderEmail,
   returnExpiredEmail,
+  reviewPromptEmail,
 } = require("./emailTemplates");
 const {
   sendDueReminders,
   expireStaleAuthorisations,
   autoDeclineStaleOffers,
   purgeInspectionPhotos,
+  sendReviewPrompts,
 } = require("./returnJobs");
 const { destroyAsset } = require("./cloudinaryDelete");
 
@@ -49,6 +52,12 @@ async function runReturnJobs(now = new Date()) {
     })],
     ["staleOffers", () => autoDeclineStaleOffers({ RefundRequest, now })],
     ["photoPurge", () => purgeInspectionPhotos({ RefundRequest, destroyAsset, now })],
+    // Not a returns job, but it runs on the same daily pass and for the same
+    // reason: it is something that has to happen to an order when nobody is
+    // looking at it.
+    ["reviewPrompts", () => sendReviewPrompts({
+      Order, sendEmail, buildEmail: reviewPromptEmail, now,
+    })],
   ];
 
   for (const [name, run] of jobs) {

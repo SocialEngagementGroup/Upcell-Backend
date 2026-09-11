@@ -1,8 +1,9 @@
 // The things that have to happen to a return when nobody is looking at it.
 //
-// Four jobs, run daily: nudge customers before their authorisation lapses,
+// Five jobs, run daily: nudge customers before their authorisation lapses,
 // expire the ones that lapsed anyway, auto-decline a revised offer nobody
-// answered, and delete inspection photos once their retention is up. The first
+// answered, delete inspection photos once their retention is up, and ask a
+// customer what they thought a week after their phone arrived. The first
 // three exist because a return left alone does not resolve itself — it sits in
 // a queue looking live, and staff cannot tell it apart from one still on its
 // way. The fourth exists because evidence photos of somebody's device are not
@@ -255,6 +256,55 @@ async function purgeInspectionPhotos({ RefundRequest, destroyAsset, now = new Da
   return { deleted, held, refused, failures, considered: candidates.length };
 }
 
+// How long after delivery to ask. Long enough that somebody has actually used
+// the phone, short enough that the purchase is still in mind.
+const REVIEW_PROMPT_DAYS = 7;
+
+/**
+ * Asks customers what they thought, a week after their phone arrived.
+ *
+ * One email per order, ever. `reviewPromptSentAt` on the order is what stops a
+ * re-run asking twice, and it is written before the send for the same reason
+ * the return reminders are: a duplicate email annoys somebody, while a crash
+ * between sending and saving would ask again on every run until the job
+ * stopped crashing.
+ *
+ * Guests are skipped. A review has to be tied to an account, because the whole
+ * value of the badge is that the reviewer can be traced to a delivered order —
+ * so asking somebody who cannot write one is a waste of their attention.
+ */
+async function sendReviewPrompts({ Order, sendEmail, buildEmail, now = new Date() }) {
+  const cutoff = new Date(now.getTime() - REVIEW_PROMPT_DAYS * 24 * 60 * 60 * 1000);
+
+  const candidates = await Order.find({
+    status: "Delivered",
+    deliveredAt: { $lte: cutoff },
+    reviewPromptSentAt: { $exists: false },
+    userId: { $exists: true, $ne: null },
+  }).limit(200);
+
+  let sent = 0;
+  const failures = [];
+
+  for (const order of candidates) {
+    // Nothing to review. A refunded order has no device the customer kept.
+    const items = (order.items || []).filter((item) => item?.productId);
+    if (!items.length || order.status === "Refunded") continue;
+
+    try {
+      order.reviewPromptSentAt = now;
+      await order.save();
+
+      sendEmail(order.email, buildEmail(order, items));
+      sent += 1;
+    } catch (error) {
+      failures.push({ orderId: String(order._id), error: error?.message || String(error) });
+    }
+  }
+
+  return { sent, considered: candidates.length, failures };
+}
+
 module.exports = {
   purgeInspectionPhotos,
   // Re-exported so the job and its tests read the rule from one place.
@@ -263,4 +313,6 @@ module.exports = {
   expireStaleAuthorisations,
   autoDeclineStaleOffers,
   AWAITING_SHIPMENT,
+  sendReviewPrompts,
+  REVIEW_PROMPT_DAYS,
 };

@@ -77,6 +77,11 @@ const OrderSchema = new Schema(
     // Absent on orders predating this field and on admin-created Manual orders.
     userId: { type: String, index: true },
 
+    // When the "how did you get on" email went out. One per order, ever —
+    // its presence is what stops the daily job asking again, which is why it
+    // is written before the send rather than after.
+    reviewPromptSentAt: Date,
+
     // Placed without an account. The order is identified by a token in a link
     // instead of by a Clerk user id.
     guest: { type: Boolean, default: false },

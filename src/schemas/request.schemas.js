@@ -651,6 +651,30 @@ const refundSchema = z
     path: ["waiveReason"],
   });
 
+
+// A customer's review of a device they bought.
+//
+// The limits are the ones the product page is laid out for: a title that fits
+// on one line, and a body somebody will actually read. Nothing here proves the
+// purchase — that is four checks in the controller against the order, and no
+// field in this object can stand in for them.
+const reviewSchema = z.object({
+  orderId: objectIdField,
+  productId: objectIdField,
+  // Whole stars only. Half stars look precise and are not: nobody can say what
+  // separates 3.5 from 4, and an average of whole numbers is honest.
+  rating: z.number().int().min(1, "Choose a rating").max(5),
+  title: z.string().trim().max(80, "Title must be 80 characters or fewer").optional(),
+  body: z.string().trim().max(2000, "Review must be 2000 characters or fewer").optional(),
+});
+
+const reviewModerationSchema = z.object({
+  status: z.enum(["APPROVED", "HIDDEN"]),
+  // Required for a hide, which the controller enforces — a schema cannot say
+  // "required only when status is HIDDEN" and still give a useful message.
+  moderationNote: z.string().trim().max(500).optional(),
+});
+
 const analyticsEventSchema = z.object({
   category: z.enum(["form_submit", "form_dropoff", "form_engagement", "admin_api_error"]),
   name: trimmedString("Event name", 1, 120),
@@ -690,6 +714,8 @@ module.exports = {
   orderSchema,
   productFilterSchema,
   productImportSchema,
+  reviewSchema,
+  reviewModerationSchema,
   wholesaleFormSchema,
   tradeInRequestSchema,
   newsletterSubscriberSchema,
