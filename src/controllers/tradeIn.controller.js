@@ -21,7 +21,8 @@ const {
 } = require("../utils/pagination");
 const tradeInStatus = require("../constants/tradeInStatus");
 const { isTradeInStatus } = tradeInStatus;
-const { applyTransition } = require("../services/returnTimeline");
+const { applyTransition, recordEvent } = require("../services/returnTimeline");
+const { maskReference } = require("../services/payoutSafety");
 
 const tradeInEmailFrom = process.env.EMAIL_FROM;
 
@@ -377,9 +378,116 @@ async function deleteTradeInRequest(req, res, next) {
   }
 }
 
+/**
+ * PATCH /admin-trade-in-requests/:id/payout
+ *
+ * Records that the money went out, and moves the request to Paid.
+ *
+ * Recording the payment and marking it paid are one action on purpose. Two
+ * endpoints would let a request sit at Paid with no record of how, which is
+ * the state somebody has to reconstruct from a bank statement months later
+ * when a customer says they were never paid.
+ */
+async function recordTradeInPayout(req, res, next) {
+  try {
+    const { method, recipientName, referenceMasked, reference, note } = req.body;
+
+    const request = await TradeInRequest.findById(req.params.id);
+    if (!request) {
+      return res.status(404).json({ error: "Trade-in request not found" });
+    }
+
+    if (request.payout?.paidAt) {
+      return res.status(400).json({
+        error: `This trade-in was already paid on ${new Date(request.payout.paidAt).toDateString()}.`,
+      });
+    }
+
+    // The state machine decides whether paying is legal at all. A request
+    // still in inspection has no agreed amount to pay.
+    const moved = applyTransition(request, "Paid", {
+      actor: req.user?.email || req.user?.id,
+      actorType: "staff",
+      event: "payout_recorded",
+      machine: tradeInStatus,
+      meta: { method, amountCents: amountOwed(request) },
+    });
+
+    if (!moved.ok) {
+      return res.status(400).json({ error: moved.error, allowed: moved.allowed });
+    }
+
+    request.payout = {
+      method,
+      recipientName,
+      // Masked again here. Masking done in a browser is masking anybody can
+      // turn off, and this is the copy that is kept.
+      referenceMasked: maskReference(referenceMasked, method),
+      amountCents: amountOwed(request),
+      paidAt: new Date(),
+      paidBy: req.user?.email,
+      reference: reference || undefined,
+    };
+
+    if (note) {
+      recordEvent(request, {
+        event: "payout_note",
+        actor: req.user?.email || req.user?.id,
+        actorType: "staff",
+        meta: { note: String(note).slice(0, 500) },
+      });
+    }
+
+    await request.save();
+
+    res.status(200).json(request);
+
+    AuditLog.create({
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      action: "trade_in.payout_recorded",
+      targetType: "TradeInRequest",
+      targetId: request._id,
+      metadata: {
+        method,
+        amountCents: request.payout.amountCents,
+        // The masked reference, never the full one — an audit log is read by
+        // more people than the record it describes.
+        referenceMasked: request.payout.referenceMasked,
+      },
+    }).catch((error) => {
+      console.error("[audit] trade_in.payout_recorded log failed:", error);
+    });
+
+    notifyTradeInStatusChange(request).catch((error) => {
+      console.error("[tradeIn] payout notification failed:", error);
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * What is owed, in cents.
+ *
+ * The revised offer where one was made and accepted, the original quote
+ * otherwise. Read from the record rather than recalculated: a quote disputed
+ * in November is answered from what was agreed, not by rerunning today's
+ * prices over it.
+ */
+function amountOwed(request) {
+  if (Number.isFinite(request?.revisedOfferCents)) return request.revisedOfferCents;
+  if (Number.isFinite(request?.estimateCents)) return request.estimateCents;
+  if (Number.isFinite(request?.estimate)) return Math.round(request.estimate * 100);
+  return 0;
+}
+
+
 module.exports = {
   createTradeInRequest,
   getAdminTradeInRequests,
   updateTradeInStatus,
+  recordTradeInPayout,
   deleteTradeInRequest,
+  amountOwed,
 };

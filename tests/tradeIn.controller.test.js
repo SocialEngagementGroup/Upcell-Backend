@@ -188,3 +188,137 @@ describe("the timeline", () => {
     });
   });
 });
+
+// Recording the payment and marking it paid are one action. Two endpoints
+// would let a request sit at Paid with no record of how, which is the state
+// somebody has to reconstruct from a bank statement months later when a
+// customer says they were never paid.
+describe("recording a payout", () => {
+  const approved = (over = {}) => requestDoc({
+    status: "Approved",
+    estimateCents: 40000,
+    ...over,
+  });
+
+  const payout = (over = {}) => ({
+    method: "ZELLE",
+    recipientName: "Sam Okonkwo",
+    referenceMasked: "sam@example.com",
+    ...over,
+  });
+
+  it("records the payment and marks it paid in one move", async () => {
+    const doc = approved();
+    TradeInRequest.findById.mockResolvedValue(doc);
+
+    const { req, res, next } = makeReqRes(payout(), { params: { id: "tr1" } });
+    await controller.recordTradeInPayout(req, res, next);
+
+    expect(res.statusCode).toBe(200);
+    expect(doc.status).toBe("Paid");
+    expect(doc.payout).toMatchObject({
+      method: "ZELLE",
+      recipientName: "Sam Okonkwo",
+      amountCents: 40000,
+      paidBy: "yasir@upcellit.com",
+    });
+  });
+
+  it("will not pay a trade-in nobody has approved", async () => {
+    // A request still in inspection has no agreed amount to pay.
+    const doc = approved({ status: "InInspection" });
+    TradeInRequest.findById.mockResolvedValue(doc);
+
+    const { req, res, next } = makeReqRes(payout(), { params: { id: "tr1" } });
+    await controller.recordTradeInPayout(req, res, next);
+
+    expect(res.statusCode).toBe(400);
+    expect(doc.payout).toBeUndefined();
+  });
+
+  it("will not pay the same trade-in twice", async () => {
+    const doc = approved({ status: "Paid", payout: { paidAt: new Date("2026-09-01") } });
+    TradeInRequest.findById.mockResolvedValue(doc);
+
+    const { req, res, next } = makeReqRes(payout(), { params: { id: "tr1" } });
+    await controller.recordTradeInPayout(req, res, next);
+
+    expect(res.statusCode).toBe(400);
+    expect(sent(res).error).toContain("already paid");
+  });
+
+  it("masks the reference again on the way in", async () => {
+    // Masking done in a browser is masking anybody can turn off, and this is
+    // the copy that is kept.
+    const doc = approved();
+    TradeInRequest.findById.mockResolvedValue(doc);
+
+    const { req, res, next } = makeReqRes(
+      payout({ method: "BANK_TRANSFER", referenceMasked: "123456789012" }),
+      { params: { id: "tr1" } }
+    );
+    await controller.recordTradeInPayout(req, res, next);
+
+    expect(doc.payout.referenceMasked).toBe("•••• 9012");
+    expect(doc.payout.referenceMasked).not.toContain("12345678");
+  });
+
+  it("pays the revised offer when there was one", async () => {
+    // A quote disputed in November is answered from what was agreed, not by
+    // rerunning today's prices over it.
+    const doc = approved({ revisedOfferCents: 31000 });
+    TradeInRequest.findById.mockResolvedValue(doc);
+
+    const { req, res, next } = makeReqRes(payout(), { params: { id: "tr1" } });
+    await controller.recordTradeInPayout(req, res, next);
+
+    expect(doc.payout.amountCents).toBe(31000);
+  });
+
+  it("falls back to the dollar estimate on an older record", async () => {
+    const doc = requestDoc({ status: "Approved", estimate: 400, estimateCents: undefined });
+    TradeInRequest.findById.mockResolvedValue(doc);
+
+    const { req, res, next } = makeReqRes(payout(), { params: { id: "tr1" } });
+    await controller.recordTradeInPayout(req, res, next);
+
+    expect(doc.payout.amountCents).toBe(40000);
+  });
+
+  it("writes the move to the timeline", async () => {
+    const doc = approved();
+    TradeInRequest.findById.mockResolvedValue(doc);
+
+    const { req, res, next } = makeReqRes(payout(), { params: { id: "tr1" } });
+    await controller.recordTradeInPayout(req, res, next);
+
+    expect(doc.timeline[0]).toMatchObject({
+      event: "payout_recorded", from: "Approved", to: "Paid",
+    });
+  });
+
+  it("audits the masked reference, never a full one", async () => {
+    // An audit log is read by more people than the record it describes.
+    const doc = approved();
+    TradeInRequest.findById.mockResolvedValue(doc);
+
+    const { req, res, next } = makeReqRes(
+      payout({ method: "BANK_TRANSFER", referenceMasked: "123456789012" }),
+      { params: { id: "tr1" } }
+    );
+    await controller.recordTradeInPayout(req, res, next);
+
+    const [entry] = AuditLog.create.mock.calls[0];
+    expect(entry.action).toBe("trade_in.payout_recorded");
+    expect(JSON.stringify(entry)).not.toContain("123456789012");
+  });
+
+  it("answers 404 for a request that is not there", async () => {
+    TradeInRequest.findById.mockResolvedValue(null);
+
+    const { req, res, next } = makeReqRes(payout(), { params: { id: "tr1" } });
+    await controller.recordTradeInPayout(req, res, next);
+
+    expect(res.statusCode).toBe(404);
+  });
+});

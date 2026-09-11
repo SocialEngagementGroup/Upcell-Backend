@@ -8,6 +8,7 @@ const {
   tradeInQuoteSchema,
   priceBookEntrySchema,
   questionSetSchema,
+  tradeInPayoutSchema,
 } = require("../schemas/request.schemas");
 const {
   getTradeInCatalog,
@@ -20,6 +21,7 @@ const {
   createTradeInRequest,
   getAdminTradeInRequests,
   updateTradeInStatus,
+  recordTradeInPayout,
   deleteTradeInRequest,
 } = require("../controllers/tradeIn.controller");
 
@@ -75,6 +77,17 @@ router.patch(
   requireAdmin,
   validateObjectIdParam(),
   updateTradeInStatus
+);
+// Recording the payment and marking it paid are one action. Two endpoints
+// would let a request sit at Paid with no record of how, which is the state
+// somebody has to reconstruct from a bank statement months later.
+router.patch(
+  "/admin-trade-in-requests/:id/payout",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  validateRequest(tradeInPayoutSchema),
+  recordTradeInPayout
 );
 router.delete("/trade-in-requests/:id", verifyToken, requireAdmin, validateObjectIdParam(), deleteTradeInRequest);
 

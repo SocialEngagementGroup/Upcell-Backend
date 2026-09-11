@@ -22,6 +22,8 @@ const optionalNumericField = z.preprocess((value) => {
   return Number(value);
 }, z.number().nonnegative().optional());
 
+const { looksLikeAccountNumber, ACCOUNT_NUMBER_MESSAGE } = require("../services/payoutSafety");
+
 const objectIdField = z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid ID");
 const trimmedString = (label, min = 1, max = 255) => z.string().trim().min(min, `${label} is required`).max(max, `${label} must be ${max} characters or fewer`);
 const emailField = z.string().trim().email("Please enter a valid email address");
@@ -675,6 +677,30 @@ const reviewModerationSchema = z.object({
   moderationNote: z.string().trim().max(500).optional(),
 });
 
+// Recording a trade-in payout.
+//
+// The rule that matters is the refine: nothing with nine or more consecutive
+// digits in it. A US account number is 8-12, a routing number is 9, a card
+// is 15-16 — and the way a full account number ends up in a phone shop's
+// database is not a decision anybody makes, it is somebody typing one into a
+// free text box. See services/payoutSafety.js.
+const noAccountNumber = (field) =>
+  field.refine((value) => !looksLikeAccountNumber(value), { message: ACCOUNT_NUMBER_MESSAGE });
+
+const tradeInPayoutSchema = z.object({
+  method: z.enum(["BANK_TRANSFER", "ZELLE", "CHECK"]),
+  recipientName: noAccountNumber(trimmedString("Recipient name", 2, 120)),
+  // Masked again on the server before it is stored. Masking done in a browser
+  // is masking anybody can turn off.
+  referenceMasked: noAccountNumber(z.string().trim().min(1, "Say where the money went").max(120)),
+  // UpCell's own reference for the transfer — a bank confirmation number or a
+  // cheque number. Theirs, not the customer's, so a long one is legitimate;
+  // it is still checked, because a staff member pasting the wrong thing into
+  // it is exactly the accident this exists to catch.
+  reference: noAccountNumber(z.string().trim().max(120)).optional(),
+  note: noAccountNumber(z.string().trim().max(500)).optional(),
+});
+
 const analyticsEventSchema = z.object({
   category: z.enum(["form_submit", "form_dropoff", "form_engagement", "admin_api_error"]),
   name: trimmedString("Event name", 1, 120),
@@ -716,6 +742,7 @@ module.exports = {
   productImportSchema,
   reviewSchema,
   reviewModerationSchema,
+  tradeInPayoutSchema,
   wholesaleFormSchema,
   tradeInRequestSchema,
   newsletterSubscriberSchema,

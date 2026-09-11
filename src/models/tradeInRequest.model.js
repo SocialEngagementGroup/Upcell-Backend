@@ -73,6 +73,32 @@ const TradeInRequestSchema = new Schema(
         meta: Schema.Types.Mixed,
       },
     ],
+    // How the money went out.
+    //
+    // UpCell does not hold bank details and must not start now. Everything
+    // here is either chosen from a list or already public to the customer:
+    // the method, the name on the account, and a masked reference — the last
+    // four digits of an account, or a Zelle handle, which is an email or a
+    // phone number the customer already gave.
+    //
+    // The full detail is read off the customer's own accept step at the
+    // moment of paying and never stored. A trade-in record that carries a
+    // complete account number is a record that has to be protected like a
+    // payment system, and this is a phone shop.
+    payout: {
+      method: { type: String, enum: ["BANK_TRANSFER", "ZELLE", "CHECK", null], default: null },
+      recipientName: { type: String, trim: true },
+      // "•••• 4417" or "sam@example.com". Enough to tell two accounts apart
+      // and to answer "where did my money go", and nothing more.
+      referenceMasked: { type: String, trim: true },
+      amountCents: Number,
+      paidAt: Date,
+      paidBy: String,
+      // UpCell's own reference for the transfer — a bank confirmation number
+      // or a cheque number. Theirs, not the customer's.
+      reference: { type: String, trim: true },
+    },
+
     emailStatus: {
       type: String,
       enum: ["pending", "sent", "failed", "skipped"],
