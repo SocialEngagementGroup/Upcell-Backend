@@ -3,6 +3,8 @@ const { Resend } = require("resend");
 const Order = require("../models/order.model");
 const { toCustomerOrder, ownsOrder } = require("../utils/orderView");
 const { reissueGuestToken } = require("../services/guestOrder");
+const { anonymiseCustomer } = require("../services/accountDeletion");
+const { clerkClient } = require("@clerk/express");
 const { salesTaxRate } = require("../services/salesTax");
 const { validateShipment } = require("../services/returnShipping");
 const { trackingUrlFor } = require("../utils/carrierTracking");
@@ -388,6 +390,80 @@ async function emailOrderLink(req, res, next) {
     }).catch(() => {});
 
     return res.status(200).json(SAME_ANSWER);
+  } catch (error) {
+    return next(error);
+  }
+}
+
+/**
+ * Deletes the caller's account.
+ *
+ * Two things pull against each other here and both are real: a person can ask
+ * to be erased, and UpCell has to keep a record of what was sold for tax, for
+ * a chargeback months later, and for a warranty claim on a device somebody
+ * still owns. Financial records are anonymised rather than deleted — the
+ * amounts, dates and devices survive, the person does not.
+ *
+ * The Clerk user is deleted last. If anonymisation fails the account still
+ * exists and the customer can ask again; if Clerk fails after it, the data is
+ * already gone and only the login remains, which is the recoverable half.
+ */
+async function deleteOwnAccount(req, res, next) {
+  try {
+    const userId = req.user?.id;
+    const email = String(req.user?.email || "").trim();
+
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    // An unverified address must not be used to match orders: it is a string
+    // somebody typed, and matching on it would erase a stranger's history.
+    if (!req.user.emailVerified) {
+      return res.status(403).json({
+        error: "Verify your email address before deleting your account.",
+      });
+    }
+
+    const summary = await anonymiseCustomer({
+      models: {
+        Order,
+        TradeInRequest: require("../models/tradeInRequest.model").TradeInRequest,
+        RefundRequest: require("../models/refundRequest.model"),
+        ContactSubmission: require("../models/contactSubmission.model"),
+        NewsletterSubscriber: require("../models/newsletterSubscriber.model"),
+      },
+      userId,
+      email,
+    });
+
+    // Written before Clerk is touched, and with the pseudonym rather than the
+    // address — an audit row naming the person who asked to be forgotten is
+    // the one place the erasure would undo itself.
+    AuditLog.create({
+      actorId: userId,
+      actorEmail: summary.pseudonym,
+      action: "account.deleted",
+      targetType: "User",
+      targetId: new mongoose.Types.ObjectId(),
+      metadata: summary,
+    }).catch((error) => {
+      console.error("[audit] account.deleted log failed:", error?.message || error);
+    });
+
+    try {
+      await clerkClient.users.deleteUser(userId);
+    } catch (error) {
+      // The data is already anonymised, so the customer's request has been
+      // honoured. Only the login is left, and that is the half somebody can
+      // clear by hand.
+      console.error("[account] Clerk delete failed after anonymising:", error?.message || error);
+      return res.status(200).json({
+        ok: true,
+        ...summary,
+        warning: "Your data has been removed. Your sign-in is still being cleared — contact support if you can still sign in tomorrow.",
+      });
+    }
+
+    return res.status(200).json({ ok: true, ...summary });
   } catch (error) {
     return next(error);
   }
@@ -800,6 +876,7 @@ async function markRefundEnteredAtBank(req, res, next) {
 
 module.exports = {
   getOrder,
+  deleteOwnAccount,
   emailOrderLink,
   claimGuestOrders,
   recordOrderShipment,

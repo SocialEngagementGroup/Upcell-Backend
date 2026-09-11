@@ -18,6 +18,7 @@ const {
   getOrder,
   getTaxRate,
   claimGuestOrders,
+  deleteOwnAccount,
   emailOrderLink,
   recordOrderShipment,
   getAdminOrders,
@@ -35,6 +36,10 @@ router.get("/tax-rate", getTaxRate);
 // Called once after sign-in. Attaches any guest orders placed with the same
 // verified email to the new account.
 router.post("/orders/claim", verifyToken, claimGuestOrders);
+
+// Deleting an account. Financial records are anonymised rather than removed —
+// see services/accountDeletion.js and docs/data-retention.md.
+router.delete("/account/me", verifyToken, deleteOwnAccount);
 
 // A guest who lost their receipt asking for a fresh link. Public, because
 // having lost the link is the whole reason they are here — and rate limited
