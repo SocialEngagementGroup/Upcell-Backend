@@ -208,6 +208,17 @@ const productBatchSchema = z.object({
 
 const productCreateSchema = z.union([productSchema, productBatchSchema]);
 
+// A spreadsheet of stock. The CSV itself is checked column by column in
+// services/productImport.js, which reports per row; this only stops something
+// that is not a CSV upload at all from reaching that code.
+//
+// The 2MB ceiling is stated here as well as in the service because a schema
+// rejection is cheap and parsing a 50MB string is not.
+const productImportSchema = z.object({
+  csv: z.string().min(1, "No CSV was sent.").max(2 * 1024 * 1024, "That file is too large."),
+  dryRun: z.boolean().optional(),
+});
+
 // getFilteredProducts (POST /products/:n/:skip) builds a Mongo query
 // straight from these fields with no prior type check — e.g. price[0]/[1]
 // were indexed into without confirming price is even an array first, so a
@@ -674,6 +685,7 @@ module.exports = {
   productSchema,
   orderSchema,
   productFilterSchema,
+  productImportSchema,
   wholesaleFormSchema,
   tradeInRequestSchema,
   newsletterSubscriberSchema,
