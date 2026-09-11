@@ -624,6 +624,10 @@ const refundRequestStatusSchema = z
     inspectionNotes: z.string().trim().max(2000).optional(),
     waiveRestockingFee: z.boolean().optional().default(false),
     waiveReason: z.string().trim().max(500).optional(),
+    // How a warranty claim was settled. Ignored on an ordinary return, and
+    // required by the controller when the request is a warranty claim — which
+    // this schema cannot know, because it only sees the body.
+    warrantyOutcome: z.enum(["REPAIR", "REPLACE", "REFUND_EXCEPTION"]).optional(),
   })
   .refine((data) => !data.waiveRestockingFee || Boolean(data.waiveReason), {
     message: "A reason is required to waive the restocking fee.",

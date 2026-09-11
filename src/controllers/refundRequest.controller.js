@@ -73,6 +73,7 @@ const {
   checkSelectedItems,
   returnWindowClosesAt,
 } = require("../services/refundEligibility");
+const { WARRANTY_OUTCOMES, isWarrantyOutcome } = require("../services/warranty");
 const { getAdminListPagination, sendPaginatedResults } = require("../utils/pagination");
 const { Resend } = require("resend");
 const {
@@ -214,7 +215,12 @@ async function getRefundableItems(req, res, next) {
     // Sent as data rather than hard-coded in the form so the window, the
     // postage and the fee can never say one thing on screen and another in the
     // calculation.
-    const reasons = RETURN_REASON_CODES.map((code) => {
+    // Past the 30 days, only the hardware faults. Narrowed here rather than
+    // in the form so the customer is never offered a reason the server is
+    // about to refuse.
+    const offered = eligibility.reasonCodes || RETURN_REASON_CODES;
+
+    const reasons = offered.map((code) => {
       const policy = returnPolicyFor(code);
       return {
         code,
@@ -260,18 +266,28 @@ async function getRefundableItems(req, res, next) {
       }
     }
 
+    const warranty = eligibility.kind === "WARRANTY";
+
     res.status(200).json({
       ok: true,
+      // RETURN or WARRANTY. The page says different words and offers
+      // different reasons; this is what it reads to decide.
+      kind: eligibility.kind,
+      reasonCodes: eligibility.reasonCodes,
       closesAt: eligibility.closesAt,
+      warrantyEndsAt: eligibility.warrantyEndsAt,
       windowDays: eligibility.windowDays,
       items,
       reasons,
-      estimate,
+      // A warranty claim ends in a working phone, not in money, so quoting an
+      // estimate would promise something that is not on offer.
+      estimate: warranty ? null : estimate,
       // One sentence, true for every reason. It used to vary, and before that
       // it promised a 15% fee to everyone including customers returning a
       // device that would not power on.
-      feeNotice:
-        "Returns are free — we pay the postage both ways and there is no restocking fee. The sales tax you paid on returned items comes back in full; original shipping does not.",
+      feeNotice: warranty
+        ? "Your 30-day return window has closed, but this device is still under its 12-month warranty. We cover hardware faults — we pay the postage both ways, and we will repair or replace it. A refund is only offered where neither is possible."
+        : "Returns are free — we pay the postage both ways and there is no restocking fee. The sales tax you paid on returned items comes back in full; original shipping does not.",
     });
   } catch (error) {
     next(error);
@@ -295,6 +311,17 @@ async function createRefundRequest(req, res, next) {
     const eligibility = checkReturnEligibility(order, { reasonCode });
     if (!eligibility.ok) {
       return res.status(400).json({ error: eligibility.message });
+    }
+
+    // Past the 30 days this is a warranty claim, and a warranty claim has to
+    // say what is broken — "changed my mind" is not something the warranty
+    // answers, and neither is silence. Checked here rather than in the
+    // eligibility rules because the page load asks the same question before
+    // the customer has chosen anything.
+    if (eligibility.kind === "WARRANTY" && !reasonCode) {
+      return res.status(400).json({
+        error: "Choose what is wrong with the device. A warranty claim has to say what the fault is.",
+      });
     }
 
     const selection = checkSelectedItems(order, itemIds);
@@ -326,6 +353,11 @@ async function createRefundRequest(req, res, next) {
         reason,
         reasonCode,
         reasonCategory: reasonCode ? reasonCategory(reasonCode) : null,
+        // Return or warranty claim, fixed at submission and never recomputed.
+        // A request opened on day 29 and inspected on day 33 is still a
+        // return: the answer must not change kind underneath whoever is
+        // dealing with it.
+        claimKind: eligibility.kind === "WARRANTY" ? "WARRANTY" : "RETURN",
         // What should be arriving, taken from the order now rather than looked
         // up at inspection: the catalogue record behind an order line can be
         // edited or deleted in the weeks a return takes to come back.
@@ -477,7 +509,12 @@ async function getAdminRefundRequests(req, res, next) {
  * complete whoever wrote the client.
  */
 async function updateRefundRequestStatus(req, res, next) {
-  const { status, returnInstructions, rejectionReason, inspectionNotes, waiveRestockingFee, waiveReason } = req.body;
+  const {
+    status, returnInstructions, rejectionReason, inspectionNotes,
+    waiveRestockingFee, waiveReason,
+    // Only read on a warranty claim: REPAIR, REPLACE or REFUND_EXCEPTION.
+    warrantyOutcome,
+  } = req.body;
 
   try {
     const request = await RefundRequest.findById(req.params.id || null);
@@ -557,6 +594,56 @@ async function updateRefundRequestStatus(req, res, next) {
         return res.status(400).json({ error: "This order has already been refunded." });
       }
 
+      // A warranty claim is settled with a working phone, not with money.
+      //
+      // Approving one records which of the three it was — repaired, replaced,
+      // or refunded as an exception — and only the exception touches the
+      // order's refund block at all. A repair that also paid out would be
+      // paying twice for one fault.
+      if (request.claimKind === "WARRANTY") {
+        if (!isWarrantyOutcome(warrantyOutcome)) {
+          return res.status(400).json({
+            error: `Say how this warranty claim was settled: ${WARRANTY_OUTCOMES.join(", ")}.`,
+          });
+        }
+
+        request.warrantyOutcome = warrantyOutcome;
+        request.inspectionNotes = inspectionNotes;
+        request.inspectedBy = req.user?.email;
+        request.inspectedAt = new Date();
+
+        if (warrantyOutcome === "REFUND_EXCEPTION") {
+          const settled = calculateRefund(order, {
+            itemIds: request.itemIds,
+            reasonCode: request.reasonCode,
+          });
+          if (!settled.ok) return res.status(400).json({ error: settled.error });
+
+          request.calculatedAmount = settled.refundAmount;
+          order.refund = {
+            itemsTotal: settled.itemsTotal,
+            restockingFee: settled.restockingFee,
+            restockingFeeWaived: settled.restockingFeeWaived,
+            taxRefunded: settled.taxRefunded,
+            amount: settled.refundAmount,
+            itemIds: request.itemIds,
+            notes: inspectionNotes,
+            approvedBy: req.user?.email,
+            approvedAt: new Date(),
+            // Named on the order itself, because an accountant reading a
+            // refund eleven months after the sale needs to see why there is
+            // one at all.
+            warrantyException: true,
+          };
+          order.status = "Refunded";
+          await order.save();
+        } else {
+          // Nothing is paid, and the order is not marked Refunded — the
+          // customer keeps a working device and the sale stands.
+          request.calculatedAmount = 0;
+        }
+      } else {
+
       const result = calculateRefund(order, {
         itemIds: request.itemIds,
         // The reason the customer gave when they asked. It decides whether the
@@ -591,6 +678,7 @@ async function updateRefundRequestStatus(req, res, next) {
       // Refunded stays paid:true — the charge did happen.
       order.status = "Refunded";
       await order.save();
+      }
     }
 
     // The request only reaches Refunded when a person confirms they typed the

@@ -159,7 +159,8 @@ describe("getRefundableItems — what the customer sees before the form", () => 
   // 4xx would send the frontend down its generic error path instead.
   it("explains an expired window rather than erroring", async () => {
     Order.findById.mockResolvedValue(
-      paidOrder({ deliveredAt: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000) })
+      // Over a year, so both the return window and the warranty have gone.
+      paidOrder({ deliveredAt: new Date(Date.now() - 400 * 24 * 60 * 60 * 1000) })
     );
 
     const { req, res, next } = makeReqRes({}, { params: { id: "a".repeat(24) }, user: CUSTOMER });
@@ -167,6 +168,23 @@ describe("getRefundableItems — what the customer sees before the form", () => 
 
     expect(res.statusCode).toBe(200);
     expect(res.json.mock.calls[0][0]).toMatchObject({ ok: false, reason: "window_closed" });
+  });
+
+  it("offers a warranty claim after the 30 days, without asking for a fault first", async () => {
+    // The page load happens before the customer has chosen anything. Refusing
+    // here would put "choose a fault" above a form they have not been given.
+    Order.findById.mockResolvedValue(
+      paidOrder({ deliveredAt: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000) })
+    );
+
+    const { req, res, next } = makeReqRes({}, { params: { id: "a".repeat(24) }, user: CUSTOMER });
+    await controller.getRefundableItems(req, res, next);
+
+    const body = res.json.mock.calls[0][0];
+    expect(body.ok).toBe(true);
+    expect(body.kind).toBe("WARRANTY");
+    expect(body.reasonCodes).toContain("WONT_POWER_ON");
+    expect(body.reasonCodes).not.toContain("CHANGED_MIND");
   });
 
   it("says when a request is already open", async () => {
@@ -2383,5 +2401,135 @@ describe("getRevisedOffer", () => {
 
     expect(res.body.expired).toBe(true);
     expect(res.body.answerable).toBe(false);
+  });
+});
+
+// A warranty claim ends in a working phone, not in money. Two of the three
+// outcomes pay nothing at all, and the one that does is named an exception so
+// that choosing it is a decision somebody made.
+describe("settling a warranty claim", () => {
+  const warrantyRequest = (over = {}) => requestDoc({
+    status: "DeviceReceived",
+    claimKind: "WARRANTY",
+    reasonCode: "WONT_POWER_ON",
+    ...over,
+  });
+
+  it("will not approve one without saying how it was settled", async () => {
+    RefundRequest.findById.mockResolvedValue(warrantyRequest());
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res, next } = makeReqRes(
+      { status: "Approved", inspectionNotes: "Board fault" },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.updateRefundRequestStatus(req, res, next);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json.mock.calls[0][0].error).toContain("REPAIR");
+  });
+
+  it("refuses an outcome that is not one of the three", async () => {
+    RefundRequest.findById.mockResolvedValue(warrantyRequest());
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res, next } = makeReqRes(
+      { status: "Approved", inspectionNotes: "Board fault", warrantyOutcome: "REFUND" },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.updateRefundRequestStatus(req, res, next);
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("pays nothing for a repair, and leaves the sale standing", async () => {
+    const request = warrantyRequest();
+    const order = paidOrder();
+    RefundRequest.findById.mockResolvedValue(request);
+    Order.findById.mockResolvedValue(order);
+
+    const { req, res, next } = makeReqRes(
+      { status: "Approved", inspectionNotes: "Charge port replaced", warrantyOutcome: "REPAIR" },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.updateRefundRequestStatus(req, res, next);
+
+    expect(request.warrantyOutcome).toBe("REPAIR");
+    expect(request.calculatedAmount).toBe(0);
+    // The customer keeps a working device, so there is no refund and the
+    // order is not marked Refunded.
+    expect(order.refund).toBeUndefined();
+    expect(order.status).toBe("Delivered");
+  });
+
+  it("pays nothing for a replacement either", async () => {
+    const request = warrantyRequest();
+    const order = paidOrder();
+    RefundRequest.findById.mockResolvedValue(request);
+    Order.findById.mockResolvedValue(order);
+
+    const { req, res, next } = makeReqRes(
+      { status: "Approved", inspectionNotes: "Swapped the unit", warrantyOutcome: "REPLACE" },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.updateRefundRequestStatus(req, res, next);
+
+    expect(request.calculatedAmount).toBe(0);
+    expect(order.refund).toBeUndefined();
+  });
+
+  it("pays out only on the exception, and says so on the order", async () => {
+    // An accountant reading a refund eleven months after the sale needs to
+    // see why there is one at all.
+    const request = warrantyRequest();
+    const order = paidOrder();
+    RefundRequest.findById.mockResolvedValue(request);
+    Order.findById.mockResolvedValue(order);
+
+    const { req, res, next } = makeReqRes(
+      {
+        status: "Approved",
+        inspectionNotes: "Unrepairable, none in stock",
+        warrantyOutcome: "REFUND_EXCEPTION",
+      },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.updateRefundRequestStatus(req, res, next);
+
+    expect(order.refund.amount).toBe(999);
+    expect(order.refund.warrantyException).toBe(true);
+    expect(order.status).toBe("Refunded");
+  });
+
+  it("records the inspection whichever outcome was chosen", async () => {
+    const request = warrantyRequest();
+    RefundRequest.findById.mockResolvedValue(request);
+    Order.findById.mockResolvedValue(paidOrder());
+
+    const { req, res, next } = makeReqRes(
+      { status: "Approved", inspectionNotes: "Screen replaced", warrantyOutcome: "REPAIR" },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.updateRefundRequestStatus(req, res, next);
+
+    expect(request.inspectionNotes).toBe("Screen replaced");
+    expect(request.inspectedBy).toBe("yasir@upcellit.com");
+  });
+
+  it("leaves an ordinary return alone", async () => {
+    // The outcome field is ignored on a return, which still pays out the way
+    // it always did.
+    const order = paidOrder();
+    RefundRequest.findById.mockResolvedValue(requestDoc({ status: "DeviceReceived" }));
+    Order.findById.mockResolvedValue(order);
+
+    const { req, res, next } = makeReqRes(
+      { status: "Approved", inspectionNotes: "Good condition", warrantyOutcome: "REPAIR" },
+      { params: { id: "req1" }, user: STAFF }
+    );
+    await controller.updateRefundRequestStatus(req, res, next);
+
+    expect(order.refund.amount).toBe(999);
+    expect(order.refund.warrantyException).toBeUndefined();
   });
 });

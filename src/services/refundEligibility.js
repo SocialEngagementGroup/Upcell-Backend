@@ -12,6 +12,7 @@ const {
   resolveWindowStart,
   transitClaimInTime,
 } = require("./returnWindow");
+const { claimKind, checkWarrantyReason, WARRANTY_REASON_CODES } = require("./warranty");
 
 // Reasons that are a claim about the journey rather than about the device.
 // These have their own, much shorter deadline: after a few days nobody can
@@ -76,18 +77,39 @@ function checkReturnEligibility(order, { now = new Date(), reasonCode, override 
   }
 
   const closesAt = window.expiresAt;
-  if (now > closesAt) {
+
+  // Past 30 days is not automatically a no. The first year is covered by the
+  // warranty, and a device that is broken in month eight is a claim UpCell
+  // advertises it will honour — just not one that ends in a refund.
+  const { kind, warrantyEndsAt } = claimKind(order, { now, override });
+
+  if (kind === "EXPIRED") {
     return {
       ok: false,
       reason: "window_closed",
-      message: `The ${windowDays}-day return window for this order closed on ${closesAt.toDateString()}.`,
+      message:
+        `The ${windowDays}-day return window for this order closed on ${closesAt.toDateString()}, ` +
+        `and the 12-month warranty ended on ${warrantyEndsAt.toDateString()}.`,
       closesAt,
+      warrantyEndsAt,
     };
+  }
+
+  // Only once a reason has actually been chosen. This same function answers
+  // the page load, which happens before the customer has picked anything, and
+  // refusing there would show "choose a fault" as an error above a form they
+  // have not been given yet. Submitting without one is refused by the
+  // controller, which is where the requirement belongs.
+  if (kind === "WARRANTY" && reasonCode) {
+    const allowed = checkWarrantyReason(reasonCode, { closesAt, warrantyEndsAt });
+    if (!allowed.ok) {
+      return { ok: false, reason: allowed.reason, message: allowed.message, closesAt, warrantyEndsAt };
+    }
   }
 
   // Damage in transit is a claim about the journey, and it has a much shorter
   // deadline than the device itself does.
-  if (TRANSIT_DAMAGE_REASONS.includes(reasonCode)) {
+  if (kind === "RETURN" && TRANSIT_DAMAGE_REASONS.includes(reasonCode)) {
     const claim = transitClaimInTime(order, { now });
     if (!claim.ok) {
       return {
@@ -112,7 +134,16 @@ function checkReturnEligibility(order, { now = new Date(), reasonCode, override 
 
   return {
     ok: true,
+    // RETURN or WARRANTY. The caller shows different words, offers different
+    // reasons and pays a different amount, and this is the one place that
+    // decides which.
+    kind,
     closesAt,
+    warrantyEndsAt,
+    // Only the hardware faults, once the 30 days are up. Sent so the form can
+    // draw the shorter list rather than offering a customer a reason the
+    // server will then refuse.
+    reasonCodes: kind === "WARRANTY" ? WARRANTY_REASON_CODES : null,
     windowDays,
     // Where the clock started, so the queue can show it and staff can see
     // when it was estimated rather than recorded.

@@ -71,15 +71,100 @@ describe("checkReturnEligibility", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("refuses once the window has closed", () => {
+  it("refuses once the window and the warranty have both run out", () => {
     const result = checkReturnEligibility(deliveredOrder(), {
-      now: new Date("2026-10-05T00:00:00Z"),
+      // Over a year after delivery.
+      now: new Date("2027-10-05T00:00:00Z"),
     });
 
     expect(result.ok).toBe(false);
     expect(result.reason).toBe("window_closed");
-    // The date is in the message so the customer is not left guessing.
-    expect(result.message).toContain("2026");
+    // Both dates are in the message so the customer is not left guessing
+    // which of the two ran out.
+    expect(result.message).toContain("return window for this order closed");
+    expect(result.message).toContain("12-month warranty ended");
+  });
+
+  // Past 30 days is not automatically a no. The first year is covered, and a
+  // device that is broken in month two is a claim UpCell says it will honour.
+  it("becomes a warranty claim after the 30 days, for a hardware fault", () => {
+    const result = checkReturnEligibility(deliveredOrder(), {
+      now: new Date("2026-10-05T00:00:00Z"),
+      reasonCode: "WONT_POWER_ON",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.kind).toBe("WARRANTY");
+  });
+
+  it("stays a return inside the 30 days", () => {
+    const result = checkReturnEligibility(deliveredOrder(), {
+      now: new Date("2026-09-10T00:00:00Z"),
+      reasonCode: "CHANGED_MIND",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.kind).toBe("RETURN");
+    // Nothing narrows the reasons while the return window is open.
+    expect(result.reasonCodes).toBeNull();
+  });
+
+  it("refuses a change of mind in month two", () => {
+    // Eight weeks is not a change of mind, it is a used phone.
+    const result = checkReturnEligibility(deliveredOrder(), {
+      now: new Date("2026-10-05T00:00:00Z"),
+      reasonCode: "CHANGED_MIND",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("not_a_warranty_reason");
+  });
+
+  it("does not demand a fault before the customer has picked one", () => {
+    // This same function answers the page load, which happens before anything
+    // has been chosen. Refusing here would put "choose a fault" above a form
+    // the customer has not been given yet. Submitting without one is refused
+    // by the controller, which is where the requirement belongs.
+    const result = checkReturnEligibility(deliveredOrder(), {
+      now: new Date("2026-10-05T00:00:00Z"),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.kind).toBe("WARRANTY");
+  });
+
+  it("sends the shorter reason list with a warranty claim", () => {
+    // So the form draws the reasons the server will accept, rather than
+    // offering a customer one it is about to refuse.
+    const result = checkReturnEligibility(deliveredOrder(), {
+      now: new Date("2026-10-05T00:00:00Z"),
+      reasonCode: "BATTERY_ISSUE",
+    });
+
+    expect(result.reasonCodes).toContain("BATTERY_ISSUE");
+    expect(result.reasonCodes).not.toContain("CHANGED_MIND");
+  });
+
+  it("tells the customer when the warranty ends, on both kinds", () => {
+    const inWindow = checkReturnEligibility(deliveredOrder(), {
+      now: new Date("2026-09-10T00:00:00Z"),
+      reasonCode: "CHANGED_MIND",
+    });
+
+    expect(inWindow.warrantyEndsAt).toEqual(new Date("2027-09-01T00:00:00Z"));
+  });
+
+  it("does not hold a transit-damage claim to three days in month two", () => {
+    // That deadline is about telling a courier's dent from a kitchen-counter
+    // dent, which is a question inside the return window and nowhere else.
+    // The reason is refused for being outside the warranty, not for lateness.
+    const result = checkReturnEligibility(deliveredOrder(), {
+      now: new Date("2026-10-05T00:00:00Z"),
+      reasonCode: "ARRIVED_DAMAGED_BOX",
+    });
+
+    expect(result.reason).toBe("not_a_warranty_reason");
+    expect(result.reason).not.toBe("transit_claim_late");
   });
 
   // Not the same as an expired window: the customer has done nothing wrong and

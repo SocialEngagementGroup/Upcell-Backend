@@ -5,6 +5,7 @@ const {
   ACTIVE_STATUSES,
 } = require("../constants/returnStatus");
 const { RETURN_REASON_CODES } = require("../constants/returnReasons");
+const { WARRANTY_OUTCOMES } = require("../services/warranty");
 
 // A refund is not one action, it is a physical process: the customer asks, the
 // device travels back, someone looks at it, and only then does money move. This
@@ -45,6 +46,27 @@ const RefundRequestSchema = new Schema(
     // that requests created before reason codes existed still load.
     reasonCode: { type: String, default: null },
     reasonCategory: { type: String, default: null },
+
+    // Whether this is a return or a warranty claim.
+    //
+    // Set from the date at submission and never recomputed, because the two
+    // are answered differently and a claim must not change kind underneath
+    // whoever is dealing with it — a request opened on day 29 and inspected on
+    // day 33 is still a return.
+    //
+    // Defaults to RETURN so every request written before warranties existed
+    // reads as what it was.
+    claimKind: { type: String, enum: ["RETURN", "WARRANTY"], default: "RETURN", index: true },
+
+    // What staff decided about a warranty claim: REPAIR, REPLACE or
+    // REFUND_EXCEPTION. Null on a return, and null on a warranty claim nobody
+    // has decided yet.
+    //
+    // A repair and a replacement both give the customer a working phone, which
+    // is what the warranty promises. Only the exception pays out, and it is
+    // named an exception so that choosing it is a decision somebody made
+    // rather than the path of least resistance.
+    warrantyOutcome: { type: String, enum: [...WARRANTY_OUTCOMES, null], default: null },
     // UPCELL or CUSTOMER. Derived from the category at submission, but stored
     // rather than computed on read, because inspection can overturn it: a
     // device returned as "will not power on" that powers on fine is no longer
