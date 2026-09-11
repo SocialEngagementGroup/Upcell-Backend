@@ -1,4 +1,5 @@
-// The append-only record of everything that happened to a return.
+// The append-only record of everything that happened to a return — or to a
+// trade-in, which is the same journey run backwards and keeps the same log.
 //
 // This is the dispute record. "The customer says they posted it, we say it
 // never arrived" is only answerable from a log nobody can edit — and with two
@@ -7,7 +8,13 @@
 // Entries are only ever pushed. Nothing in this file updates or removes one,
 // and nothing else should either: a timeline that can be corrected after the
 // fact is worth nothing in an argument.
-const { canTransition, transitionError } = require("../constants/returnStatus");
+const returnStatus = require("../constants/returnStatus");
+
+// Which set of rules to check a move against. Returns by default, so every
+// existing caller reads the same as it always did and a trade-in has to ask
+// for its own map explicitly — a missed argument fails loudly on the first
+// illegal transition rather than quietly allowing one.
+const RETURNS = returnStatus;
 
 /**
  * Adds an entry. Does not save — the caller saves once, after making all its
@@ -49,16 +56,19 @@ function recordEvent(request, { event, actor = "system", actorType = "system", f
  *
  * Does not save, for the same reason recordEvent does not.
  *
+ * @param {object} [options.machine]  the status module to check against.
+ *        Defaults to returns; pass constants/tradeInStatus for a trade-in.
+ *
  * @returns {{ok: true, from, to} | {ok: false, error: string, allowed: string[]}}
  */
-function applyTransition(request, to, { actor = "system", actorType = "system", event = "status_changed", meta } = {}) {
+function applyTransition(request, to, { actor = "system", actorType = "system", event = "status_changed", meta, machine = RETURNS } = {}) {
   const from = request?.status;
 
-  if (!canTransition(from, to)) {
+  if (!machine.canTransition(from, to)) {
     return {
       ok: false,
-      error: transitionError(from, to),
-      allowed: require("../constants/returnStatus").ALLOWED_TRANSITIONS[from] || [],
+      error: machine.transitionError(from, to),
+      allowed: machine.ALLOWED_TRANSITIONS[from] || [],
     };
   }
 

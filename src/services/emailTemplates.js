@@ -136,7 +136,7 @@ function tradeInRequestEmail({ name, modelTitle, estimate, requestId }) {
   const rows =
     detailRow("Device", escapeHtml(modelTitle)) +
     detailRow("Request ID", `#${escapeHtml(requestId)}`) +
-    detailRow("Estimated Value", money(estimate)) +
+    detailRow(status === "Paid" || status === "Approved" ? "Amount" : "Estimated Value", money(estimate)) +
     detailRow("Status", "New", { bordered: false, valueColor: RED, valueWeight: 700 });
 
   return {
@@ -154,20 +154,64 @@ function tradeInRequestEmail({ name, modelTitle, estimate, requestId }) {
   };
 }
 
+// One sentence per state, written to be read on a phone by somebody who wants
+// to know one thing: where is my device and when do I get paid.
+//
+// Only the states worth interrupting somebody for have copy here. InTransit
+// and Delivered do not — a customer who posted a phone knows they posted it,
+// and the carrier is already emailing them about it. A silent state is a
+// decision, not a gap.
+//
+// The old six are kept because requests still sit on them until the migration
+// runs, and an email that falls through to the wrong sentence is worse than
+// one that is a little out of date.
 const TRADE_IN_STATUS_COPY = {
+  Quoted: { body: "Your trade-in quote is ready — see the amount below. Post the device to us and we'll check it over." },
+  LabelIssued: { body: "Your prepaid shipping label is ready. Print it, put the device in a box, and drop it off — we'll take it from there." },
+  DeviceReceived: { body: "Your device has arrived safely. We'll check it over and confirm your offer within two working days." },
+  ActionRequired: { body: "We can't finish checking your device yet — there's something only you can clear. We've explained what in a separate message." },
+  RevisedOffer: { body: "Your device wasn't quite as described, so we've made a revised offer. You have five days to accept or decline, and if you decline we'll send it straight back at our cost." },
+  Approved: { body: "Your offer is confirmed and payment is on its way." },
+  Paid: { body: "Payment for your trade-in has been sent. Thanks for trading in with UpCell." },
+  Rejected: { body: "We're not able to take this device. We'll post it back to you at our cost — no charge, nothing to do." },
+  ReturnShipped: { body: "Your device is on its way back to you." },
+  Expired: { body: "Your quote has run out. Prices move, so start a new one any time and we'll requote it at today's rate." },
+  Cancelled: { body: "Your trade-in has been cancelled. Nothing further will happen." },
+
+  // Pre-migration values. See scripts/migrate-trade-in-status.js.
   New: { body: "We've logged your request and will review it shortly." },
   Contacted: { body: "Our team has reviewed your trade-in request and will be in touch shortly with next steps." },
   Received: { body: "Your device has arrived and is now being inspected." },
-  Quoted: { body: "Your final trade-in offer is ready — see the amount below." },
-  Paid: { body: "Payment for your trade-in has been sent. Thanks for trading in with UpCell." },
 };
 
+// Which states are worth an email at all.
+//
+// A customer who hears from a shop at every internal step stops reading, and
+// then misses the one that needed them. RevisedOffer and ActionRequired are
+// on this list because they are the two where nothing happens until the
+// customer does something.
+const EMAILED_STATUSES = [
+  "Quoted",
+  "LabelIssued",
+  "DeviceReceived",
+  "ActionRequired",
+  "RevisedOffer",
+  "Approved",
+  "Paid",
+  "Rejected",
+];
+
+const shouldEmailStatus = (status) => EMAILED_STATUSES.includes(status);
+
 function tradeInStatusEmail({ name, modelTitle, status, estimate, requestId }) {
-  const copy = TRADE_IN_STATUS_COPY[status] || TRADE_IN_STATUS_COPY.Contacted;
+  // Falls back to Quoted rather than to Contacted: Contacted is being
+  // migrated away, and a state with no copy is far more likely to be a new
+  // one than an old one.
+  const copy = TRADE_IN_STATUS_COPY[status] || TRADE_IN_STATUS_COPY.Quoted;
   const rows =
     detailRow("Device", modelTitle ? escapeHtml(modelTitle) : "&mdash;") +
     detailRow("Request ID", `#${escapeHtml(requestId)}`) +
-    detailRow("Estimated Value", money(estimate)) +
+    detailRow(status === "Paid" || status === "Approved" ? "Amount" : "Estimated Value", money(estimate)) +
     detailRow("Status", escapeHtml(status), { bordered: false, valueColor: RED, valueWeight: 700 });
 
   return {
@@ -874,6 +918,8 @@ module.exports = {
   returnReminderEmail,
   returnExpiredEmail,
   reviewPromptEmail,
+  shouldEmailStatus,
+  TRADE_IN_STATUS_COPY,
   refundReturnInstructionsEmail,
   refundDeviceReceivedEmail,
   refundRejectedEmail,

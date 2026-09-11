@@ -1,0 +1,190 @@
+process.env.RESEND_KEY = "test-resend-key";
+process.env.EMAIL_FROM = "noreply@example.com";
+
+jest.mock("resend", () => ({
+  Resend: jest.fn().mockImplementation(() => ({
+    emails: { send: jest.fn().mockResolvedValue({ id: "email_1" }) },
+  })),
+}));
+jest.mock("../src/models/tradeInRequest.model", () => ({
+  TradeInRequest: {
+    findById: jest.fn(),
+    findByIdAndUpdate: jest.fn(),
+    findByIdAndDelete: jest.fn(),
+    find: jest.fn(),
+    create: jest.fn(),
+    countDocuments: jest.fn(),
+  },
+  tradeInStatusEnum: require("../src/constants/tradeInStatus").TRADE_IN_STATUSES,
+}));
+jest.mock("../src/models/auditLog.model");
+jest.mock("../src/models/notification.model");
+jest.mock("../src/models/emailConfig.model");
+jest.mock("../src/models/tradeInPriceBook.model");
+jest.mock("../src/models/tradeInQuestion.model");
+
+const { TradeInRequest } = require("../src/models/tradeInRequest.model");
+const AuditLog = require("../src/models/auditLog.model");
+const { EmailConfig } = require("../src/models/emailConfig.model");
+const controller = require("../src/controllers/tradeIn.controller");
+
+const STAFF = { id: "user_admin", email: "yasir@upcellit.com", role: "admin" };
+
+const makeReqRes = (body = {}, { params = {}, user = STAFF } = {}) => {
+  const req = { body, params, query: {}, user };
+  const res = {
+    statusCode: null,
+    status(code) { this.statusCode = code; return this; },
+    json: jest.fn(),
+  };
+  return { req, res, next: jest.fn() };
+};
+
+const sent = (res) => res.json.mock.calls[0][0];
+
+const requestDoc = (over = {}) => ({
+  _id: "tr1",
+  name: "Sam Okonkwo",
+  email: "sam@example.com",
+  phone: "3132888312",
+  modelTitle: "iPhone 13 128GB",
+  estimate: 400,
+  status: "Quoted",
+  timeline: [],
+  save: jest.fn().mockResolvedValue(true),
+  ...over,
+});
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  AuditLog.create.mockResolvedValue({});
+  // The notification path runs after the response and is allowed to fail; it
+  // is stubbed so a rejected promise does not leak into another test.
+  EmailConfig.findOne.mockResolvedValue({ _id: "cfg", enableCustomerEmails: false, enableAdminEmails: false });
+  TradeInRequest.findByIdAndUpdate.mockResolvedValue({});
+});
+
+// A direct write to `status` skips the transition map, and an illegal state
+// reached once stays reached — there is nothing later that puts it back.
+describe("moving a trade-in", () => {
+  it("makes a legal move and saves it", async () => {
+    const doc = requestDoc();
+    TradeInRequest.findById.mockResolvedValue(doc);
+
+    const { req, res, next } = makeReqRes({ status: "LabelIssued" }, { params: { id: "tr1" } });
+    await controller.updateTradeInStatus(req, res, next);
+
+    expect(res.statusCode).toBe(200);
+    expect(doc.status).toBe("LabelIssued");
+    expect(doc.save).toHaveBeenCalled();
+  });
+
+  it("refuses an illegal move and changes nothing", async () => {
+    // The device has to arrive and be looked at before money moves.
+    const doc = requestDoc();
+    TradeInRequest.findById.mockResolvedValue(doc);
+
+    const { req, res, next } = makeReqRes({ status: "Paid" }, { params: { id: "tr1" } });
+    await controller.updateTradeInStatus(req, res, next);
+
+    expect(res.statusCode).toBe(400);
+    expect(doc.status).toBe("Quoted");
+    expect(doc.save).not.toHaveBeenCalled();
+  });
+
+  it("says where the request could go instead", async () => {
+    TradeInRequest.findById.mockResolvedValue(requestDoc());
+
+    const { req, res, next } = makeReqRes({ status: "Paid" }, { params: { id: "tr1" } });
+    await controller.updateTradeInStatus(req, res, next);
+
+    expect(sent(res).allowed).toContain("LabelIssued");
+  });
+
+  it("never writes the status directly", async () => {
+    // findByIdAndUpdate on status is the bypass this task exists to close.
+    const doc = requestDoc();
+    TradeInRequest.findById.mockResolvedValue(doc);
+
+    const { req, res, next } = makeReqRes({ status: "LabelIssued" }, { params: { id: "tr1" } });
+    await controller.updateTradeInStatus(req, res, next);
+
+    const wroteStatus = TradeInRequest.findByIdAndUpdate.mock.calls
+      .some(([, update]) => update && Object.prototype.hasOwnProperty.call(update, "status"));
+    expect(wroteStatus).toBe(false);
+  });
+
+  it("refuses a status that is not one of ours", async () => {
+    TradeInRequest.findById.mockResolvedValue(requestDoc());
+
+    const { req, res, next } = makeReqRes({ status: "Refunded" }, { params: { id: "tr1" } });
+    await controller.updateTradeInStatus(req, res, next);
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("answers 404 for a request that is not there", async () => {
+    TradeInRequest.findById.mockResolvedValue(null);
+
+    const { req, res, next } = makeReqRes({ status: "LabelIssued" }, { params: { id: "tr1" } });
+    await controller.updateTradeInStatus(req, res, next);
+
+    expect(res.statusCode).toBe(404);
+  });
+});
+
+describe("the timeline", () => {
+  it("records who moved it and when", async () => {
+    // "The customer says they posted it, we say it never arrived" is only
+    // answerable from a log nobody can edit.
+    const doc = requestDoc();
+    TradeInRequest.findById.mockResolvedValue(doc);
+
+    const { req, res, next } = makeReqRes({ status: "LabelIssued" }, { params: { id: "tr1" } });
+    await controller.updateTradeInStatus(req, res, next);
+
+    expect(doc.timeline).toHaveLength(1);
+    expect(doc.timeline[0]).toMatchObject({
+      from: "Quoted",
+      to: "LabelIssued",
+      actor: "yasir@upcellit.com",
+      actorType: "staff",
+    });
+  });
+
+  it("keeps a note against the move when one is given", async () => {
+    const doc = requestDoc();
+    TradeInRequest.findById.mockResolvedValue(doc);
+
+    const { req, res, next } = makeReqRes(
+      { status: "Rejected", note: "Screen is cracked through" },
+      { params: { id: "tr1" } }
+    );
+    await controller.updateTradeInStatus(req, res, next);
+
+    expect(doc.timeline[0].meta.note).toBe("Screen is cracked through");
+  });
+
+  it("only ever appends", async () => {
+    const doc = requestDoc({ timeline: [{ event: "quote_sent", at: new Date() }] });
+    TradeInRequest.findById.mockResolvedValue(doc);
+
+    const { req, res, next } = makeReqRes({ status: "LabelIssued" }, { params: { id: "tr1" } });
+    await controller.updateTradeInStatus(req, res, next);
+
+    expect(doc.timeline).toHaveLength(2);
+    expect(doc.timeline[0].event).toBe("quote_sent");
+  });
+
+  it("writes an audit row as well as a timeline entry", async () => {
+    TradeInRequest.findById.mockResolvedValue(requestDoc());
+
+    const { req, res, next } = makeReqRes({ status: "LabelIssued" }, { params: { id: "tr1" } });
+    await controller.updateTradeInStatus(req, res, next);
+
+    expect(AuditLog.create.mock.calls[0][0]).toMatchObject({
+      action: "trade_in.status_update",
+      metadata: { from: "Quoted", to: "LabelIssued" },
+    });
+  });
+});

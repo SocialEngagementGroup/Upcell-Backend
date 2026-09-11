@@ -10,6 +10,7 @@ const { sendMail, getMessageId } = require("../services/mailService");
 const {
   tradeInRequestEmail,
   tradeInStatusEmail,
+  shouldEmailStatus,
   adminNewTradeInEmail,
   adminTradeInStatusEmail,
 } = require("../services/emailTemplates");
@@ -18,19 +19,27 @@ const {
   emptyPaginatedResponse,
   sendPaginatedResults,
 } = require("../utils/pagination");
+const tradeInStatus = require("../constants/tradeInStatus");
+const { isTradeInStatus } = tradeInStatus;
+const { applyTransition } = require("../services/returnTimeline");
 
 const tradeInEmailFrom = process.env.EMAIL_FROM;
 
-// Statuses that should notify the customer at all — "Closed" (a rejected/
-// withdrawn request) intentionally has no customer-facing copy, same as
-// before this template swap.
-const CUSTOMER_NOTIFIABLE_STATUSES = new Set(["New", "Contacted", "Received", "Quoted", "Paid"]);
-
-function buildCustomerEmail(request) {
-  if (!CUSTOMER_NOTIFIABLE_STATUSES.has(request.status)) {
-    return null;
-  }
-  if (request.status === "New") {
+/**
+ * The email for one status change, or null when this one is not worth
+ * sending.
+ *
+ * Which states are worth interrupting somebody for lives in emailTemplates.js
+ * next to the words themselves — InTransit and Delivered are deliberately
+ * silent, because a customer who posted a phone knows they posted it and the
+ * carrier is already emailing them about it.
+ *
+ * firstContact rather than a status check for the welcome email. The default
+ * status used to be "New" and is now "Quoted", and keying the first email on
+ * a status value is how a rename silently stops it being sent.
+ */
+function buildCustomerEmail(request, { firstContact = false } = {}) {
+  if (firstContact) {
     return tradeInRequestEmail({
       name: request.name,
       modelTitle: request.modelTitle,
@@ -38,6 +47,9 @@ function buildCustomerEmail(request) {
       requestId: request._id,
     });
   }
+
+  if (!shouldEmailStatus(request.status)) return null;
+
   return tradeInStatusEmail({
     name: request.name,
     modelTitle: request.modelTitle,
@@ -60,8 +72,8 @@ async function fetchEmailConfig() {
   return config;
 }
 
-async function sendCustomerStatusEmail(request, config) {
-  const built = buildCustomerEmail(request);
+async function sendCustomerStatusEmail(request, config, options = {}) {
+  const built = buildCustomerEmail(request, options);
   if (!config.enableCustomerEmails || !built) {
     await TradeInRequest.findByIdAndUpdate(request._id, { emailStatus: "skipped" });
     return;
@@ -128,7 +140,7 @@ async function notifyNewTradeIn(request) {
   const config = await fetchEmailConfig();
 
   await Promise.all([
-    sendCustomerStatusEmail(request, config),
+    sendCustomerStatusEmail(request, config, { firstContact: true }),
     sendAdminNewRequestEmail(request, config),
   ]);
 
@@ -299,24 +311,36 @@ async function getAdminTradeInRequests(req, res, next) {
 }
 
 async function updateTradeInStatus(req, res, next) {
-  const { status } = req.body;
+  const { status, note } = req.body;
 
   try {
-    if (!tradeInStatusEnum.includes(status)) {
+    if (!isTradeInStatus(status)) {
       return res.status(400).json({ error: "Invalid trade-in status" });
     }
 
-    const previous = await TradeInRequest.findById(req.params.id);
-    if (!previous) {
+    const request = await TradeInRequest.findById(req.params.id);
+    if (!request) {
       return res.status(404).json({ error: "Trade-in request not found" });
     }
-    const previousStatus = previous.status;
+    const previousStatus = request.status;
 
-    const updated = await TradeInRequest.findByIdAndUpdate(
-      req.params.id,
-      { status },
-      { new: true }
-    );
+    // Through the state machine, not findByIdAndUpdate. A direct write skips
+    // the transition map, and an illegal state reached once stays reached —
+    // there is nothing later that puts it back. It is also what writes the
+    // timeline entry, which is the dispute record.
+    const moved = applyTransition(request, status, {
+      actor: req.user?.email || req.user?.id,
+      actorType: "staff",
+      machine: tradeInStatus,
+      meta: note ? { note: String(note).slice(0, 500) } : undefined,
+    });
+
+    if (!moved.ok) {
+      return res.status(400).json({ error: moved.error, allowed: moved.allowed });
+    }
+
+    await request.save();
+    const updated = request;
 
     res.status(200).json(updated);
 

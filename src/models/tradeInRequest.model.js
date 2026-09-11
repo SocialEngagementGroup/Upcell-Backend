@@ -1,13 +1,16 @@
 const { Schema, model, models } = require("mongoose");
+const { TRADE_IN_STATUSES } = require("../constants/tradeInStatus");
 
-const tradeInStatusEnum = [
-  "New",
-  "Contacted",
-  "Received",
-  "Quoted",
-  "Paid",
-  "Closed",
-];
+// The old six. Kept in the enum so a document written before the state
+// machine existed still loads — Mongoose refuses to hydrate a document whose
+// stored value is not in the enum, and a validation error on read would take
+// the admin queue down rather than showing an out-of-date status.
+//
+// scripts/migrate-trade-in-status.js converts them. Once it has run against
+// production and nothing is left on an old value, these six can go.
+const LEGACY_STATUSES = ["New", "Contacted", "Received"];
+
+const tradeInStatusEnum = [...new Set([...TRADE_IN_STATUSES, ...LEGACY_STATUSES])];
 
 const TradeInRequestSchema = new Schema(
   {
@@ -47,7 +50,29 @@ const TradeInRequestSchema = new Schema(
     name: { type: String, required: true },
     email: { type: String, required: true },
     phone: { type: String, required: true },
-    status: { type: String, enum: tradeInStatusEnum, default: "New" },
+    // A trade-in starts at a price UpCell offered, not at a customer asking:
+    // there is nothing before Quoted. See constants/tradeInStatus.js.
+    status: { type: String, enum: tradeInStatusEnum, default: "Quoted", index: true },
+
+    // The append-only record of everything that happened to this request.
+    //
+    // The same shape as a return's, and for the same reason: "the customer
+    // says they posted it, we say it never arrived" is only answerable from a
+    // log nobody can edit. Entries are pushed and never updated.
+    timeline: [
+      {
+        _id: false,
+        at: { type: Date, default: Date.now },
+        // Clerk id, or "system" for a scheduled job.
+        actor: String,
+        // staff | customer | system
+        actorType: String,
+        event: String,
+        from: String,
+        to: String,
+        meta: Schema.Types.Mixed,
+      },
+    ],
     emailStatus: {
       type: String,
       enum: ["pending", "sent", "failed", "skipped"],
@@ -66,4 +91,5 @@ const TradeInRequest = models?.TradeInRequest || model("TradeInRequest", TradeIn
 module.exports = {
   TradeInRequest,
   tradeInStatusEnum,
+  LEGACY_STATUSES,
 };
