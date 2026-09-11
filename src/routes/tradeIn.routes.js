@@ -22,6 +22,7 @@ const {
   getAdminTradeInRequests,
   updateTradeInStatus,
   recordTradeInPayout,
+  getTradeInReport,
   deleteTradeInRequest,
 } = require("../controllers/tradeIn.controller");
 
@@ -78,6 +79,11 @@ router.patch(
   validateObjectIdParam(),
   updateTradeInStatus
 );
+// The report, and the same report as a file. One handler: two endpoints
+// computing the same numbers separately is two places for them to drift.
+router.get("/admin-trade-in-report", verifyToken, requireAdmin, getTradeInReport);
+router.get("/admin-trade-in-report.csv", verifyToken, requireAdmin, getTradeInReport);
+
 // Recording the payment and marking it paid are one action. Two endpoints
 // would let a request sit at Paid with no record of how, which is the state
 // somebody has to reconstruct from a bank statement months later.

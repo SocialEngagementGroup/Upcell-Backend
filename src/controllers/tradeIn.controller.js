@@ -23,6 +23,11 @@ const tradeInStatus = require("../constants/tradeInStatus");
 const { isTradeInStatus } = tradeInStatus;
 const { applyTransition, recordEvent } = require("../services/returnTimeline");
 const { maskReference } = require("../services/payoutSafety");
+const {
+  buildTradeInMetrics,
+  groupTradeIns,
+  toCsv,
+} = require("../services/tradeInReporting");
 
 const tradeInEmailFrom = process.env.EMAIL_FROM;
 
@@ -483,11 +488,80 @@ function amountOwed(request) {
 }
 
 
+// The window a report covers. Ninety days back by default, which is long
+// enough for a wrong price to show up as a pattern rather than as noise.
+function reportWindow(query = {}) {
+  const to = query.to ? new Date(query.to) : new Date();
+  const from = query.from
+    ? new Date(query.from)
+    : new Date(to.getTime() - 90 * 24 * 60 * 60 * 1000);
+
+  return { from, to };
+}
+
+/**
+ * GET /admin-trade-in-report
+ * GET /admin-trade-in-report.csv
+ *
+ * What the trade-in data says. The mirror of the returns report: that one
+ * asks which model keeps coming back, this one asks which model UpCell keeps
+ * quoting too high for.
+ */
+async function getTradeInReport(req, res, next) {
+  try {
+    const { from, to } = reportWindow(req.query);
+
+    const requests = await TradeInRequest.find({ createdAt: { $gte: from, $lte: to } })
+      .select("status modelTitle model device storage estimate estimateCents revisedOfferCents payout createdAt timeline")
+      .lean();
+
+    const metrics = buildTradeInMetrics({ requests });
+    const byModel = groupTradeIns(requests, "modelTitle");
+
+    const wantsCsv = String(req.path || "").endsWith(".csv") || req.query?.format === "csv";
+
+    if (!wantsCsv) {
+      return res.status(200).json({
+        window: { from, to },
+        metrics,
+        byModel,
+      });
+    }
+
+    const rows = byModel.map((row) => ({
+      model: row.name,
+      quoted: row.quoted,
+      paid: row.paid,
+      rejected: row.rejected,
+      expired: row.expired,
+      revisedOffers: row.revisedOffers,
+      acceptanceRatePercent: row.acceptanceRate ?? "",
+      avgDeductionPercent: row.avgDeductionPercent ?? "",
+      paidOut: (row.paidOutCents / 100).toFixed(2),
+    }));
+
+    const csv = toCsv(rows);
+
+    res.set("Content-Type", "text/csv; charset=utf-8");
+    // Dated, because a file called trade-ins.csv in a downloads folder is
+    // indistinguishable from the last four.
+    res.set(
+      "Content-Disposition",
+      `attachment; filename="upcell-trade-ins-${from.toISOString().slice(0, 10)}-to-${to.toISOString().slice(0, 10)}.csv"`
+    );
+    return res.status(200).send(csv);
+  } catch (error) {
+    return next(error);
+  }
+}
+
+
 module.exports = {
   createTradeInRequest,
   getAdminTradeInRequests,
   updateTradeInStatus,
   recordTradeInPayout,
+  getTradeInReport,
   deleteTradeInRequest,
   amountOwed,
 };
