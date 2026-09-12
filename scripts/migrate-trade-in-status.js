@@ -93,12 +93,12 @@ const storedCents = (request) => {
 };
 
 async function main() {
-  if (!process.env.MONGO_URI) {
-    console.error("MONGO_URI is not set.");
+  if (!process.env.MONGODB_URL) {
+    console.error("MONGODB_URL is not set.");
     process.exit(1);
   }
 
-  await mongoose.connect(process.env.MONGO_URI);
+  await mongoose.connect(process.env.MONGODB_URL);
   console.log(WRITE ? "WRITING\n" : "DRY RUN — nothing will be saved\n");
 
   const legacyValues = Object.keys(LEGACY_STATUS_MAP);
