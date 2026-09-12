@@ -55,15 +55,20 @@ function validateShipment({ carrier, trackingNumber, labelUrl }) {
  * the carrier's business, not ours.
  *
  * @param {object} deps
- * @param {object} deps.RefundRequest
+ * @param {object} [deps.Model]  the collection to search — RefundRequest or
+ *        TradeInRequest. Both store the leg at the same path, which is why
+ *        this function can serve either.
+ * @param {object} [deps.RefundRequest]  the original name, still accepted so
+ *        existing callers read unchanged.
  * @param {string[]} deps.activeStatuses
  * @param {string} [deps.exceptId]  the request being edited, so correcting a
  *                                  typo on the same request is not a clash
  */
-async function trackingNumberInUse({ RefundRequest, activeStatuses, trackingNumber, exceptId }) {
+async function trackingNumberInUse({ Model, RefundRequest, activeStatuses, trackingNumber, exceptId }) {
+  const collection = Model || RefundRequest;
   const tracking = normaliseTracking(trackingNumber);
 
-  const clash = await RefundRequest.findOne({
+  const clash = await collection.findOne({
     status: { $in: activeStatuses },
     $or: [
       { "shipping.inbound.trackingNumber": tracking },
@@ -153,6 +158,9 @@ function recordUndeliverable(request, { reason, now = new Date() } = {}) {
  * A rejected return cannot close while UpCell is still holding the device: that
  * is how a phone ends up on a shelf with nobody responsible for it and a
  * customer who has stopped being told anything.
+ *
+ * Serves trade-ins unchanged: "Rejected" means the same thing in both state
+ * machines, and a refused trade-in has exactly the same problem.
  */
 function awaitingShipBack(request) {
   if (request?.status !== "Rejected") return false;

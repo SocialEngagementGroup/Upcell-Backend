@@ -418,6 +418,13 @@ const revisedOfferSchema = z.object({
       // disputed and what UpCell then cannot defend.
       reason: z.string().trim().min(5, "Say why, in words the customer can read").max(500),
       findingKey: z.string().trim().max(60).optional(),
+      // Which inspection photos show it. Required by services/revisedOffer.js,
+      // and it has to be named here or it never gets there: validation
+      // replaces req.body wholesale, so a field this schema does not list is
+      // stripped before the service sees it. Left out, every deduction was
+      // refused for having no photo — the same trap the inspection checklist
+      // above carries a warning about, one field over.
+      photoIds: z.array(z.string().trim().min(1).max(200)).min(1, "Attach the photo that shows it").max(10),
     }))
     .min(1, "A revised offer needs at least one deduction")
     .max(10),
@@ -577,6 +584,29 @@ const inspectionSubmitSchema = z.object({
 // formats and change them, and a strict pattern rejects a real number the
 // moment one of them does — which strands a real parcel to prevent a typo. The
 // service applies the same rule; this is the outer guard.
+// Inspecting a traded-in device.
+//
+// The returns inspection schema plus the two numbers off the device itself.
+// On a return those are compared against what the order says was sold; there
+// is no such record for a trade-in, so here they are written for the first
+// time — this is the only record that will ever tie this physical phone to
+// the money UpCell paid for it.
+const tradeInInspectionSchema = inspectionSubmitSchema.extend({
+  // Fifteen digits, because that is what an IMEI is. A mistyped one is a
+  // device that can never be matched to its own purchase.
+  imei: z.string().trim().regex(/^\d{15}$/, "An IMEI is 15 digits").optional(),
+  serialNumber: z.string().trim().regex(/^[A-Za-z0-9]{6,20}$/, "That does not look like a serial number").optional(),
+});
+
+// Answering a revised trade-in offer from the link in an email.
+const tradeInOfferResponseSchema = z.object({
+  token: z.string().trim().min(20, "That link is not complete").max(200),
+});
+
+const shipBackUndeliverableSchema = z.object({
+  reason: z.string().trim().max(500).optional(),
+});
+
 const returnLabelSchema = z.object({
   carrier: z.enum(["FedEx", "UPS", "USPS", "DHL", "Other"]),
   trackingNumber: z
@@ -743,6 +773,9 @@ module.exports = {
   reviewSchema,
   reviewModerationSchema,
   tradeInPayoutSchema,
+  tradeInInspectionSchema,
+  tradeInOfferResponseSchema,
+  shipBackUndeliverableSchema,
   wholesaleFormSchema,
   tradeInRequestSchema,
   newsletterSubscriberSchema,

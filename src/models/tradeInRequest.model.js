@@ -73,6 +73,120 @@ const TradeInRequestSchema = new Schema(
         meta: Schema.Types.Mixed,
       },
     ],
+    // The parcels, in both directions.
+    //
+    // Exactly the shape refundRequest.model.js uses, because services/
+    // returnShipping.js reads these paths and writing a second shape would
+    // mean a second copy of that code. Inbound is the customer's device coming
+    // to UpCell; outbound is a refused one going back.
+    shipping: {
+      inbound: {
+        carrier: String,
+        trackingNumber: String,
+        labelUrl: String,
+        labelCost: Number,
+        // Always UPCELL on a trade-in. UpCell wants the device, so UpCell pays
+        // to get it — unlike a return, where a change of mind is the
+        // customer's own cost.
+        paidBy: String,
+        shippedAt: Date,
+        deliveredAt: Date,
+      },
+      outbound: {
+        carrier: String,
+        trackingNumber: String,
+        labelUrl: String,
+        labelCost: Number,
+        paidBy: String,
+        shippedAt: Date,
+        undeliverableAt: Date,
+        undeliverableReason: String,
+        disposeAfter: Date,
+      },
+    },
+
+    // What the device actually turned out to be.
+    //
+    // The same checklist a return is inspected against, with one difference in
+    // meaning rather than in shape: `imei_matches` on a return asks whether the
+    // device sent back is the device that was sold. There is no prior record
+    // for a trade-in, so here it records the number for the first time.
+    inspection: {
+      inspectorId: String,
+      startedAt: Date,
+      completedAt: Date,
+      checklist: [
+        {
+          _id: false,
+          key: String,
+          // pass | fail | na
+          result: String,
+          note: String,
+        },
+      ],
+      // Recorded because the next buyer needs it, and because the quote was
+      // priced on what the customer said it was.
+      batteryHealth: Number,
+      cosmeticGrade: String,
+      // The lower of the battery band and the cosmetic grade.
+      finalGrade: String,
+      imei: String,
+      serialNumber: String,
+      photos: [
+        {
+          _id: false,
+          url: String,
+          publicId: String,
+          caption: String,
+          takenAt: Date,
+          purgeAfter: Date,
+        },
+      ],
+      findings: String,
+    },
+
+    // What is being offered after inspection, when it is less than the quote.
+    //
+    // Stored in cents alongside the deductions that produced it. A customer who
+    // disputes an offer in November is answered from these lines, not by
+    // rerunning today's inspection rules over it.
+    revisedOfferCents: Number,
+    offerDeductions: [
+      {
+        _id: false,
+        type: String,
+        amount: Number,
+        reason: String,
+        findingKey: String,
+      },
+    ],
+    offerExpiresAt: Date,
+
+    // The unguessable half of a link the customer can open without signing in,
+    // to accept or decline a revised offer. Hashed — see utils/accessToken.js.
+    // Not a session: it grants exactly this trade-in and never confers admin.
+    accessToken: { type: String, select: false },
+
+    // Two business days from the end of inspection, paused while the request is
+    // waiting on the customer rather than on UpCell.
+    sla: {
+      clockStartedAt: Date,
+      clockPausedAt: Date,
+      dueAt: Date,
+      breached: { type: Boolean, default: false },
+    },
+
+    // The catalogue row created from this device once the trade-in is agreed,
+    // so the two can be traced to each other. A device UpCell bought and a
+    // device UpCell sells are the same physical phone, and a fault reported
+    // later has to be answerable from both ends.
+    listedVariationId: { type: Schema.Types.ObjectId, ref: "SingleVariation" },
+
+    // Set by hand when a customer disputes an offer, by any route. Freezes the
+    // inspection photos past their 90 days, because the moment they matter
+    // most is the moment somebody is arguing about what arrived.
+    disputed: { type: Boolean, default: false },
+
     // How the money went out.
     //
     // UpCell does not hold bank details and must not start now. Everything
@@ -111,6 +225,13 @@ const TradeInRequestSchema = new Schema(
 
 TradeInRequestSchema.index({ status: 1, updatedAt: -1 });
 TradeInRequestSchema.index({ email: 1, updatedAt: -1 });
+// The receiving desk's lookup: somebody types a tracking number off a box and
+// has to get one answer. Sparse because most requests never get a label.
+TradeInRequestSchema.index({ "shipping.inbound.trackingNumber": 1 }, { sparse: true });
+TradeInRequestSchema.index({ "shipping.outbound.trackingNumber": 1 }, { sparse: true });
+// And by the number on the device itself, for a box that arrived with no label
+// or a label nobody can read.
+TradeInRequestSchema.index({ "inspection.imei": 1 }, { sparse: true });
 
 const TradeInRequest = models?.TradeInRequest || model("TradeInRequest", TradeInRequestSchema);
 

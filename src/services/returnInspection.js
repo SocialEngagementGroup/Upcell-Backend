@@ -25,7 +25,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * not a faster inspection, it is an unusable record — and the moment it matters
  * is months later, when nobody can go back and look at the device again.
  */
-function validateInspection({ checklist = [], photos = [], faultClaimed = false }) {
+function validateInspection({ checklist = [], photos = [], faultClaimed = false, context = "return" }) {
   const errors = [];
 
   const answered = new Map();
@@ -72,6 +72,9 @@ function validateInspection({ checklist = [], photos = [], faultClaimed = false 
     // an answer on a change-of-mind return would train staff to type "na"
     // eleven times, which is how a checklist stops being read.
     if (item.onlyWhenFaultClaimed && !faultClaimed) continue;
+    // Two checks only make sense for a device UpCell sold. A trade-in has no
+    // grade it sold at to still match.
+    if (item.onlyOnReturn && context !== "return") continue;
     if (!answered.has(item.key)) errors.push(`"${item.label}" has not been answered.`);
   }
 

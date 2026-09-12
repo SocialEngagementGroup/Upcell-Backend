@@ -4,11 +4,27 @@ const { validateRequest } = require("../middleware/validate.middleware");
 const { publicFormLimiter } = require("../middleware/rateLimit.middleware");
 const { validateObjectIdParam } = require("../middleware/validateObjectId.middleware");
 const {
+  recordTradeInLabel,
+  lookupTradeInRequest,
+  submitTradeInInspection,
+  offerRevisedTradeIn,
+  getTradeInOffer,
+  respondToTradeInOffer,
+  shipTradeInBack,
+  markTradeInUndeliverable,
+  listTradedDevice,
+} = require("../controllers/tradeInIntake.controller");
+const {
   tradeInRequestSchema,
   tradeInQuoteSchema,
   priceBookEntrySchema,
   questionSetSchema,
   tradeInPayoutSchema,
+  returnLabelSchema,
+  revisedOfferSchema,
+  tradeInInspectionSchema,
+  tradeInOfferResponseSchema,
+  shipBackUndeliverableSchema,
 } = require("../schemas/request.schemas");
 const {
   getTradeInCatalog,
@@ -79,6 +95,84 @@ router.patch(
   validateObjectIdParam(),
   updateTradeInStatus
 );
+
+// Trade-in intake: the returns workflow run backwards.
+//
+// The paths mirror the returns ones deliberately, so somebody who knows one
+// admin screen can read the other. The handlers call the same shipping,
+// inspection and offer services — see controllers/tradeInIntake.controller.js.
+
+// The receiving desk. A GET with a query rather than a path parameter, because
+// what is typed is a number off a box and not an id.
+router.get("/admin-trade-in-lookup", verifyToken, requireAdmin, lookupTradeInRequest);
+
+router.post(
+  "/admin-trade-in-requests/:id/label",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  validateRequest(returnLabelSchema),
+  recordTradeInLabel
+);
+
+router.post(
+  "/admin-trade-in-requests/:id/inspection",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  validateRequest(tradeInInspectionSchema),
+  submitTradeInInspection
+);
+
+router.post(
+  "/admin-trade-in-requests/:id/revised-offer",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  validateRequest(revisedOfferSchema),
+  offerRevisedTradeIn
+);
+
+router.post(
+  "/admin-trade-in-requests/:id/ship-back",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  validateRequest(returnLabelSchema),
+  shipTradeInBack
+);
+
+router.post(
+  "/admin-trade-in-requests/:id/undeliverable",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  validateRequest(shipBackUndeliverableSchema),
+  markTradeInUndeliverable
+);
+
+// Turning an agreed trade-in into a catalogue row. A draft: out of stock and
+// with no price, because somebody has to decide what it sells for.
+router.post(
+  "/admin-trade-in-requests/:id/list",
+  verifyToken,
+  requireAdmin,
+  validateObjectIdParam(),
+  listTradedDevice
+);
+
+// The customer's side of a revised offer. No login: an offer they cannot open
+// is an offer that expires and a device that gets posted back. Rate limited,
+// because the token in the URL is the only thing guarding it.
+router.get("/trade-ins/:id/offer", publicFormLimiter, validateObjectIdParam(), getTradeInOffer);
+router.post(
+  "/trade-ins/:id/:decision",
+  publicFormLimiter,
+  validateObjectIdParam(),
+  validateRequest(tradeInOfferResponseSchema),
+  respondToTradeInOffer
+);
+
 // The report, and the same report as a file. One handler: two endpoints
 // computing the same numbers separately is two places for them to drift.
 router.get("/admin-trade-in-report", verifyToken, requireAdmin, getTradeInReport);

@@ -59,6 +59,10 @@ const CHECKLIST_ITEMS = [
     // every one has been opened — what matters is whether it came back looking
     // the way the listing said it looked.
     drivesDisposition: true,
+    // Meaningless on a trade-in: there is no grade UpCell sold it at, because
+    // UpCell never sold it. Asking anyway would train staff to answer "na" on
+    // every trade-in, which is how a checklist stops being read.
+    onlyOnReturn: true,
   },
   {
     key: "unlocked",

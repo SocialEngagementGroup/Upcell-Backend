@@ -139,8 +139,23 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 const offerExpiryFrom = (now = new Date()) => new Date(now.getTime() + OFFER_RESPONSE_DAYS * DAY_MS);
 
-const offerHasExpired = (request, now = new Date()) => {
-  const expiresAt = request?.refundBreakdown?.offerExpiresAt;
+/**
+ * Whether the five days are up.
+ *
+ * Takes a return, a trade-in, or the date itself. A return keeps the deadline
+ * at refundBreakdown.offerExpiresAt and a trade-in at offerExpiresAt, and
+ * reading only the first meant an expired trade-in offer answered "still
+ * open" — which is the dangerous direction: it lets a customer accept an
+ * offer that lapsed, or lets one lapse and still be acted on.
+ *
+ * No deadline at all is not expired. A record with no date is one nobody has
+ * made an offer on.
+ */
+const offerHasExpired = (subject, now = new Date()) => {
+  const expiresAt = subject instanceof Date
+    ? subject
+    : subject?.refundBreakdown?.offerExpiresAt ?? subject?.offerExpiresAt;
+
   if (!expiresAt) return false;
   return now.getTime() > new Date(expiresAt).getTime();
 };

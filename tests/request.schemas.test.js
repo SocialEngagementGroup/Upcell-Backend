@@ -1,4 +1,5 @@
 const {
+  revisedOfferSchema,
   productFilterSchema,
   wholesaleFormSchema,
   orderSchema,
@@ -870,5 +871,56 @@ describe("inspectionSubmitSchema — the measured and graded checks", () => {
 
     expect(ok.success).toBe(true);
     expect(bad.success).toBe(false);
+  });
+});
+
+// A revised offer, and the field that was silently being thrown away.
+//
+// validateRequest replaces req.body with the parsed result, so any field this
+// schema does not name never reaches the service. photoIds was not named, and
+// services/revisedOffer.js requires it — so every deduction was refused for
+// having no photo, on returns as well as trade-ins.
+describe("revisedOfferSchema", () => {
+  const deduction = (over = {}) => ({
+    type: "DAMAGE",
+    amount: 90,
+    reason: "Deep scratch across the back glass",
+    findingKey: "cosmetic_grade",
+    photoIds: ["upcell/returns/photo-1"],
+    ...over,
+  });
+
+  it("keeps photoIds, which the offer builder cannot do without", () => {
+    const parsed = revisedOfferSchema.parse({ deductions: [deduction()] });
+
+    expect(parsed.deductions[0].photoIds).toEqual(["upcell/returns/photo-1"]);
+  });
+
+  it("demands at least one photo per deduction", () => {
+    // A customer told their offer dropped $90 for a scratch can ask to see it.
+    const result = revisedOfferSchema.safeParse({ deductions: [deduction({ photoIds: [] })] });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("refuses a deduction with no photos field at all", () => {
+    const { photoIds, ...withoutPhotos } = deduction();
+    const result = revisedOfferSchema.safeParse({ deductions: [withoutPhotos] });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("keeps findingKey, the check the deduction points at", () => {
+    const parsed = revisedOfferSchema.parse({ deductions: [deduction()] });
+
+    expect(parsed.deductions[0].findingKey).toBe("cosmetic_grade");
+  });
+
+  it("refuses a deduction with no reason a customer can read", () => {
+    expect(revisedOfferSchema.safeParse({ deductions: [deduction({ reason: "bad" })] }).success).toBe(false);
+  });
+
+  it("refuses an offer with no deductions — that is a full refund", () => {
+    expect(revisedOfferSchema.safeParse({ deductions: [] }).success).toBe(false);
   });
 });
