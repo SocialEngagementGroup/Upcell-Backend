@@ -24,6 +24,8 @@ jest.mock("../src/models/tradeInPriceBook.model");
 jest.mock("../src/models/tradeInQuestion.model");
 
 const { TradeInRequest } = require("../src/models/tradeInRequest.model");
+const TradeInPriceBook = require("../src/models/tradeInPriceBook.model");
+const TradeInQuestion = require("../src/models/tradeInQuestion.model");
 const AuditLog = require("../src/models/auditLog.model");
 const { EmailConfig } = require("../src/models/emailConfig.model");
 const controller = require("../src/controllers/tradeIn.controller");
@@ -320,5 +322,139 @@ describe("recording a payout", () => {
     await controller.recordTradeInPayout(req, res, next);
 
     expect(res.statusCode).toBe(404);
+  });
+});
+
+// The submit path, and the hole this endpoint used to have.
+//
+// It stored whatever arrived, so posting `estimate: 9999` put nine thousand
+// dollars in front of staff as an offer to honour, and nothing anywhere would
+// have contradicted it.
+//
+// tests/tradeInPricing.test.js proves the pricing engine is pure and ignores an
+// invented number. That is a different claim from this one: it does not prove
+// the controller calls the engine rather than trusting the body. This is the
+// test the plan's definition of done actually names.
+describe("pricing a submitted trade-in on the server", () => {
+  // iPhone 13, $590 base, 128GB at ×1.0, every answer best: $590.
+  const priceBook = {
+    modelKey: "iphone13",
+    deviceType: "iPhone",
+    displayName: "iPhone 13",
+    basePriceCents: 59000,
+    storageMultipliers: { "128GB": 1.0 },
+    carrierAdjustments: { unlocked: 1.0 },
+    active: true,
+    priceBookVersion: 3,
+  };
+
+  const questions = [
+    { id: "powersOn", question: "Does it power on?", type: "boolean", noMultiplier: 0.15, terminal: true },
+    { id: "screenCracked", question: "Is the screen cracked?", type: "boolean", noMultiplier: 1.0 },
+  ];
+
+  const submission = (over = {}) => ({
+    device: "phone",
+    model: "iphone13",
+    modelTitle: "iPhone 13",
+    storage: "128GB",
+    carrier: "unlocked",
+    answers: { powersOn: true, screenCracked: false },
+    name: "Sam Okonkwo",
+    email: "sam@example.com",
+    phone: "3132888312",
+    ...over,
+  });
+
+  beforeEach(() => {
+    TradeInPriceBook.findOne.mockReturnValue({ lean: () => Promise.resolve(priceBook) });
+    TradeInQuestion.findOne.mockReturnValue({ lean: () => Promise.resolve({ deviceType: "iPhone", questions }) });
+    TradeInRequest.create.mockImplementation((doc) => Promise.resolve({ ...doc, _id: "tr_new" }));
+  });
+
+  it("stores the server's number, not the one that was posted", async () => {
+    const { req, res, next } = makeReqRes(submission({ estimate: 9999 }), { user: null });
+    await controller.createTradeInRequest(req, res, next);
+
+    expect(res.statusCode).toBe(201);
+    const [stored] = TradeInRequest.create.mock.calls[0];
+    expect(stored.estimateCents).toBe(59000);
+    expect(stored.estimate).toBe(590);
+  });
+
+  it("keeps what the browser claimed, so a disagreement is visible", async () => {
+    // Not used for the price. Kept because a stored value that never matches
+    // means the page and the engine have drifted, and a wild one means
+    // somebody edited the request before sending it.
+    const { req, res, next } = makeReqRes(submission({ estimate: 9999 }), { user: null });
+    await controller.createTradeInRequest(req, res, next);
+
+    expect(TradeInRequest.create.mock.calls[0][0].clientEstimateCents).toBe(999900);
+  });
+
+  it("records the arithmetic, so a quote disputed in November can be explained", async () => {
+    const { req, res, next } = makeReqRes(submission(), { user: null });
+    await controller.createTradeInRequest(req, res, next);
+
+    const [stored] = TradeInRequest.create.mock.calls[0];
+    expect(Array.isArray(stored.quoteBreakdown)).toBe(true);
+    expect(stored.quoteBreakdown.length).toBeGreaterThan(0);
+    // The version that priced it, so it is checked against September's prices
+    // rather than today's.
+    expect(stored.priceBookVersion).toBe(3);
+  });
+
+  it("gives the quote fourteen days", async () => {
+    const { req, res, next } = makeReqRes(submission(), { user: null });
+    await controller.createTradeInRequest(req, res, next);
+
+    const { quoteExpiresAt } = TradeInRequest.create.mock.calls[0][0];
+    const days = (quoteExpiresAt.getTime() - Date.now()) / (24 * 60 * 60 * 1000);
+    expect(Math.round(days)).toBe(14);
+  });
+
+  it("prices a dead phone at 15% and stops there", async () => {
+    // powersOn is terminal: nothing after it can raise the number back up.
+    const { req, res, next } = makeReqRes(
+      submission({ answers: { powersOn: false, screenCracked: false }, estimate: 590 }),
+      { user: null }
+    );
+    await controller.createTradeInRequest(req, res, next);
+
+    // $590 x 0.15 is $88.50, quoted as $89. The engine rounds to the whole
+    // dollar once, on purpose: rounding to the cent here and letting the page
+    // round again to the dollar rounds twice, which is what once made a $165.50
+    // quote display as $165 and store as $166.
+    expect(TradeInRequest.create.mock.calls[0][0].estimateCents).toBe(8900);
+    expect(TradeInRequest.create.mock.calls[0][0].estimate).toBe(89);
+  });
+
+  it("refuses a model UpCell is not quoting for", async () => {
+    TradeInPriceBook.findOne.mockReturnValue({ lean: () => Promise.resolve(null) });
+
+    const { req, res, next } = makeReqRes(submission({ model: "nokia3310" }), { user: null });
+    await controller.createTradeInRequest(req, res, next);
+
+    expect(res.statusCode).toBe(400);
+    expect(TradeInRequest.create).not.toHaveBeenCalled();
+  });
+
+  it("only quotes an active model", async () => {
+    // A model taken off the list keeps its row so an old quote can still be
+    // explained, and must not be quoted again.
+    const { req, res, next } = makeReqRes(submission(), { user: null });
+    await controller.createTradeInRequest(req, res, next);
+
+    expect(TradeInPriceBook.findOne.mock.calls[0][0].active).toBe(true);
+  });
+
+  it("starts the request at Quoted, through the schema default", async () => {
+    const { req, res, next } = makeReqRes(submission(), { user: null });
+    await controller.createTradeInRequest(req, res, next);
+
+    // Not set by the controller — a trade-in starts at a price UpCell offered,
+    // and the model's default says so. Asserted so a controller that begins
+    // setting it by hand has to come past this test.
+    expect(TradeInRequest.create.mock.calls[0][0].status).toBeUndefined();
   });
 });
