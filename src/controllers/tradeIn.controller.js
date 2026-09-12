@@ -488,6 +488,49 @@ function amountOwed(request) {
 }
 
 
+/**
+ * GET /trade-ins/mine
+ *
+ * A customer's own trade-ins.
+ *
+ * Matched on the email address, because that is the only thing a trade-in
+ * records about who submitted it — there is no Clerk id on the model. That
+ * makes the verified check load-bearing rather than a formality: an
+ * unverified address is one somebody typed, and matching on it would hand a
+ * stranger the trade-in history of anybody whose email they know.
+ *
+ * Case-insensitive through a collation rather than a regex. A regex built from
+ * an address is an injection, and the address here comes from Clerk rather
+ * than from a form — but the next person to copy this line will not know that.
+ */
+async function getMyTradeIns(req, res, next) {
+  try {
+    if (!req.user?.emailVerified) {
+      return res.status(403).json({
+        error: "Confirm your email address and your trade-ins will appear here.",
+      });
+    }
+
+    const email = String(req.user.email || "").trim();
+    if (!email) return res.status(200).json({ items: [] });
+
+    const items = await TradeInRequest.find({ email })
+      .collation({ locale: "en", strength: 2 })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      // An allowlist. The inspector's id, the audit trail and the access token
+      // are UpCell's business, not the customer's — and the token is the one
+      // field that would let somebody answer an offer they should not see.
+      .select("modelTitle storage status estimate estimateCents revisedOfferCents offerExpiresAt createdAt updatedAt payout.method payout.paidAt payout.amountCents inspection.finalGrade inspection.batteryHealth shipping.inbound.carrier shipping.inbound.trackingNumber shipping.inbound.labelUrl")
+      .lean();
+
+    return res.status(200).json({ items });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+
 // The window a report covers. Ninety days back by default, which is long
 // enough for a wrong price to show up as a pattern rather than as noise.
 function reportWindow(query = {}) {
@@ -562,6 +605,7 @@ module.exports = {
   updateTradeInStatus,
   recordTradeInPayout,
   getTradeInReport,
+  getMyTradeIns,
   deleteTradeInRequest,
   amountOwed,
 };

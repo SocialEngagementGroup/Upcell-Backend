@@ -36,7 +36,7 @@ const {
   gradeFrom,
   stampPurgeDates,
 } = require("../services/returnInspection");
-const { CHECKLIST_ITEMS, PHOTO_GUIDANCE } = require("../constants/inspectionChecklist");
+const { CHECKLIST_ITEMS, PHOTO_GUIDANCE, REQUIRED_PHOTO_COUNT } = require("../constants/inspectionChecklist");
 const {
   buildRevisedOffer,
   offerExpiryFrom,
@@ -944,6 +944,10 @@ function getInspectionChecklist(req, res) {
       critical: Boolean(item.critical),
       onlyWhenFaultClaimed: Boolean(item.onlyWhenFaultClaimed),
       drivesDisposition: Boolean(item.drivesDisposition),
+      // Only meaningful for a device UpCell sold. The trade-in bench form
+      // reads this rather than naming the key, so a second check added later
+      // is dropped there without anybody editing the page.
+      onlyOnReturn: Boolean(item.onlyOnReturn),
       // Two checks do not answer with pass or fail. Sent so the bench form
       // knows to draw a number box and a grade list instead of three buttons
       // — without these the page cannot collect what the server demands.
@@ -952,6 +956,10 @@ function getInspectionChecklist(req, res) {
       neverDeducts: Boolean(item.neverDeducts),
     })),
     photoGuidance: PHOTO_GUIDANCE,
+    // How many photos the validation demands. Sent because the form has to
+    // count them before submitting, and a number written into the page is a
+    // second copy of a server rule that will not change with it.
+    requiredPhotos: REQUIRED_PHOTO_COUNT,
     // The scale the graded check answers on, from the same constant the
     // grading service reads.
     grades: Object.values(GRADES),

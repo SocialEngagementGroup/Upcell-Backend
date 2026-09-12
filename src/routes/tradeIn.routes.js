@@ -39,6 +39,7 @@ const {
   updateTradeInStatus,
   recordTradeInPayout,
   getTradeInReport,
+  getMyTradeIns,
   deleteTradeInRequest,
 } = require("../controllers/tradeIn.controller");
 
@@ -160,6 +161,10 @@ router.post(
   validateObjectIdParam(),
   listTradedDevice
 );
+
+// A customer's own trade-ins. Signed in, and matched on a verified address —
+// see the controller for why that check carries weight here.
+router.get("/trade-ins/mine", verifyToken, getMyTradeIns);
 
 // The customer's side of a revised offer. No login: an offer they cannot open
 // is an offer that expires and a device that gets posted back. Rate limited,
