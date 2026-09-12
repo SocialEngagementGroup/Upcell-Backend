@@ -6,6 +6,8 @@
 const { Resend } = require("resend");
 const RefundRequest = require("../models/refundRequest.model");
 const Order = require("../models/order.model");
+const { TradeInRequest } = require("../models/tradeInRequest.model");
+const tradeInStatus = require("../constants/tradeInStatus");
 const {
   returnReminderEmail,
   returnExpiredEmail,
@@ -17,6 +19,7 @@ const {
   autoDeclineStaleOffers,
   purgeInspectionPhotos,
   sendReviewPrompts,
+  autoDeclineStaleTradeInOffers,
 } = require("./returnJobs");
 const { destroyAsset } = require("./cloudinaryDelete");
 
@@ -58,6 +61,10 @@ async function runReturnJobs(now = new Date()) {
     ["reviewPrompts", () => sendReviewPrompts({
       Order, sendEmail, buildEmail: reviewPromptEmail, now,
     })],
+    // A trade-in offer nobody answered. Declining it sends the device home,
+    // which is kinder than holding it indefinitely while the customer hears
+    // nothing.
+    ["staleTradeInOffers", () => autoDeclineStaleTradeInOffers({ TradeInRequest, tradeInStatus, now })],
   ];
 
   for (const [name, run] of jobs) {

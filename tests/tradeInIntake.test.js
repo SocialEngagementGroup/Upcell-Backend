@@ -734,3 +734,79 @@ describe("listing the device UpCell bought", () => {
     expect(next).not.toHaveBeenCalled();
   });
 });
+
+// An offer nobody answered.
+//
+// Declining it sends the device home, which is kinder than holding it
+// indefinitely while the customer hears nothing.
+describe("declining a stale offer", () => {
+  const { autoDeclineStaleTradeInOffers } = require("../src/services/returnJobs");
+  const tradeInStatus = require("../src/constants/tradeInStatus");
+
+  const stale = (over = {}) => requestDoc({
+    status: "RevisedOffer",
+    revisedOfferCents: 31000,
+    offerExpiresAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
+    accessToken: hashToken("live-token"),
+    ...over,
+  });
+
+  const collection = (rows) => ({ find: jest.fn().mockResolvedValue(rows) });
+
+  it("declines an offer whose five days are up", async () => {
+    const doc = stale();
+    const report = await autoDeclineStaleTradeInOffers({
+      TradeInRequest: collection([doc]), tradeInStatus,
+    });
+
+    expect(report.declined).toBe(1);
+    expect(doc.status).toBe("Rejected");
+  });
+
+  it("kills the token with the offer", async () => {
+    // Otherwise the link in the email still works and a customer can accept an
+    // offer the system has already declined on their behalf.
+    const doc = stale();
+    await autoDeclineStaleTradeInOffers({ TradeInRequest: collection([doc]), tradeInStatus });
+
+    expect(doc.accessToken).toBeUndefined();
+  });
+
+  it("leaves an offer that is still open alone", async () => {
+    const doc = stale({ offerExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) });
+    const report = await autoDeclineStaleTradeInOffers({
+      TradeInRequest: collection([doc]), tradeInStatus,
+    });
+
+    expect(report.declined).toBe(0);
+    expect(doc.status).toBe("RevisedOffer");
+  });
+
+  it("records the system as the actor, not a person", async () => {
+    const doc = stale();
+    await autoDeclineStaleTradeInOffers({ TradeInRequest: collection([doc]), tradeInStatus });
+
+    expect(doc.timeline[0]).toMatchObject({ actorType: "system", event: "revised_offer_expired" });
+  });
+
+  it("checks against the trade-in map, not the returns one", async () => {
+    // RevisedOffer -> Rejected is legal in both, so the wrong map would still
+    // move it — but the timeline would then be checked against rules that do
+    // not describe this record. Asserted through what it reports.
+    const doc = stale();
+    const report = await autoDeclineStaleTradeInOffers({
+      TradeInRequest: collection([doc]), tradeInStatus,
+    });
+
+    expect(report).toMatchObject({ declined: 1, considered: 1 });
+  });
+
+  it("only looks at offers past their date", async () => {
+    const model = collection([]);
+    await autoDeclineStaleTradeInOffers({ TradeInRequest: model, tradeInStatus });
+
+    const [query] = model.find.mock.calls[0];
+    expect(query.status).toBe("RevisedOffer");
+    expect(query.offerExpiresAt.$lt).toBeInstanceOf(Date);
+  });
+});

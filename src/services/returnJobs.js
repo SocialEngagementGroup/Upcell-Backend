@@ -1,10 +1,11 @@
 // The things that have to happen to a return when nobody is looking at it.
 //
-// Five jobs, run daily: nudge customers before their authorisation lapses,
+// Six jobs, run daily: nudge customers before their authorisation lapses,
 // expire the ones that lapsed anyway, auto-decline a revised offer nobody
 // answered, delete inspection photos once their retention is up, and ask a
-// customer what they thought a week after their phone arrived. The first
-// three exist because a return left alone does not resolve itself — it sits in
+// customer what they thought a week after their phone arrived, and decline a
+// trade-in offer nobody answered. The first three exist because a return left
+// alone does not resolve itself — it sits in
 // a queue looking live, and staff cannot tell it apart from one still on its
 // way. The fourth exists because evidence photos of somebody's device are not
 // something to keep forever by accident.
@@ -305,6 +306,53 @@ async function sendReviewPrompts({ Order, sendEmail, buildEmail, now = new Date(
   return { sent, considered: candidates.length, failures };
 }
 
+/**
+ * Declines a trade-in offer the customer never answered.
+ *
+ * The mirror of autoDeclineStaleOffers, kept separate rather than
+ * parameterised, because the two differ in more than the collection: a
+ * declined return means the device goes back to a customer who already owns
+ * it, and a declined trade-in means UpCell posts back a device it does not
+ * own and never paid for. The wording, the status and the follow-up are all
+ * different, and folding them together would hide that.
+ *
+ * Declining rather than leaving it open is the kinder answer. An offer that
+ * simply sits there is a device UpCell is holding indefinitely and a customer
+ * who has stopped hearing anything; declining sends it home.
+ */
+async function autoDeclineStaleTradeInOffers({ TradeInRequest, tradeInStatus, now = new Date() }) {
+  const candidates = await TradeInRequest.find({
+    status: "RevisedOffer",
+    offerExpiresAt: { $lt: now },
+  });
+
+  let declined = 0;
+
+  for (const request of candidates) {
+    if (!offerHasExpired(request, now)) continue;
+
+    const moved = applyTransition(request, "Rejected", {
+      actor: "system",
+      actorType: "system",
+      event: "revised_offer_expired",
+      machine: tradeInStatus,
+      meta: { offeredCents: request.revisedOfferCents },
+    });
+
+    if (!moved.ok) continue;
+
+    // The token dies with the offer. Otherwise the link in the email still
+    // works and a customer can accept an offer the system has already
+    // declined on their behalf.
+    request.accessToken = undefined;
+    await request.save();
+
+    declined += 1;
+  }
+
+  return { declined, considered: candidates.length };
+}
+
 module.exports = {
   purgeInspectionPhotos,
   // Re-exported so the job and its tests read the rule from one place.
@@ -314,5 +362,6 @@ module.exports = {
   autoDeclineStaleOffers,
   AWAITING_SHIPMENT,
   sendReviewPrompts,
+  autoDeclineStaleTradeInOffers,
   REVIEW_PROMPT_DAYS,
 };
