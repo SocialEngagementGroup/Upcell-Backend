@@ -1,8 +1,8 @@
 const express = require("express");
 const router = express.Router();
 
-const { checkoutLimiter } = require("../middleware/rateLimit.middleware");
-const { verifyToken } = require("../middleware/auth.middleware");
+const { checkoutLimiter, guestCheckoutLimiter } = require("../middleware/rateLimit.middleware");
+const { optionalAuth } = require("../middleware/auth.middleware");
 const { validateRequest } = require("../middleware/validate.middleware");
 const { orderSchema } = require("../schemas/request.schemas");
 const {
@@ -27,10 +27,23 @@ const form = express.urlencoded({ extended: false });
 // Limiter before verifyToken on purpose: verifyToken calls out to Clerk to
 // resolve the user, so putting it first would let an unauthenticated flood
 // drive one outbound Clerk request per attempt.
+// optionalAuth, not verifyToken. Requiring an account to buy a phone is the
+// biggest thing between a visitor and a sale, and the account it forced them
+// to make unlocked nothing but the order they were already placing.
+//
+// A signed-in customer still gets their Clerk id on the order, which is what
+// ownership is checked against. A guest gets a token in their receipt email
+// instead — see services/guestOrder.js.
+//
+// Both limiters, in this order: checkoutLimiter covers everyone, and
+// guestCheckoutLimiter adds a tighter ceiling that skips signed-in callers.
+// Both sit before optionalAuth, because optionalAuth calls out to Clerk to
+// resolve a token and a flood must not drive one outbound request per attempt.
 router.post(
   "/prepare-payment",
   checkoutLimiter,
-  verifyToken,
+  guestCheckoutLimiter,
+  optionalAuth,
   validateRequest(orderSchema),
   preparePayment
 );

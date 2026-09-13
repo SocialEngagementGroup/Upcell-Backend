@@ -194,65 +194,176 @@ describe("updateOrderStatus — keeps the paid flag in step with status", () => 
   });
 });
 
-describe("getOrder — PII exposure guard", () => {
+describe("getOrder — who may read an order, and what of it", () => {
   const fullOrder = {
     _id: "order1",
+    userId: "user_owner",
     email: "buyer@example.com",
     name: "Jane Doe",
     phone: "1234567890",
-    city: "City",
-    postal: "12345",
     street: "123 Some St",
+    city: "City",
+    state: "OH",
+    postal: "12345",
     country: "US",
     status: "Processing",
     paid: true,
+    items: [{ productId: "p1", name: "iPhone 15", quantity: 1, lineTotalCents: 99900, imei: "353916000000000" }],
+    subtotalCents: 99900,
+    shippingCents: 0,
+    taxCents: 7992,
+    totalCents: 107892,
+    cardBrand: "visa",
+    cardLast4: "4821",
+    // None of the rest may ever leave.
+    avsResult: "Y",
+    cvnResult: "M",
+    boaTransactionId: "7284419920176543904007",
+    boaTransactionUuid: "0e5f...",
+    signedAmount: "1078.92",
+    authorizedAmount: "1078.92",
+    boaDecision: "ACCEPT",
+    reasonCode: "100",
+    refund: { amount: 999, approvedBy: "yasir@upcellit.com", enteredAtBankBy: "yasir@upcellit.com", notes: "internal" },
   };
 
-  it("returns the full order (including PII) to its owner", async () => {
-    Order.findById.mockResolvedValue({ ...fullOrder, toObject: () => fullOrder });
+  // getOrder selects +guestAccessToken, so findById returns a chain here the
+  // way Mongoose does rather than a bare promise.
+  const findByIdReturns = (doc) =>
+    Order.findById.mockReturnValue({ select: () => Promise.resolve(doc) });
 
-    const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" }, user: { email: "buyer@example.com" } });
+  const ask = async (user, guestToken) => {
+    findByIdReturns({ ...fullOrder, toObject: () => fullOrder });
+
+    const { req, res } = makeReqRes(
+      {},
+      { params: { id: "6a79f7298341f33d9a65b0b7" }, user, query: guestToken ? { t: guestToken } : {} }
+    );
     await orderController.getOrder(req, res, jest.fn());
+    return res;
+  };
 
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ email: "buyer@example.com", name: "Jane Doe" }));
+  const owner = { id: "user_owner", email: "buyer@example.com", emailVerified: true };
+
+  it("gives the owner their order, matched on the Clerk user id", async () => {
+    const res = await ask(owner);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json.mock.calls[0][0]).toMatchObject({ email: "buyer@example.com", name: "Jane Doe" });
   });
 
-  it("returns the full order to an admin regardless of email match", async () => {
-    Order.findById.mockResolvedValue({ ...fullOrder, toObject: () => fullOrder });
+  it("gives it to the owner even when their account email differs from checkout", async () => {
+    // Somebody typing a different address into the checkout form used to lock
+    // them out of their own order, because ownership was an email comparison.
+    const res = await ask({ id: "user_owner", email: "different@example.com", emailVerified: true });
 
-    const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" }, user: { role: "admin", email: "admin@upcell.com" } });
-    await orderController.getOrder(req, res, jest.fn());
-
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ email: "buyer@example.com" }));
+    expect(res.statusCode).toBe(200);
+    expect(res.json.mock.calls[0][0]._id).toBe("order1");
   });
 
-  it("strips name/email/phone/address for a non-owner (or anonymous) viewer", async () => {
-    Order.findById.mockResolvedValue({ ...fullOrder, toObject: () => fullOrder });
+  it("gives it to an admin", async () => {
+    const res = await ask({ id: "user_admin", role: "admin", email: "admin@upcellit.com" });
 
-    const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" } }); // no req.user at all — anonymous viewer
-    await orderController.getOrder(req, res, jest.fn());
-
-    const returned = res.json.mock.calls[0][0];
-    expect(returned.email).toBeUndefined();
-    expect(returned.name).toBeUndefined();
-    expect(returned.phone).toBeUndefined();
-    expect(returned.street).toBeUndefined();
-    // Non-PII fields should still come through so the order summary still renders.
-    expect(returned.status).toBe("Processing");
-    expect(returned.paid).toBe(true);
+    expect(res.json.mock.calls[0][0]).toMatchObject({ email: "buyer@example.com" });
   });
 
-  it("strips PII for a logged-in user who owns a different order", async () => {
-    Order.findById.mockResolvedValue({ ...fullOrder, toObject: () => fullOrder });
+  it("404s an anonymous caller who knows the id", async () => {
+    // Not a stripped copy. Order ids are partly a timestamp, so one real id
+    // narrows where its neighbours sit — a distinct answer would confirm
+    // which of them exist.
+    const res = await ask(undefined);
 
-    const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" }, user: { email: "someone-else@example.com" } });
-    await orderController.getOrder(req, res, jest.fn());
+    expect(res.statusCode).toBe(404);
+    expect(res.json.mock.calls[0][0]).toEqual({ error: "Order not found" });
+  });
 
-    expect(res.json.mock.calls[0][0].email).toBeUndefined();
+  it("404s a different signed-in customer", async () => {
+    const res = await ask({ id: "user_someone_else", email: "someone-else@example.com", emailVerified: true });
+
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("answers a stranger exactly as it answers a missing order", async () => {
+    const stranger = await ask({ id: "user_someone_else", email: "x@example.com", emailVerified: true });
+
+    findByIdReturns(null);
+    const { req, res: missing } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" } });
+    await orderController.getOrder(req, missing, jest.fn());
+
+    expect(stranger.statusCode).toBe(missing.statusCode);
+    expect(stranger.json.mock.calls[0][0]).toEqual(missing.json.mock.calls[0][0]);
+  });
+
+  it("never sends gateway, AVS or staff fields to the owner", async () => {
+    // The reason this is an allowlist. A denylist leaks every field added to
+    // the schema afterwards, silently.
+    const res = await ask(owner);
+    const body = res.json.mock.calls[0][0];
+
+    for (const leaked of [
+      "avsResult", "cvnResult", "boaTransactionId", "boaTransactionUuid",
+      "signedAmount", "authorizedAmount", "boaDecision", "reasonCode", "userId",
+    ]) {
+      expect(body[leaked]).toBeUndefined();
+    }
+
+    expect(body.refund.approvedBy).toBeUndefined();
+    expect(body.refund.enteredAtBankBy).toBeUndefined();
+    expect(body.refund.notes).toBeUndefined();
+    expect(body.refund.amount).toBe(999);
+  });
+
+  it("keeps what the owner actually needs", async () => {
+    const body = (await ask(owner)).json.mock.calls[0][0];
+
+    // Which card, for reconciling against a statement.
+    expect(body.cardBrand).toBe("visa");
+    expect(body.cardLast4).toBe("4821");
+    // The IMEI of the device they bought and paid for.
+    expect(body.items[0].imei).toBe("353916000000000");
+    // The four figures the bank was sent.
+    expect(body.totalCents).toBe(107892);
+  });
+
+  describe("orders written before userId was recorded", () => {
+    const legacy = { ...fullOrder, userId: undefined };
+
+    const askLegacy = async (user) => {
+      findByIdReturns({ ...legacy, toObject: () => legacy });
+      const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0b7" }, user });
+      await orderController.getOrder(req, res, jest.fn());
+      return res;
+    };
+
+    it("falls back to a verified email match", async () => {
+      const res = await askLegacy({ id: "user_x", email: "buyer@example.com", emailVerified: true });
+
+      expect(res.statusCode).toBe(200);
+    });
+
+    it("refuses an unverified email match", async () => {
+      // Otherwise claiming a stranger's order takes signing up with their
+      // address and never answering the confirmation mail.
+      const res = await askLegacy({ id: "user_x", email: "buyer@example.com", emailVerified: false });
+
+      expect(res.statusCode).toBe(404);
+    });
+
+    it("ignores case and whitespace", async () => {
+      const res = await askLegacy({ id: "user_x", email: "  Buyer@Example.com ", emailVerified: true });
+
+      expect(res.statusCode).toBe(200);
+    });
+
+    it("does not fall back to email when the order has a userId", async () => {
+      const res = await ask({ id: "user_x", email: "buyer@example.com", emailVerified: true });
+
+      expect(res.statusCode).toBe(404);
+    });
   });
 
   it("returns 404 for a non-existent order", async () => {
-    Order.findById.mockResolvedValue(null);
+    Order.findById.mockReturnValue({ select: () => Promise.resolve(null) });
 
     const { req, res } = makeReqRes({}, { params: { id: "6a79f7298341f33d9a65b0ff" } });
     await orderController.getOrder(req, res, jest.fn());
@@ -466,17 +577,17 @@ describe("processRefund", () => {
   it("refuses to refund an order that was never paid", async () => {
     Order.findById.mockResolvedValue(paidOrder({ paid: false }));
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    const { req, res } = makeReqRes({ reasonCode: "CHANGED_MIND" }, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
     await orderController.processRefund(req, res, jest.fn());
 
     expect(res.statusCode).toBe(400);
   });
 
   it("refuses a second refund on an order already refunded", async () => {
-    const order = paidOrder({ refund: { approvedAt: new Date(), amount: 849.15 } });
+    const order = paidOrder({ refund: { approvedAt: new Date(), amount: 999 } });
     Order.findById.mockResolvedValue(order);
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    const { req, res } = makeReqRes({ reasonCode: "CHANGED_MIND" }, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
     await orderController.processRefund(req, res, jest.fn());
 
     expect(res.statusCode).toBe(400);
@@ -487,14 +598,14 @@ describe("processRefund", () => {
     const order = paidOrder();
     Order.findById.mockResolvedValue(order);
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { id: "u1", email: "admin@upcellit.com" } });
+    const { req, res } = makeReqRes({ reasonCode: "CHANGED_MIND" }, { params: { id: "order1" }, user: { id: "u1", email: "admin@upcellit.com" } });
     await orderController.processRefund(req, res, jest.fn());
 
     expect(res.statusCode).toBe(200);
     expect(order.status).toBe("Refunded");
     expect(order.paid).toBe(true);
-    expect(order.refund.amount).toBe(849.15);
-    expect(order.refund.restockingFee).toBe(149.85);
+    expect(order.refund.amount).toBe(999);
+    expect(order.refund.restockingFee).toBe(0);
     expect(order.refund.approvedBy).toBe("admin@upcellit.com");
     expect(order.refund.approvedAt).toBeInstanceOf(Date);
     expect(order.save).toHaveBeenCalled();
@@ -503,13 +614,13 @@ describe("processRefund", () => {
   it("writes an audit log entry with the actual figures", async () => {
     Order.findById.mockResolvedValue(paidOrder());
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { id: "u1", email: "admin@upcellit.com" } });
+    const { req, res } = makeReqRes({ reasonCode: "CHANGED_MIND" }, { params: { id: "order1" }, user: { id: "u1", email: "admin@upcellit.com" } });
     await orderController.processRefund(req, res, jest.fn());
 
     expect(AuditLog.create).toHaveBeenCalledWith(
       expect.objectContaining({
         action: "order.refund_processed",
-        metadata: expect.objectContaining({ refundAmount: 849.15, itemsTotal: 999 }),
+        metadata: expect.objectContaining({ refundAmount: 999, itemsTotal: 999 }),
       })
     );
   });
@@ -554,11 +665,11 @@ describe("processRefund", () => {
   it("the response is the number a human enters at the bank, not a claim that money moved", async () => {
     Order.findById.mockResolvedValue(paidOrder());
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    const { req, res } = makeReqRes({ reasonCode: "CHANGED_MIND" }, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
     await orderController.processRefund(req, res, jest.fn());
 
     const body = res.json.mock.calls[0][0];
-    expect(body.message).toContain("849.15");
+    expect(body.message).toContain("999");
     expect(body.message.toLowerCase()).toContain("enter");
   });
 
@@ -569,14 +680,14 @@ describe("processRefund", () => {
     Notification.create.mockResolvedValue({});
     Order.findById.mockResolvedValue(paidOrder());
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    const { req, res } = makeReqRes({ reasonCode: "CHANGED_MIND" }, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
     await orderController.processRefund(req, res, jest.fn());
 
     expect(Notification.create).toHaveBeenCalledWith(
       expect.objectContaining({ type: "order", relatedId: "order1" })
     );
     const notification = Notification.create.mock.calls[0][0];
-    expect(notification.message).toContain("849.15");
+    expect(notification.message).toContain("999");
     expect(notification.message).toContain("Business Center");
   });
 
@@ -585,7 +696,7 @@ describe("processRefund", () => {
     const order = paidOrder();
     Order.findById.mockResolvedValue(order);
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    const { req, res } = makeReqRes({ reasonCode: "CHANGED_MIND" }, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
     await orderController.processRefund(req, res, jest.fn());
 
     expect(order.save).toHaveBeenCalled();
@@ -596,7 +707,7 @@ describe("processRefund", () => {
 describe("markRefundEnteredAtBank — the manual step, recorded", () => {
   const refundedOrder = (overrides = {}) => ({
     _id: "order1",
-    refund: { amount: 849.15, approvedAt: new Date("2026-09-06T10:00:00Z") },
+    refund: { amount: 999, approvedAt: new Date("2026-09-06T10:00:00Z") },
     save: jest.fn().mockResolvedValue(true),
     ...overrides,
   });
@@ -613,7 +724,7 @@ describe("markRefundEnteredAtBank — the manual step, recorded", () => {
   it("refuses an order that has no recorded refund", async () => {
     Order.findById.mockResolvedValue(refundedOrder({ refund: undefined }));
 
-    const { req, res } = makeReqRes({}, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
+    const { req, res } = makeReqRes({ reasonCode: "CHANGED_MIND" }, { params: { id: "order1" }, user: { email: "admin@upcellit.com" } });
     await orderController.markRefundEnteredAtBank(req, res, jest.fn());
 
     expect(res.statusCode).toBe(400);
@@ -637,7 +748,7 @@ describe("markRefundEnteredAtBank — the manual step, recorded", () => {
     Order.findById.mockResolvedValue(
       refundedOrder({
         refund: {
-          amount: 849.15,
+          amount: 999,
           approvedAt: new Date(),
           enteredAtBankAt: new Date(),
           enteredAtBankBy: "yasir@upcellit.com",
@@ -664,5 +775,192 @@ describe("markRefundEnteredAtBank — the manual step, recorded", () => {
         actorEmail: "yasir@upcellit.com",
       })
     );
+  });
+});
+
+// T02 — where the parcel is. Until now an order was paid for and then went
+// quiet: nothing on the record said which carrier had it or what the number
+// was, so "where is my order" could only be answered by a person.
+// This file's res.json is a bare jest.fn(), so the payload it was called with
+// is the only place the response body exists.
+const sent = (res) => res.json.mock.calls[0][0];
+
+describe("recordOrderShipment", () => {
+  const { trackingUrlFor } = orderController;
+
+  const shippable = (overrides = {}) => ({
+    _id: "order1",
+    email: "buyer@example.com",
+    paid: true,
+    status: "Processing",
+    items: [{ name: "iPhone 15 Pro" }],
+    save: jest.fn().mockResolvedValue(true),
+    ...overrides,
+  });
+
+  const ship = async (order, body = {}) => {
+    Order.findById.mockResolvedValue(order);
+    Order.findOne.mockReturnValue({ select: () => ({ lean: async () => null }) });
+
+    const { req, res, next } = makeReqRes(
+      { carrier: "FedEx", trackingNumber: "794657312345", ...body },
+      { params: { id: "6a79f7298341f33d9a65b0b7" }, user: { id: "u1", email: "yasir@upcellit.com", role: "admin" } }
+    );
+    await orderController.recordOrderShipment(req, res, next);
+    if (next.mock.calls.length) throw next.mock.calls[0][0];
+    return { res, order };
+  };
+
+  it("records the carrier and tracking number and moves the order to Shipped", async () => {
+    const order = shippable();
+    const { res } = await ship(order);
+
+    // Not res.statusCode: this file's helper starts at 200, so that would
+    // pass for a controller that answered nothing at all.
+    expect(sent(res)).toMatchObject({ ok: true, status: "Shipped" });
+    expect(order.fulfilment).toMatchObject({ carrier: "FedEx", trackingNumber: "794657312345" });
+    expect(order.status).toBe("Shipped");
+  });
+
+  it("stamps shippedAt, because the return window counts from it", async () => {
+    // resolveWindowStart falls back to shippedAt + 3 business days when no
+    // delivery was ever recorded.
+    const order = shippable();
+    await ship(order);
+
+    expect(order.shippedAt).toBeInstanceOf(Date);
+  });
+
+  it("leaves shippedAt alone when a number is corrected later", async () => {
+    // Otherwise fixing a typo hands the customer a fresh return window.
+    const first = new Date("2026-09-01T10:00:00Z");
+    const order = shippable({ shippedAt: first, fulfilment: { trackingNumber: "OLD123456" } });
+
+    await ship(order, { trackingNumber: "794657312345" });
+
+    expect(order.shippedAt).toEqual(first);
+  });
+
+  it("refuses a shipment with no tracking number", async () => {
+    const { res } = await ship(shippable(), { trackingNumber: "" });
+
+    expect(res.statusCode).toBe(400);
+    expect(sent(res).error).toMatch(/tracking number/i);
+  });
+
+  it("refuses a carrier it does not know", async () => {
+    const { res } = await ship(shippable(), { carrier: "Pigeon" });
+
+    expect(res.statusCode).toBe(400);
+    expect(sent(res).error).toMatch(/carrier/i);
+  });
+
+  it("refuses a tracking number already on another order", async () => {
+    // One parcel, one order. Otherwise a customer tracking theirs sees
+    // somebody else's, and a carrier update lands on the wrong record.
+    const order = shippable();
+    Order.findById.mockResolvedValue(order);
+    Order.findOne.mockReturnValue({ select: () => ({ lean: async () => ({ _id: "other-order" }) }) });
+
+    const { req, res, next } = makeReqRes(
+      { carrier: "FedEx", trackingNumber: "794657312345" },
+      { params: { id: "6a79f7298341f33d9a65b0b7" }, user: { role: "admin" } }
+    );
+    await orderController.recordOrderShipment(req, res, next);
+
+    expect(res.statusCode).toBe(409);
+    expect(sent(res).trackingNumberInUse).toBe("other-order");
+    expect(order.save).not.toHaveBeenCalled();
+  });
+
+  it("refuses to ship an order that has not been paid for", async () => {
+    const { res } = await ship(shippable({ paid: false }));
+
+    expect(res.statusCode).toBe(400);
+    expect(sent(res).error).toMatch(/paid/i);
+  });
+
+  it("emails the customer the first time, and not again on a correction", async () => {
+    // "Your order is on its way" twice, for one parcel, reads as two parcels.
+    const first = await ship(shippable());
+    expect(sent(first.res).emailed).toBe(true);
+
+    const again = await ship(shippable({ fulfilment: { trackingNumber: "OLD123456" } }));
+    expect(sent(again.res).emailed).toBe(false);
+  });
+
+  it("records who marked it shipped, and keeps that off the customer view", async () => {
+    const { order } = await ship(shippable());
+    expect(order.fulfilment.shippedBy).toBe("yasir@upcellit.com");
+
+    const { toCustomerOrder } = require("../src/utils/orderView");
+    const view = toCustomerOrder({ _id: "order1", fulfilment: order.fulfilment });
+
+    expect(view.fulfilment).toEqual({
+      carrier: "FedEx",
+      trackingNumber: "794657312345",
+      trackingUrl: "https://www.fedex.com/fedextrack/?trknbr=794657312345",
+    });
+    // The staff name and UpCell's own label document stay behind.
+    expect(view.fulfilment.shippedBy).toBeUndefined();
+    expect(view.fulfilment.labelUrl).toBeUndefined();
+  });
+
+  it("404s an order that is not there", async () => {
+    Order.findById.mockResolvedValue(null);
+
+    const { req, res, next } = makeReqRes(
+      { carrier: "FedEx", trackingNumber: "794657312345" },
+      { params: { id: "6a79f7298341f33d9a65b0b7" }, user: { role: "admin" } }
+    );
+    await orderController.recordOrderShipment(req, res, next);
+
+    expect(res.statusCode).toBe(404);
+  });
+
+  describe("tracking links", () => {
+    it("builds one for each carrier that has a tracking page", () => {
+      expect(trackingUrlFor("FedEx", "794657312345")).toMatch(/fedex\.com.*794657312345/);
+      expect(trackingUrlFor("UPS", "1Z999AA10123456784")).toMatch(/ups\.com/);
+      expect(trackingUrlFor("USPS", "9400111899223197428490")).toMatch(/usps\.com/);
+      expect(trackingUrlFor("DHL", "1234567890")).toMatch(/dhl\.com/);
+    });
+
+    it("gives none for Other, rather than a guess that 404s", () => {
+      // A dead link is worse than the number on its own, which a customer can
+      // paste anywhere.
+      expect(trackingUrlFor("Other", "12345678")).toBeNull();
+    });
+
+    it("escapes the number into the URL", () => {
+      expect(trackingUrlFor("FedEx", "abc def")).toContain("abc%20def");
+    });
+  });
+});
+
+describe("orderShippedEmail", () => {
+  const { orderShippedEmail } = require("../src/services/emailTemplates");
+
+  it("puts the tracking number in the subject and the link in the button", () => {
+    const { subject, html } = orderShippedEmail({
+      orderId: "order1",
+      carrier: "FedEx",
+      trackingNumber: "794657312345",
+      trackingUrl: "https://www.fedex.com/fedextrack/?trknbr=794657312345",
+      itemNames: ["iPhone 15 Pro"],
+    });
+
+    expect(subject).toContain("794657312345");
+    expect(html).toContain("https://www.fedex.com/fedextrack/?trknbr=794657312345");
+    expect(html).toContain("Track Your Order");
+    expect(html).toContain("iPhone 15 Pro");
+  });
+
+  it("falls back to the account page when the carrier has no tracking page", () => {
+    const { html } = orderShippedEmail({
+      orderId: "order1", carrier: "Other", trackingNumber: "12345678", trackingUrl: null,
+    });
+
+    expect(html).toContain("View Your Order");
   });
 });

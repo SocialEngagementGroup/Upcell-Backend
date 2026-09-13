@@ -4,6 +4,7 @@ const {
   isAllowedFolder,
   productFolder,
   buildPublicId,
+  inspectionFolder,
 } = require("../constants/cloudinary");
 
 // Upload targets the client may ask for, by name. The client never sends a
@@ -16,6 +17,9 @@ const UPLOAD_TARGETS = {
   hero: () => CLOUDINARY_FOLDERS.MARKETING_HERO,
   ad: () => CLOUDINARY_FOLDERS.MARKETING_ADS,
   static: () => CLOUDINARY_FOLDERS.STATIC,
+  // Inspection photos of a returned device.
+  // context is the RMA, so each return's photos land in their own folder.
+  return_photo: (context) => inspectionFolder(context),
 };
 
 // Cloudinary treats a signature as valid for one hour. Nothing here needs a

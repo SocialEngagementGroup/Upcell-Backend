@@ -39,6 +39,13 @@ const OrderItemSchema = new Schema(
     // computed independently, with nothing enforcing they matched.
     unitPriceCents: { type: Number, required: true, min: 0 },
     lineTotalCents: { type: Number, required: true, min: 0 },
+    // Which physical device went out of the door, copied from the variation at
+    // checkout rather than looked up later. A snapshot for the same reason the
+    // name and price are: the catalogue record can be edited or deleted, and
+    // this has to still answer "is the phone on the bench the phone we sold
+    // them?" a year afterwards, in a dispute. See utils/deviceIdentity.js.
+    imei: String,
+    serialNumber: String,
   },
   { _id: false }
 );
@@ -56,6 +63,10 @@ const OrderSchema = new Schema(
     items: [OrderItemSchema],
     shippingCents: Number,
     taxCents: Number,
+    // The rate that produced taxCents, recorded on the order rather than read
+    // from config at refund time. Config is today's answer; this is the one
+    // that was actually charged.
+    taxRate: Number,
     subtotalCents: Number,
     totalCents: Number,
     // Clerk user id of the account that placed the order. This — not `email` —
@@ -65,6 +76,28 @@ const OrderSchema = new Schema(
     // as evidence in a chargeback, since it only proves someone typed it.
     // Absent on orders predating this field and on admin-created Manual orders.
     userId: { type: String, index: true },
+
+    // When the "how did you get on" email went out. One per order, ever —
+    // its presence is what stops the daily job asking again, which is why it
+    // is written before the send rather than after.
+    reviewPromptSentAt: Date,
+
+    // Placed without an account. The order is identified by a token in a link
+    // instead of by a Clerk user id.
+    guest: { type: Boolean, default: false },
+
+    // The SHA-256 of that token, never the token. select:false keeps it out of
+    // every query that does not ask, but the hashing is what protects it — see
+    // utils/accessToken.js for why one is not a substitute for the other.
+    guestAccessToken: { type: String, select: false },
+    guestTokenExpiresAt: Date,
+
+    // Chargeback evidence. The IP is a salted hash: the question a chargeback
+    // asks is "did these two orders come from the same place", which a digest
+    // answers, and the raw value would only add the ability to tell where the
+    // customer lives.
+    checkoutIpHash: { type: String, select: false },
+    userAgent: { type: String, select: false },
     name: String,
     // Contact address for this order's receipt. Deliberately still the form
     // value: customers legitimately send a receipt somewhere other than their
@@ -127,6 +160,22 @@ const OrderSchema = new Schema(
     // the order genuinely is paid, and rewriting status to "payment failed"
     // would hide a charge that really happened. A person has to resolve it,
     // which is why the reason is stored in words rather than a code.
+    // How the order got to the customer.
+    //
+    // No shippedAt or deliveredAt in here on purpose, even though a shipment
+    // is what sets them. Both already exist at the top level and the return
+    // window reads them — resolveWindowStart falls back to shippedAt + 3 days
+    // when no delivery was recorded. A second copy is a second thing to keep
+    // in step, and the day they disagree the customer's 30 days start on the
+    // wrong date.
+    fulfilment: {
+      carrier: String,
+      trackingNumber: String,
+      labelUrl: String,
+      // Who marked it shipped. Not shown to the customer.
+      shippedBy: String,
+    },
+
     fulfilmentBlocked: { type: Boolean, default: false },
     fulfilmentBlockReason: String,
     // When the review pending window ran out and nothing had actioned it. The
@@ -151,8 +200,12 @@ const OrderSchema = new Schema(
       // Required by the controller whenever restockingFeeWaived is true, so a
       // waived fee always has a reason attached, not just a checked box.
       waiveReason: String,
-      // itemsTotal minus restockingFee. What the customer is owed, and the
-      // figure staff type into the Business Center.
+      // The 8% sales tax charged on the returned items, handed back in full.
+      // Confirmed by the client on 9 Sep 2026; refunds recorded before that
+      // date have no such figure and left the tax with UpCell.
+      taxRefunded: Number,
+      // itemsTotal minus restockingFee plus taxRefunded. What the customer is
+      // owed, and the figure staff type into the Business Center.
       amount: Number,
       // productIds of the exact line items refunded. A partial refund on a
       // multi-item order needs this to say which items, not just how much.
@@ -179,6 +232,15 @@ const OrderSchema = new Schema(
     // afterwards: a status corrected back and forth must not quietly restart
     // someone's return window.
     deliveredAt: Date,
+
+    // When the parcel actually left. Used only as a fallback for the return
+    // window: if a delivery was never recorded, the window starts three days
+    // after this rather than from the order date, which would eat however long
+    // the parcel spent in transit out of the customer's 30 days.
+    //
+    // Stamped once, like deliveredAt, so a status corrected back and forth
+    // cannot restart anybody's window.
+    shippedAt: Date,
   },
   { timestamps: true }
 );
@@ -194,7 +256,16 @@ OrderSchema.index({ boaTransactionUuid: 1 }, { unique: true, sparse: true });
 // different orders if a reference number were ever resolved wrong. sparse,
 // because Manual orders and orders still pending never had a bank transaction.
 OrderSchema.index({ boaTransactionId: 1 }, { unique: true, sparse: true });
+// Claiming guest orders into an account after sign-in looks orders up by
+// email and guest flag.
+OrderSchema.index({ email: 1, guest: 1 });
+
 OrderSchema.index({ email: 1, paid: 1 });
+// Two orders sharing a tracking number means one parcel, two answers. Sparse
+// because most orders have not shipped yet, and those must not all collide on
+// a missing value.
+OrderSchema.index({ "fulfilment.trackingNumber": 1 }, { sparse: true });
+
 OrderSchema.index({ status: 1, updatedAt: -1 });
 OrderSchema.index({ createdAt: 1 });
 

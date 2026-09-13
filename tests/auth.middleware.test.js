@@ -45,8 +45,8 @@ const makeClerkUser = (overrides = {}) => ({
   id: "user_123",
   primaryEmailAddressId: "idn_primary",
   emailAddresses: [
-    { id: "idn_secondary", emailAddress: "secondary@example.com" },
-    { id: "idn_primary", emailAddress: "primary@example.com" },
+    { id: "idn_secondary", emailAddress: "secondary@example.com", verification: { status: "verified" } },
+    { id: "idn_primary", emailAddress: "primary@example.com", verification: { status: "verified" } },
   ],
   publicMetadata: { role: "customer" },
   ...overrides,
@@ -63,7 +63,9 @@ describe("verifyToken — bearer token extraction", () => {
     await verifyToken(req, res, next);
 
     expect(mockVerifyToken).toHaveBeenCalledWith("good-token", { secretKey: "sk_test_fake" });
-    expect(req.user).toEqual({ id: "user_123", email: "primary@example.com", role: "customer" });
+    expect(req.user).toEqual({
+      id: "user_123", email: "primary@example.com", emailVerified: true, role: "customer",
+    });
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBeNull();
   });
@@ -357,7 +359,9 @@ describe("optionalAuth", () => {
     const { req, res, next } = makeReqRes("Bearer good-token");
     await optionalAuth(req, res, next);
 
-    expect(req.user).toEqual({ id: "user_123", email: "primary@example.com", role: "customer" });
+    expect(req.user).toEqual({
+      id: "user_123", email: "primary@example.com", emailVerified: true, role: "customer",
+    });
     expect(next).toHaveBeenCalledTimes(1);
   });
 
@@ -413,5 +417,64 @@ describe("optionalAuth", () => {
     await optionalAuth(req, res, next);
 
     expect(next).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Whether Clerk has actually confirmed the address, not just that one is on
+// the account. It matters wherever an email proves ownership of something —
+// without it, claiming a legacy order would only take signing up with the
+// right address and never answering the confirmation mail.
+describe("emailVerified", () => {
+  const withPrimary = (verification) => makeClerkUser({
+    emailAddresses: [{ id: "idn_primary", emailAddress: "primary@example.com", verification }],
+  });
+
+  it("is true when the primary address is verified", async () => {
+    mockGetUser.mockResolvedValueOnce(withPrimary({ status: "verified" }));
+    const { req, res, next } = makeReqRes("Bearer good-token");
+    await verifyToken(req, res, next);
+
+    expect(req.user.emailVerified).toBe(true);
+  });
+
+  it("is false when it is still unverified", async () => {
+    mockGetUser.mockResolvedValueOnce(withPrimary({ status: "unverified" }));
+    const { req, res, next } = makeReqRes("Bearer good-token");
+    await verifyToken(req, res, next);
+
+    expect(req.user.emailVerified).toBe(false);
+  });
+
+  it("is false when Clerk sends no verification block at all", async () => {
+    mockGetUser.mockResolvedValueOnce(withPrimary(undefined));
+    const { req, res, next } = makeReqRes("Bearer good-token");
+    await verifyToken(req, res, next);
+
+    expect(req.user.emailVerified).toBe(false);
+  });
+
+  it("reads the primary address, not whichever is first", async () => {
+    // getPrimaryEmail falls back to emailAddresses[0]. If this read the same
+    // way, an unverified primary alongside a verified secondary would report
+    // verified — and the address it reported would not be the verified one.
+    mockGetUser.mockResolvedValueOnce(makeClerkUser({
+      primaryEmailAddressId: "idn_primary",
+      emailAddresses: [
+        { id: "idn_secondary", emailAddress: "old@example.com", verification: { status: "verified" } },
+        { id: "idn_primary", emailAddress: "primary@example.com", verification: { status: "unverified" } },
+      ],
+    }));
+    const { req, res, next } = makeReqRes("Bearer good-token");
+    await verifyToken(req, res, next);
+
+    expect(req.user.email).toBe("primary@example.com");
+    expect(req.user.emailVerified).toBe(false);
+  });
+
+  it("is set on optionalAuth too", async () => {
+    const { req, res, next } = makeReqRes("Bearer good-token");
+    await optionalAuth(req, res, next);
+
+    expect(req.user.emailVerified).toBe(true);
   });
 });

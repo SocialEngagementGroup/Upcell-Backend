@@ -90,3 +90,95 @@ describe("sales tax is charged, not just displayed", () => {
     expect(checkout.orderTotal(order)).toBe(totalPrice);
   });
 });
+
+// The rate itself. It used to be a constant in the middle of the checkout
+// controller, with three more copies hardcoded in the frontend.
+describe("the sales tax service", () => {
+  const { calculateTax, salesTaxRate } = require("../src/services/salesTax");
+
+  const withRate = (value, fn) => {
+    const saved = process.env.SALES_TAX_RATE;
+    if (value === undefined) delete process.env.SALES_TAX_RATE;
+    else process.env.SALES_TAX_RATE = String(value);
+    try { fn(); } finally {
+      if (saved === undefined) delete process.env.SALES_TAX_RATE;
+      else process.env.SALES_TAX_RATE = saved;
+    }
+  };
+
+  it("charges 8% on goods", () => {
+    expect(calculateTax({ goodsCents: 100000 })).toEqual({ taxCents: 8000, rate: 0.08 });
+  });
+
+  it("charges the same wherever it ships", () => {
+    // A deliberate simplification, not an oversight. UpCell has chosen one
+    // rate everywhere; the accountant sign-off is X10 in PIPELINE.md.
+    const ohio = calculateTax({ goodsCents: 100000, shipToState: "OH" });
+    const texas = calculateTax({ goodsCents: 100000, shipToState: "TX" });
+    const pickup = calculateTax({ goodsCents: 100000 });
+
+    expect(ohio.taxCents).toBe(8000);
+    expect(texas.taxCents).toBe(8000);
+    expect(pickup.taxCents).toBe(8000);
+  });
+
+  it("taxes nothing when there are no goods", () => {
+    // Shipping is never passed in, so it is never taxed. An order that is all
+    // shipping has no goods and owes nothing.
+    expect(calculateTax({ goodsCents: 0 }).taxCents).toBe(0);
+    expect(calculateTax({}).taxCents).toBe(0);
+    expect(calculateTax({ goodsCents: -100 }).taxCents).toBe(0);
+  });
+
+  it("reads the rate from the environment", () => {
+    withRate(0.075, () => {
+      expect(salesTaxRate()).toBe(0.075);
+      expect(calculateTax({ goodsCents: 100000 }).taxCents).toBe(7500);
+    });
+  });
+
+  it("falls back to 8% rather than to nothing", () => {
+    // A rate of 0 because somebody fat-fingered a deploy is not a failure
+    // anyone notices until an accountant does.
+    for (const bad of [undefined, "", "abc", -1, 2]) {
+      withRate(bad, () => expect(salesTaxRate()).toBe(0.08));
+    }
+  });
+
+  it("reads the environment on every call, not once at import", () => {
+    withRate(0.05, () => expect(salesTaxRate()).toBe(0.05));
+    withRate(0.09, () => expect(salesTaxRate()).toBe(0.09));
+  });
+
+  it("rounds to the cent", () => {
+    // 8% of $10.13 is 81.04 cents.
+    expect(calculateTax({ goodsCents: 1013 }).taxCents).toBe(81);
+    expect(calculateTax({ goodsCents: 1019 }).taxCents).toBe(82);
+  });
+
+  it("reports the rate it used, for storing on the order", () => {
+    withRate(0.075, () => {
+      expect(calculateTax({ goodsCents: 100000 }).rate).toBe(0.075);
+    });
+  });
+});
+
+describe("GET /tax-rate", () => {
+  const orderController = require("../src/controllers/order.controller");
+
+  it("tells the shop what rate to quote", () => {
+    const res = {
+      statusCode: null, body: null, headers: {},
+      set(k, v) { this.headers[k] = v; return this; },
+      status(c) { this.statusCode = c; return this; },
+      json(p) { this.body = p; return this; },
+    };
+
+    orderController.getTaxRate({}, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ rate: 0.08 });
+    // The same number for everyone, and printed on every receipt anyway.
+    expect(res.headers["Cache-Control"]).toMatch(/public/);
+  });
+});

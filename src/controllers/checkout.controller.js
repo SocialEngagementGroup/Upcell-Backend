@@ -3,8 +3,18 @@ const SingleVariation = require("../models/singleVariation.model");
 const PaymentEventLog = require("../models/paymentEventLog.model");
 const { round2 } = require("../utils/money");
 const { convertLineItems } = require("../utils/orderItems");
+const { calculateTax } = require("../services/salesTax");
+const { hasIdentity, identityRequired } = require("../constants/deviceIdentity");
+const {
+  guestFieldsFor,
+  issueGuestToken,
+  checkoutEvidence,
+} = require("../services/guestOrder");
 const { Resend } = require("resend");
 const { paymentReceiptEmail, adminNewOrderEmail } = require("../services/emailTemplates");
+
+// Where a customer's own link points. Same value the returns emails use.
+const SITE_URL = process.env.FRONTEND_URL || process.env.SITE_URL || "";
 const { EmailConfig } = require("../models/emailConfig.model");
 
 // Reads the "Customer emails" switch from Admin > Email Settings. Defaults to
@@ -88,11 +98,21 @@ exports.sendPaymentReceiptEmail = async (order) => {
 
     const lineItems = exports.orderLineItemsForReceipt(order);
     const total = exports.orderTotal(order);
+
+    // A guest's token is minted here, at the first email, because this is the
+    // first moment it can be: the plaintext cannot survive the trip to the
+    // bank and back. Null for a signed-in customer, who needs no link.
+    const guestToken = await issueGuestToken(order);
+    const orderUrl = guestToken
+      ? `${SITE_URL}/order/${order._id}?t=${encodeURIComponent(guestToken)}`
+      : null;
+
     const { subject, html } = paymentReceiptEmail({
       orderId: order._id,
       paidWith: order.paidWith,
       lineItems,
       total,
+      orderUrl,
     });
 
     await resend.emails.send({
@@ -122,11 +142,9 @@ const orderEmailFrom = process.env.EMAIL_FROM;
 // Sales tax rate charged at checkout. Defined once, here, because the customer
 // is shown this figure before paying and the bank is sent the same figure — the
 // two must never be able to drift apart.
-//
-// A single flat rate is a simplification: US sales tax varies by state, and some
-// states charge none at all. Confirmed with the client as the rate to use for
-// now; revisit if UpCell registers in more states.
-const SALES_TAX_RATE = 0.08;
+// The rate itself now lives in services/salesTax.js, read from env, so the
+// checkout, the refund and the two pages that quote a total all read one
+// number instead of four copies of it.
 
 // A multi-tab customer (or a slow first request they retry) can otherwise
 // create two separate, independently-payable orders for the same cart. These
@@ -234,6 +252,11 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
           metadata: {
             productId: info._id,
             quantity,
+            // The unit's own identity, carried onto the order so a return can
+            // be checked against what was actually shipped. Undefined for
+            // accessories and for anything entered before intake recorded it.
+            imei: info.imei || undefined,
+            serialNumber: info.serialNumber || undefined,
             // Rounded here rather than left as a raw product — a device
             // price times a quantity can drift a fraction of a cent in
             // floating point (99.99 * 3 stores as 299.96999999999997), and
@@ -271,7 +294,14 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
     (sum, item) => sum + (item?.price_data?.product_data?.metadata?.totalPaid || 0),
     0
   );
-  const taxAmount = Math.round(goodsTotal * SALES_TAX_RATE * 100) / 100;
+  // Rounded to cents before the rate is applied, so the tax is computed on
+  // the exact figure the customer is charged for goods rather than on a
+  // floating-point approximation of it.
+  const { taxCents, rate: taxRate } = calculateTax({
+    goodsCents: Math.round(goodsTotal * 100),
+    shipToState: state,
+  });
+  const taxAmount = taxCents / 100;
 
   if (taxAmount > 0) {
     line_items.push({
@@ -343,6 +373,37 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
   // this function and the conversion helper have fallen out of sync with
   // each other, which is worth knowing about immediately rather than
   // shipping an order silently missing part of its own total.
+  // Every unit going out has to be identifiable.
+  //
+  // Off until X9 — the physical audit — has happened: 954 of the 956 rows in
+  // the catalogue have no IMEI or serial recorded, so enforcing this today
+  // would refuse checkout for almost the whole shop. The flag is what that
+  // audit unlocks, and the check is written now so turning it on is a Vercel
+  // setting rather than a release.
+  if (identityRequired()) {
+    const unidentified = productsInfo.filter((product) => !hasIdentity(product).ok);
+
+    if (unidentified.length) {
+      const error = new Error(
+        "Some items in your cart cannot be sold right now. Please contact support."
+      );
+      error.status = 409;
+      // Named for staff, not shown to the customer: the message above is what
+      // they see, and a list of IMEIs would mean nothing to them.
+      error.details = unidentified.map((product) => ({
+        productId: String(product._id),
+        productName: product.productName,
+        missing: hasIdentity(product).missing,
+      }));
+      throw error;
+    }
+  }
+
+  // A guest gets a token instead of a user id, and the plaintext is returned
+  // to the caller because the receipt email is the only place it can be sent.
+  const guest = guestFieldsFor({ user: req.user });
+  const evidence = checkoutEvidence(req);
+
   const converted = convertLineItems(line_items);
   if (converted.unrecognized.length) {
     console.error(
@@ -352,14 +413,21 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
   }
 
   const order = {
+    ...guest.fields,
+    ...evidence,
     line_items,
     items: converted.items,
     shippingCents: converted.shippingCents,
     taxCents: converted.taxCents,
+    // Stored so a future rate change never rewrites what an old order was
+    // charged, and so a refund years later shares out the rate that applied
+    // on the day rather than today's.
+    taxRate,
     subtotalCents: converted.subtotalCents,
     totalCents: converted.totalCents,
-    // Set by verifyToken on the authenticated checkout routes. Undefined on
-    // the admin-created Manual path, which has no customer session.
+    // Set by optionalAuth when the customer is signed in. Undefined for a
+    // guest, and on the admin-created Manual path which has no session at
+    // all — which is why ownership can never be userId alone.
     userId: req.user?.id,
     name,
     email,
@@ -383,5 +451,5 @@ exports.makeOrderObjAndTotal = async ({ req, paidWith }) => {
     )
   );
 
-  return { order, totalPrice };
+  return { order, totalPrice , guestToken: guest.token };
 };

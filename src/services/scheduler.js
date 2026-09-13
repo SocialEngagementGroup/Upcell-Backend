@@ -1,10 +1,14 @@
 const { runReconciliation } = require("./reconciliation");
+const { runReturnJobs } = require("./returnMaintenance");
 
-// Deliberately setInterval and not a cron package. Render's free plan sleeps
-// the service when idle, so no in-process timer can be relied on to fire — a
-// scheduling library would add a dependency and still miss runs. This gives a
-// best-effort run whenever the server happens to be awake, and the admin
-// "Run check now" endpoint covers the rest until the plan is upgraded.
+// Deliberately setInterval and not a cron package. The service is on Render's
+// Starter plan now and stays awake, so an in-process timer does fire — which
+// makes a scheduling library a dependency that buys nothing this file does not
+// already do in fifteen lines.
+//
+// The admin "Run check now" endpoint stays. A restart resets the interval, and
+// a deploy at the wrong moment can still skip a window, so a person needs a
+// way to ask for the check rather than wait six hours for the next one.
 //
 // Keep the last result in memory so the admin page can show when the check
 // last ran without re-running it.
@@ -18,6 +22,14 @@ const getLastReport = () => lastReport;
 
 async function runNow(options) {
   lastReport = await runReconciliation(options);
+
+  // Returns maintenance rides along on the same timer rather than adding a
+  // second one. It is deliberately not allowed to fail the reconciliation
+  // report: a reminder email that did not send must not hide a payment
+  // discrepancy, which is the more serious of the two by a wide margin.
+  runReturnJobs().catch((error) =>
+    console.error("[returns] maintenance failed:", error?.message || error)
+  );
 
   const { critical = [], warnings = [] } = lastReport;
   if (critical.length || warnings.length) {

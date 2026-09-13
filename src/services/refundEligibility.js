@@ -2,25 +2,33 @@
 // from the controller so the rules can be tested against dates and orders
 // without a database, the same way refund.js is.
 //
-// The rules are the client's, confirmed: 30 days, counted from delivery.
+// Thirty days for every reason. Where those thirty days start is the part with
+// any judgement in it, and that lives in services/returnWindow.js — delivery
+// date where the carrier recorded one, ship date plus three where it did not,
+// and a dated staff override with a note where a person had to decide.
 const { isRefundableLine } = require("./refund");
+const {
+  RETURN_WINDOW_DAYS,
+  resolveWindowStart,
+  transitClaimInTime,
+} = require("./returnWindow");
+const { claimKind, checkWarrantyReason, WARRANTY_REASON_CODES } = require("./warranty");
 
-const RETURN_WINDOW_DAYS = 30;
-const DAY_MS = 24 * 60 * 60 * 1000;
+// Reasons that are a claim about the journey rather than about the device.
+// These have their own, much shorter deadline: after a few days nobody can
+// tell a courier's dent from a kitchen-counter dent.
+const TRANSIT_DAMAGE_REASONS = ["ARRIVED_DAMAGED_BOX", "PHYSICAL_DAMAGE_ON_ARRIVAL"];
 
 /**
  * The last moment a customer can ask to return this order.
  *
- * Counted from deliveredAt, not createdAt. An order placed on the 1st and
- * delivered on the 10th gives the customer until the 9th of the next month —
- * counting from the order date would quietly eat nine days of their window.
- *
- * Returns null when the order has not been delivered, which is not the same as
- * "expired": the window has not started yet.
+ * Returns null when the window has not started — the order has neither been
+ * delivered nor shipped. That is not the same as expired: the customer has
+ * done nothing wrong and simply has to wait.
  */
-function returnWindowClosesAt(order) {
-  if (!order?.deliveredAt) return null;
-  return new Date(new Date(order.deliveredAt).getTime() + RETURN_WINDOW_DAYS * DAY_MS);
+function returnWindowClosesAt(order, reasonCode, options = {}) {
+  const window = resolveWindowStart(order, options);
+  return window ? window.expiresAt : null;
 }
 
 /**
@@ -33,7 +41,7 @@ function returnWindowClosesAt(order) {
  * @returns {{ok: true, closesAt: Date, items: object[]}
  *          | {ok: false, reason: string, message: string}}
  */
-function checkReturnEligibility(order, { now = new Date() } = {}) {
+function checkReturnEligibility(order, { now = new Date(), reasonCode, override } = {}) {
   if (!order) {
     return { ok: false, reason: "not_found", message: "Order not found." };
   }
@@ -54,24 +62,63 @@ function checkReturnEligibility(order, { now = new Date() } = {}) {
     };
   }
 
-  // Not delivered yet. Deliberately separate from an expired window: the
-  // customer has done nothing wrong and simply has to wait.
-  if (!order.deliveredAt) {
+  const windowDays = RETURN_WINDOW_DAYS;
+  const window = resolveWindowStart(order, { override });
+
+  // Neither delivered nor shipped. The window has not opened yet, which is a
+  // different answer from having missed it.
+  if (!window) {
     return {
       ok: false,
       reason: "not_delivered",
       message:
-        "This order has not been delivered yet. The 30-day return window starts on the day it arrives.",
+        `This order has not been delivered yet. The ${windowDays}-day return window starts on the day it arrives.`,
     };
   }
 
-  const closesAt = returnWindowClosesAt(order);
-  if (now > closesAt) {
+  const closesAt = window.expiresAt;
+
+  // Past 30 days is not automatically a no. The first year is covered by the
+  // warranty, and a device that is broken in month eight is a claim UpCell
+  // advertises it will honour — just not one that ends in a refund.
+  const { kind, warrantyEndsAt } = claimKind(order, { now, override });
+
+  if (kind === "EXPIRED") {
     return {
       ok: false,
       reason: "window_closed",
-      message: `The 30-day return window for this order closed on ${closesAt.toDateString()}.`,
+      message:
+        `The ${windowDays}-day return window for this order closed on ${closesAt.toDateString()}, ` +
+        `and the 12-month warranty ended on ${warrantyEndsAt.toDateString()}.`,
+      closesAt,
+      warrantyEndsAt,
     };
+  }
+
+  // Only once a reason has actually been chosen. This same function answers
+  // the page load, which happens before the customer has picked anything, and
+  // refusing there would show "choose a fault" as an error above a form they
+  // have not been given yet. Submitting without one is refused by the
+  // controller, which is where the requirement belongs.
+  if (kind === "WARRANTY" && reasonCode) {
+    const allowed = checkWarrantyReason(reasonCode, { closesAt, warrantyEndsAt });
+    if (!allowed.ok) {
+      return { ok: false, reason: allowed.reason, message: allowed.message, closesAt, warrantyEndsAt };
+    }
+  }
+
+  // Damage in transit is a claim about the journey, and it has a much shorter
+  // deadline than the device itself does.
+  if (kind === "RETURN" && TRANSIT_DAMAGE_REASONS.includes(reasonCode)) {
+    const claim = transitClaimInTime(order, { now });
+    if (!claim.ok) {
+      return {
+        ok: false,
+        reason: "transit_claim_late",
+        message: claim.message,
+        closesAt,
+      };
+    }
   }
 
   // Tax and shipping lines carry no productId — only real devices and
@@ -85,7 +132,25 @@ function checkReturnEligibility(order, { now = new Date() } = {}) {
     };
   }
 
-  return { ok: true, closesAt, items };
+  return {
+    ok: true,
+    // RETURN or WARRANTY. The caller shows different words, offers different
+    // reasons and pays a different amount, and this is the one place that
+    // decides which.
+    kind,
+    closesAt,
+    warrantyEndsAt,
+    // Only the hardware faults, once the 30 days are up. Sent so the form can
+    // draw the shorter list rather than offering a customer a reason the
+    // server will then refuse.
+    reasonCodes: kind === "WARRANTY" ? WARRANTY_REASON_CODES : null,
+    windowDays,
+    // Where the clock started, so the queue can show it and staff can see
+    // when it was estimated rather than recorded.
+    startedFrom: window.startedFrom,
+    startDate: window.startDate,
+    items,
+  };
 }
 
 /**

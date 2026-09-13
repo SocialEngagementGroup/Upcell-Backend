@@ -1,4 +1,5 @@
 const {
+  revisedOfferSchema,
   productFilterSchema,
   wholesaleFormSchema,
   orderSchema,
@@ -641,5 +642,285 @@ describe("cartLookupSchema (POST /cart)", () => {
     // The original bug: a non-array ids throws an unhandled CastError deep in
     // the driver, which the global handler turns into a 500.
     expect(() => cartLookupSchema.parse({ ids: { $ne: null } })).toThrow();
+  });
+});
+
+// Every other string on productSchema was capped; the colour fields were not,
+// which made them the one place an oversized value could reach the database on
+// this route. Admin-only, so never publicly reachable — capped anyway, because
+// a colour is a short label and a hex code, never prose.
+describe("productSchema.color — length caps", () => {
+  const validProduct = (color) => ({
+    parentCatagory: "a".repeat(24),
+    productName: "iPhone 15",
+    storage: "128GB",
+    color,
+    price: 999,
+    condition: "Excellent",
+    image: "https://example.com/a.png",
+  });
+
+  it("accepts a normal colour", () => {
+    const result = productSchema.safeParse(validProduct({ name: "Space Black", value: "#1d1d1f" }));
+
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a colour name longer than 60 characters", () => {
+    const result = productSchema.safeParse(validProduct({ name: "x".repeat(61) }));
+
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects an oversized colour value", () => {
+    const result = productSchema.safeParse(
+      validProduct({ name: "Black", value: "#".repeat(41) })
+    );
+
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects an oversized hex", () => {
+    const result = productSchema.safeParse(
+      validProduct({ name: "Black", hex: "f".repeat(41) })
+    );
+
+    expect(result.success).toBe(false);
+  });
+
+  it("still requires a colour name", () => {
+    const result = productSchema.safeParse(validProduct({ name: "   " }));
+
+    expect(result.success).toBe(false);
+  });
+});
+
+// Unbounded arrays on write routes. Caps sit well above the real catalogue
+// (largest family 20 variants, most images 6) so they bound an accident or an
+// attack without ever refusing genuine data.
+describe("admin write schemas — array length caps", () => {
+  const variant = { storage: "128GB", color: { name: "Black" }, price: 999, condition: "Excellent" };
+  // Distinct storage+colour pairs. These tests are about the length cap, and
+  // repeating one variant now trips the duplicate rule instead, which would
+  // make them pass or fail for the wrong reason.
+  const distinctVariants = (count) => Array.from({ length: count }, (_, index) => ({
+    ...variant,
+    color: { name: `Colour ${index}` },
+  }));
+  const batch = (overrides) => ({
+    productName: "iPhone 15",
+    categoryName: "iPhone",
+    image: "https://example.com/a.png",
+    variants: [variant],
+    ...overrides,
+  });
+
+  it("accepts a realistic product", () => {
+    expect(productCreateSchema.safeParse(batch()).success).toBe(true);
+  });
+
+  it("accepts more variants than the largest real family", () => {
+    expect(productCreateSchema.safeParse(batch({ variants: distinctVariants(50) })).success).toBe(true);
+  });
+
+  // Each variant becomes its own document, so this is one request creating
+  // thousands of them — a pasted spreadsheet does it by accident.
+  it("refuses a batch of 500 variants", () => {
+    expect(productCreateSchema.safeParse(batch({ variants: distinctVariants(500) })).success).toBe(false);
+  });
+
+  it("still requires at least one variant", () => {
+    expect(productCreateSchema.safeParse(batch({ variants: [] })).success).toBe(false);
+  });
+
+  it("refuses an absurd number of product images", () => {
+    const images = Array(200).fill({ url: "https://example.com/a.png" });
+    expect(productCreateSchema.safeParse(batch({ images })).success).toBe(false);
+  });
+
+  it("caps category images, which had no limit at all", () => {
+    const ok = categorySchema.safeParse({ modelName: "iPhone", images: Array(5).fill({ url: "a" }) });
+    const tooMany = categorySchema.safeParse({ modelName: "iPhone", images: Array(200).fill({ url: "a" }) });
+
+    expect(ok.success).toBe(true);
+    expect(tooMany.success).toBe(false);
+  });
+});
+
+// The only public, unauthenticated route that builds a Mongo query from a
+// caller-supplied array. Without a cap a single 2mb body became an $in with
+// tens of thousands of terms.
+describe("productFilterSchema — bounded, because it is public", () => {
+  it("accepts a normal filter", () => {
+    const result = productFilterSchema.safeParse({ productName: ["iPhone 15"], storage: ["128GB"] });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("refuses 5,000 filter terms", () => {
+    const result = productFilterSchema.safeParse({ productName: Array(5000).fill("x") });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("refuses a single enormous term", () => {
+    const result = productFilterSchema.safeParse({ storage: ["x".repeat(5000)] });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("still defaults every field when nothing is sent", () => {
+    const result = productFilterSchema.safeParse({});
+
+    expect(result.success).toBe(true);
+    expect(result.data.productName).toEqual([]);
+  });
+});
+
+describe("productCreateSchema — image refs and duplicate variants", () => {
+  const { productCreateSchema } = require("../src/schemas/request.schemas");
+
+  const base = {
+    productName: "iPhone Air",
+    categoryName: "iPhone",
+    image: "https://res.cloudinary.com/x/image/upload/upcell/products/iphone/air--abc",
+  };
+  const images = [{
+    url: "https://res.cloudinary.com/x/image/upload/upcell/products/iphone/air--abc",
+    publicId: "upcell/products/iphone/air--abc",
+    width: 800,
+    height: 800,
+  }];
+  const variant = (storage, name) => ({ storage, color: { name, value: "#8AA4C4" }, price: 11 });
+
+  it("keeps publicId on image refs — validation replaces req.body, so a missing field is dropped", () => {
+    const parsed = productCreateSchema.parse({
+      ...base, images, variants: [variant("128GB", "Blue")],
+    });
+
+    expect(parsed.images[0].publicId).toBe("upcell/products/iphone/air--abc");
+    expect(parsed.images[0].width).toBe(800);
+  });
+
+  it("rejects two variants with the same storage and colour", () => {
+    expect(() => productCreateSchema.parse({
+      ...base, images, variants: [variant("128GB", "Blue"), variant("128GB", "Blue")],
+    })).toThrow(/both 128GB in Blue/);
+  });
+
+  it("treats differing case and whitespace as the same pair", () => {
+    expect(() => productCreateSchema.parse({
+      ...base, images, variants: [variant("128GB", "Blue"), variant("128gb", "  blue ")],
+    })).toThrow();
+  });
+
+  it("allows the same colour at different storages", () => {
+    expect(() => productCreateSchema.parse({
+      ...base, images, variants: [variant("128GB", "Blue"), variant("256GB", "Blue")],
+    })).not.toThrow();
+  });
+
+  it("allows the same storage in different colours", () => {
+    expect(() => productCreateSchema.parse({
+      ...base, images, variants: [variant("128GB", "Blue"), variant("128GB", "Natural")],
+    })).not.toThrow();
+  });
+});
+
+// V3.7 — the two checks that answer with more than pass or fail.
+//
+// Validation replaces req.body wholesale, so a field the schema does not name
+// is stripped before any service sees it. These two were, which made every
+// inspection fail for not carrying the readings the form had just collected.
+describe("inspectionSubmitSchema — the measured and graded checks", () => {
+  const { inspectionSubmitSchema } = require("../src/schemas/request.schemas");
+
+  const parse = (checklist) => inspectionSubmitSchema.safeParse({ checklist, photos: [] });
+
+  it("keeps the battery percentage", () => {
+    const result = parse([{ key: "battery_health", result: "pass", value: 88 }]);
+
+    expect(result.success).toBe(true);
+    expect(result.data.checklist[0].value).toBe(88);
+  });
+
+  it("keeps the cosmetic grade", () => {
+    const result = parse([{ key: "cosmetic_grade", result: "pass", grade: "GOOD" }]);
+
+    expect(result.success).toBe(true);
+    expect(result.data.checklist[0].grade).toBe("GOOD");
+  });
+
+  it("refuses a battery reading that is not a percentage", () => {
+    expect(parse([{ key: "battery_health", result: "pass", value: 120 }]).success).toBe(false);
+    expect(parse([{ key: "battery_health", result: "pass", value: -1 }]).success).toBe(false);
+  });
+
+  it("refuses a grade that is not on the scale", () => {
+    // A/B/C was the old internal scale and no longer exists anywhere else.
+    expect(parse([{ key: "cosmetic_grade", result: "pass", grade: "B" }]).success).toBe(false);
+  });
+
+  it("takes the override grade on the same scale as the catalogue", () => {
+    const ok = inspectionSubmitSchema.safeParse({
+      checklist: [{ key: "powers_on", result: "pass" }], photos: [], grade: "EXCELLENT",
+    });
+    const bad = inspectionSubmitSchema.safeParse({
+      checklist: [{ key: "powers_on", result: "pass" }], photos: [], grade: "A",
+    });
+
+    expect(ok.success).toBe(true);
+    expect(bad.success).toBe(false);
+  });
+});
+
+// A revised offer, and the field that was silently being thrown away.
+//
+// validateRequest replaces req.body with the parsed result, so any field this
+// schema does not name never reaches the service. photoIds was not named, and
+// services/revisedOffer.js requires it — so every deduction was refused for
+// having no photo, on returns as well as trade-ins.
+describe("revisedOfferSchema", () => {
+  const deduction = (over = {}) => ({
+    type: "DAMAGE",
+    amount: 90,
+    reason: "Deep scratch across the back glass",
+    findingKey: "cosmetic_grade",
+    photoIds: ["upcell/returns/photo-1"],
+    ...over,
+  });
+
+  it("keeps photoIds, which the offer builder cannot do without", () => {
+    const parsed = revisedOfferSchema.parse({ deductions: [deduction()] });
+
+    expect(parsed.deductions[0].photoIds).toEqual(["upcell/returns/photo-1"]);
+  });
+
+  it("demands at least one photo per deduction", () => {
+    // A customer told their offer dropped $90 for a scratch can ask to see it.
+    const result = revisedOfferSchema.safeParse({ deductions: [deduction({ photoIds: [] })] });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("refuses a deduction with no photos field at all", () => {
+    const { photoIds, ...withoutPhotos } = deduction();
+    const result = revisedOfferSchema.safeParse({ deductions: [withoutPhotos] });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("keeps findingKey, the check the deduction points at", () => {
+    const parsed = revisedOfferSchema.parse({ deductions: [deduction()] });
+
+    expect(parsed.deductions[0].findingKey).toBe("cosmetic_grade");
+  });
+
+  it("refuses a deduction with no reason a customer can read", () => {
+    expect(revisedOfferSchema.safeParse({ deductions: [deduction({ reason: "bad" })] }).success).toBe(false);
+  });
+
+  it("refuses an offer with no deductions — that is a full refund", () => {
+    expect(revisedOfferSchema.safeParse({ deductions: [] }).success).toBe(false);
   });
 });

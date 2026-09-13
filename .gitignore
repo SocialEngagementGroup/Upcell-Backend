@@ -17,3 +17,7 @@ scripts/backups/
 
 # Database dumps written by scripts/clear-test-data.js
 backups/
+
+# Data dumps written by scripts/ when they delete something. Local safety
+# copies, not source — they hold real records and must not reach GitHub.
+scripts/removed-*.json

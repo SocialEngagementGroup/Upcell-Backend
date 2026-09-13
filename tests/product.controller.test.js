@@ -1,6 +1,8 @@
+jest.mock("../src/models/order.model");
 jest.mock("../src/models/singleVariation.model");
 jest.mock("../src/models/parentProduct.model");
 
+const mongoose = require("mongoose");
 const SingleVariation = require("../src/models/singleVariation.model");
 const product = require("../src/controllers/product.controller");
 
@@ -56,9 +58,10 @@ describe("getShopProducts — the shop page's data source", () => {
     const res = makeRes();
     await product.getShopProducts({}, res, jest.fn());
 
-    // public — identical for every visitor, nothing per-user in it.
-    // max-age matches the frontend's React Query staleTime of 60s.
-    expect(res.headers["Cache-Control"]).toBe("public, max-age=60, stale-while-revalidate=300");
+    // public — identical for every visitor, nothing per-user in it. Short,
+    // because a listing that lags by minutes shows prices an admin has already
+    // corrected. The product page itself uses no-cache for the same reason.
+    expect(res.headers["Cache-Control"]).toBe("public, max-age=30, stale-while-revalidate=60");
   });
 
   it("only asks for browsable products — accessories are excluded", async () => {
@@ -77,7 +80,10 @@ describe("getShopProducts — the shop page's data source", () => {
 
     const [, fields] = SingleVariation.find.mock.calls[0];
     expect(fields).toBe(
-      "parentCatagory productName categoryName description storage color price image outOfStock"
+      // imagePublicId is the fallback resolveProductImage uses when the image
+      // manifest has no photo for a product. Dropping it from this projection
+      // broke the image on every newly added product.
+      "slug imagePublicId imageIsGeneric parentCatagory productName categoryName description storage color price image outOfStock cosmeticGrade batteryHealth carrierStatus deviceType"
     );
   });
 
@@ -129,7 +135,7 @@ describe("getAdminProducts — the admin product-management pages' data source",
 
     const [, fields] = SingleVariation.find.mock.calls[0];
     expect(fields).toBe(
-      "parentCatagory productName categoryName storage color price discountPrice originalPrice outOfStock image"
+      "parentCatagory productName categoryName storage color price discountPrice originalPrice outOfStock image imagePublicId imageIsGeneric"
     );
   });
 
@@ -143,45 +149,425 @@ describe("getAdminProducts — the admin product-management pages' data source",
   });
 });
 
-describe("getProducts — the full catalogue endpoint", () => {
-  it("returns every variation", async () => {
-    const docs = [{ _id: "v1" }, { _id: "v2" }];
-    SingleVariation.find.mockReturnValue({ lean: async () => docs });
+// The grouping moved into MongoDB. It used to read every browsable variation
+// (937 of them), build the cards in Node and throw all but four away; now the
+// database groups and limits, and only the rendered cards come back — 614ms to
+// 289ms against the real catalogue.
+//
+// What that costs in testing: the grouping itself is now Mongo's work, and a
+// mocked aggregate cannot prove it. These tests assert the pipeline is built
+// correctly; that one card comes back per family, with its colours intact,
+// needs an integration test against a real database.
+describe("getRecommendedProducts — groups in the database", () => {
+  const stage = (pipeline, key) => pipeline.find((step) => key in step);
+
+  it("returns the cards the aggregation produced", async () => {
+    const cards = [{ _id: "v1", productName: "iPhone 15", price: 649 }];
+    SingleVariation.aggregate.mockResolvedValue(cards);
 
     const res = makeRes();
-    await product.getProducts({}, res, jest.fn());
+    await product.getRecommendedProducts({ query: {} }, res, jest.fn());
 
-    expect(res.body).toEqual(docs);
+    expect(res.body).toEqual(cards);
   });
 
-  // This was the only controller in the codebase without a try/catch. A
-  // rejected query never reached the error middleware, so instead of a clean
-  // 500 the request hung until the client gave up.
+  it("collects colours and storages in the same pass, so swatches survive", async () => {
+    SingleVariation.aggregate.mockResolvedValue([]);
+
+    await product.getRecommendedProducts({ query: {} }, makeRes(), jest.fn());
+
+    const group = stage(SingleVariation.aggregate.mock.calls[0][0], "$group").$group;
+    // Taking $first alone would be faster and would quietly drop every swatch.
+    expect(group.availableColors).toBeDefined();
+    expect(group.availableStorages).toBeDefined();
+    expect(group.doc).toEqual({ $first: "$$ROOT" });
+  });
+
+  it("sorts in-stock first, then cheapest, so $first picks a buyable variant", async () => {
+    SingleVariation.aggregate.mockResolvedValue([]);
+
+    await product.getRecommendedProducts({ query: {} }, makeRes(), jest.fn());
+
+    const sort = stage(SingleVariation.aggregate.mock.calls[0][0], "$sort").$sort;
+    expect(sort).toEqual({ outOfStock: 1, price: 1 });
+  });
+
+  // Mongoose casts a string to an ObjectId for find(), but not inside an
+  // aggregation. Left as a string the $ne matches nothing, and a product page
+  // recommends its own family straight back to itself.
+  it("casts excludeParentId to an ObjectId, or the exclusion silently fails", async () => {
+    SingleVariation.aggregate.mockResolvedValue([]);
+    const parentId = "6a9adcc3acb45145487d7a23";
+
+    await product.getRecommendedProducts({ query: { excludeParentId: parentId } }, makeRes(), jest.fn());
+
+    const match = stage(SingleVariation.aggregate.mock.calls[0][0], "$match").$match;
+    expect(match.parentCatagory.$ne).toBeInstanceOf(mongoose.Types.ObjectId);
+    expect(String(match.parentCatagory.$ne)).toBe(parentId);
+  });
+
+  it("ignores an excludeParentId that is not a real id rather than throwing", async () => {
+    SingleVariation.aggregate.mockResolvedValue([]);
+
+    await product.getRecommendedProducts({ query: { excludeParentId: "nonsense" } }, makeRes(), jest.fn());
+
+    const match = stage(SingleVariation.aggregate.mock.calls[0][0], "$match").$match;
+    expect(match.parentCatagory).toBeUndefined();
+  });
+
+  it("caps the limit at 12 however large a number is asked for", async () => {
+    SingleVariation.aggregate.mockResolvedValue([]);
+
+    await product.getRecommendedProducts({ query: { limit: "500" } }, makeRes(), jest.fn());
+
+    const limit = stage(SingleVariation.aggregate.mock.calls[0][0], "$limit").$limit;
+    expect(limit).toBe(12);
+  });
+
   it("passes errors to next() instead of leaving the request hanging", async () => {
-    SingleVariation.find.mockReturnValue({ lean: async () => { throw new Error("db down"); } });
+    SingleVariation.aggregate.mockRejectedValue(new Error("db down"));
     const next = jest.fn();
 
-    await product.getProducts({}, makeRes(), next);
+    await product.getRecommendedProducts({ query: {} }, makeRes(), next);
 
     expect(next).toHaveBeenCalledWith(expect.any(Error));
   });
 });
 
-describe("getRecommendedProducts — still groups (a small, separate use case)", () => {
-  it("still collapses variations to one card per parent product", async () => {
-    const variations = [
-      { _id: "v1", parentCatagory: "p1", productName: "iPhone 15", price: 699, outOfStock: false },
-      { _id: "v2", parentCatagory: "p1", productName: "iPhone 15", price: 649, outOfStock: false },
-    ];
-    mockFindChain(variations);
+// createProduct is what the admin "Save product" button calls, and until now
+// nothing tested it. Two bugs shipped through that gap and were found by hand
+// on the live site: variants were written with no slug, so a saved product had
+// no address and search could not open it; and the image an admin uploaded was
+// stored without its Cloudinary id, which let the frontend's image matcher
+// substitute a different photo. Both are asserted here.
+describe("createProduct — the admin Save product button", () => {
+  const ParentProduct = require("../src/models/parentProduct.model");
+
+  const makeReq = (overrides = {}) => ({
+    body: {
+      productName: "iPhone Air",
+      categoryName: "iPhone",
+      categoryId: "cat1",
+      image: "https://res.cloudinary.com/x/image/upload/upcell/products/iphone/air--abc123",
+      images: [{
+        url: "https://res.cloudinary.com/x/image/upload/upcell/products/iphone/air--abc123",
+        publicId: "upcell/products/iphone/air--abc123",
+      }],
+      variants: [
+        { storage: "256GB", color: { name: "Sky Blue" }, price: 999 },
+        { storage: "512GB", color: { name: "Sky Blue" }, price: 1199 },
+      ],
+      ...overrides,
+    },
+  });
+
+  beforeEach(() => {
+    ParentProduct.findById.mockResolvedValue(null);
+    ParentProduct.findOne.mockResolvedValue(null);
+    ParentProduct.exists.mockResolvedValue(false);
+    ParentProduct.create.mockImplementation(async (doc) => ({ _id: "parent1", ...doc }));
+    SingleVariation.exists.mockResolvedValue(false);
+    SingleVariation.insertMany.mockImplementation(async (docs) => docs);
+    // saveVariants reads the family first so it can keep the documents that
+    // already exist. A new product has none.
+    SingleVariation.find.mockReturnValue({ lean: async () => [] });
+    SingleVariation.updateOne.mockResolvedValue({ modifiedCount: 1 });
+    SingleVariation.deleteMany.mockResolvedValue({ deletedCount: 0 });
+  });
+
+  const savedVariants = () => SingleVariation.insertMany.mock.calls[0][0];
+
+  it("gives every variant a slug, because the slug is the whole address of its page", async () => {
+    const res = makeRes();
+    await product.createProduct(makeReq(), res, jest.fn());
+
+    expect(savedVariants().map((variant) => variant.slug)).toEqual([
+      "iphone-air-256gb-sky-blue",
+      "iphone-air-512gb-sky-blue",
+    ]);
+  });
+
+  it("gives the parent a slug too", async () => {
+    await product.createProduct(makeReq(), makeRes(), jest.fn());
+
+    expect(ParentProduct.create).toHaveBeenCalledWith(
+      expect.objectContaining({ slug: "iphone-air" })
+    );
+  });
+
+  it("keeps the Cloudinary id of the uploaded image, not just its URL", async () => {
+    await product.createProduct(makeReq(), makeRes(), jest.fn());
+
+    // Without the id there is no way to ask for the photo at a card's width or
+    // in a modern format — a stored URL is one fixed rendition.
+    for (const variant of savedVariants()) {
+      expect(variant.imagePublicId).toBe("upcell/products/iphone/air--abc123");
+    }
+  });
+
+  it("marks an uploaded photo as the product's own, so nothing substitutes another for it", async () => {
+    await product.createProduct(makeReq(), makeRes(), jest.fn());
+
+    for (const variant of savedVariants()) {
+      expect(variant.imageIsGeneric).toBe(false);
+    }
+  });
+
+  it("writes isAccessory explicitly, so the field exists for the index to use", async () => {
+    await product.createProduct(makeReq(), makeRes(), jest.fn());
+
+    for (const variant of savedVariants()) {
+      expect(variant.isAccessory).toBe(false);
+    }
+  });
+
+  it("gives two variants that slugify identically distinct slugs", async () => {
+    const req = makeReq({
+      variants: [
+        { storage: "256GB", color: { name: "Sky Blue" }, price: 999 },
+        { storage: "256GB", color: { name: "sky blue" }, price: 999 },
+      ],
+    });
+
+    await product.createProduct(req, makeRes(), jest.fn());
+
+    const slugs = savedVariants().map((variant) => variant.slug);
+    expect(new Set(slugs).size).toBe(2);
+  });
+
+  it("falls back to the plain image field when no image refs are sent", async () => {
+    const req = makeReq({ images: undefined });
+
+    await product.createProduct(req, makeRes(), jest.fn());
+
+    expect(savedVariants()[0].image).toBe(req.body.image);
+    expect(savedVariants()[0].imagePublicId).toBeUndefined();
+  });
+});
+
+describe("cache headers — a price must never be served stale", () => {
+  it("getProductBySlug always revalidates, so a corrected price is never shown", async () => {
+    const ParentProduct = require("../src/models/parentProduct.model");
+    SingleVariation.findOne.mockReturnValue({
+      lean: async () => ({ _id: "v1", slug: "x", parentCatagory: "p1", price: 111 }),
+    });
+    SingleVariation.find.mockReturnValue({ lean: async () => [] });
+    ParentProduct.findById.mockReturnValue({ select: () => ({ lean: async () => ({ modelName: "X" }) }) });
 
     const res = makeRes();
-    await product.getRecommendedProducts({ query: {} }, res, jest.fn());
+    await product.getProductBySlug({ params: { slug: "x" } }, res, jest.fn());
 
-    // Recommendations show one card per distinct product, unlike the shop
-    // page's own data source above — this is a genuinely different, small
-    // (limit 4-12) use case, not the same duplicated logic.
-    expect(res.body).toHaveLength(1);
-    expect(res.body[0].price).toBe(649); // cheapest in-stock variant wins
+    // no-cache means "ask first", not "do not store" — Express's ETag turns an
+    // unchanged product into a 304 with no body.
+    expect(res.headers["Cache-Control"]).toBe("no-cache");
+  });
+});
+
+describe("createProduct — a photo per variant", () => {
+  const ParentProduct = require("../src/models/parentProduct.model");
+
+  const images = [
+    { url: "https://cdn/one.jpg", publicId: "upcell/products/other/one--aaa" },
+    { url: "https://cdn/two.jpg", publicId: "upcell/products/other/two--bbb" },
+  ];
+
+  const makeReq = (variants) => ({
+    body: {
+      productName: "Add product",
+      categoryName: "Add cat",
+      image: images[0].url,
+      images,
+      variants,
+    },
+  });
+
+  beforeEach(() => {
+    ParentProduct.findById.mockResolvedValue(null);
+    ParentProduct.findOne.mockResolvedValue(null);
+    ParentProduct.exists.mockResolvedValue(false);
+    ParentProduct.create.mockImplementation(async (doc) => ({ _id: "parent1", ...doc }));
+    SingleVariation.exists.mockResolvedValue(false);
+    SingleVariation.insertMany.mockImplementation(async (docs) => docs);
+    // saveVariants reads the family first so it can keep the documents that
+    // already exist. A new product has none.
+    SingleVariation.find.mockReturnValue({ lean: async () => [] });
+    SingleVariation.updateOne.mockResolvedValue({ modifiedCount: 1 });
+    SingleVariation.deleteMany.mockResolvedValue({ deletedCount: 0 });
+  });
+
+  const saved = () => SingleVariation.insertMany.mock.calls[0][0];
+
+  it("gives each variant the photo it was assigned", async () => {
+    await product.createProduct(makeReq([
+      { storage: "64GB", color: { name: "Blue" }, price: 111, imagePublicId: images[0].publicId },
+      { storage: "512GB", color: { name: "Natural" }, price: 222, imagePublicId: images[1].publicId },
+    ]), makeRes(), jest.fn());
+
+    expect(saved()[0].imagePublicId).toBe(images[0].publicId);
+    expect(saved()[0].image).toBe(images[0].url);
+    expect(saved()[1].imagePublicId).toBe(images[1].publicId);
+    expect(saved()[1].image).toBe(images[1].url);
+  });
+
+  it("falls back to the primary photo when a variant chose none", async () => {
+    await product.createProduct(makeReq([
+      { storage: "64GB", color: { name: "Blue" }, price: 111 },
+    ]), makeRes(), jest.fn());
+
+    expect(saved()[0].imagePublicId).toBe(images[0].publicId);
+  });
+
+  it("ignores a photo that is not one of this product's own", async () => {
+    // Otherwise a variant could be pointed at any asset in the account.
+    await product.createProduct(makeReq([
+      { storage: "64GB", color: { name: "Blue" }, price: 111, imagePublicId: "upcell/static/someone-elses" },
+    ]), makeRes(), jest.fn());
+
+    expect(saved()[0].imagePublicId).toBe(images[0].publicId);
+  });
+});
+
+// The two fixes for orders losing their link to what was bought.
+describe("editing keeps variant documents, deleting is refused when ordered", () => {
+  const ParentProduct = require("../src/models/parentProduct.model");
+  const Order = require("../src/models/order.model");
+
+  const existing = [
+    { _id: "keep-me", parentCatagory: "p1", storage: "64GB", color: { name: "Black" }, price: 100, slug: "x-64gb-black" },
+    { _id: "drop-me", parentCatagory: "p1", storage: "1TB", color: { name: "Pink" }, price: 900, slug: "x-1tb-pink" },
+  ];
+
+  beforeEach(() => {
+    ParentProduct.findById.mockResolvedValue({
+      _id: "p1", slug: "x", save: jest.fn().mockResolvedValue(true),
+    });
+    ParentProduct.exists.mockResolvedValue(false);
+    SingleVariation.exists.mockResolvedValue(false);
+    // saveVariants calls .lean() directly; deleteProductFamily calls
+    // .select("_id").lean(). One chainable stub serves both.
+    const query = { lean: async () => existing };
+    query.select = () => query;
+    SingleVariation.find.mockReturnValue(query);
+    SingleVariation.updateOne.mockResolvedValue({ modifiedCount: 1 });
+    SingleVariation.deleteMany.mockResolvedValue({ deletedCount: 1 });
+    SingleVariation.insertMany.mockImplementation(async (docs) =>
+      docs.map((doc, index) => ({ ...doc, _id: `new-${index}` })));
+  });
+
+  const editWith = (variants) => product.createProduct({
+    body: {
+      existingParentId: "p1", productName: "X", categoryName: "C",
+      image: "https://cdn/one.jpg", variants,
+    },
+  }, makeRes(), jest.fn());
+
+  it("updates the variant that still exists instead of recreating it", async () => {
+    await editWith([{ storage: "64GB", color: { name: "Black" }, price: 150 }]);
+
+    // The order-breaking bug was deleteMany + insertMany on every save. The
+    // matching variant must be updated in place so its _id survives.
+    const [filter, update] = SingleVariation.updateOne.mock.calls[0];
+    expect(filter._id).toBe("keep-me");
+    expect(update.$set.price).toBe(150);
+  });
+
+  it("never rewrites the slug of a variant it keeps", async () => {
+    await editWith([{ storage: "64GB", color: { name: "Black" }, price: 150 }]);
+
+    const [, update] = SingleVariation.updateOne.mock.calls[0];
+    expect(update.$set.slug).toBeUndefined();
+  });
+
+  it("matches on storage and colour regardless of case or spacing", async () => {
+    await editWith([{ storage: " 64gb ", color: { name: "BLACK" }, price: 150 }]);
+
+    expect(SingleVariation.updateOne).toHaveBeenCalled();
+    expect(SingleVariation.insertMany).not.toHaveBeenCalled();
+  });
+
+  it("inserts a genuinely new combination", async () => {
+    await editWith([
+      { storage: "64GB", color: { name: "Black" }, price: 150 },
+      { storage: "256GB", color: { name: "Blue" }, price: 250 },
+    ]);
+
+    const inserted = SingleVariation.insertMany.mock.calls[0][0];
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0].storage).toBe("256GB");
+  });
+
+  it("deletes only the combination the admin removed", async () => {
+    await editWith([{ storage: "64GB", color: { name: "Black" }, price: 150 }]);
+
+    const [filter] = SingleVariation.deleteMany.mock.calls[0];
+    expect(filter._id.$in).toEqual(["drop-me"]);
+  });
+
+  it("refuses to delete a product an order references", async () => {
+    Order.find.mockReturnValue({
+      select: () => ({ limit: () => ({ lean: async () => [{ _id: "order1", status: "Shipped" }] }) }),
+    });
+
+    const res = makeRes();
+    await product.deleteProductFamily({ params: { parentId: "p1" } }, res, jest.fn());
+
+    expect(res.statusCode).toBe(409);
+    expect(res.body.message).toMatch(/out of stock/i);
+    // The point of the guard: nothing was removed.
+    expect(SingleVariation.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("still deletes a product nothing has ordered", async () => {
+    Order.find.mockReturnValue({
+      select: () => ({ limit: () => ({ lean: async () => [] }) }),
+    });
+    ParentProduct.findByIdAndDelete.mockResolvedValue({ _id: "p1" });
+
+    const res = makeRes();
+    await product.deleteProductFamily({ params: { parentId: "p1" } }, res, jest.fn());
+
+    expect(res.statusCode).toBe(200);
+    expect(SingleVariation.deleteMany).toHaveBeenCalled();
+  });
+});
+
+// T08 — a listing has to pass two separate questions.
+describe("what the shop is willing to show", () => {
+  const product = require("../src/controllers/product.controller");
+  const SingleVariation = require("../src/models/singleVariation.model");
+
+  const makeRes = () => {
+    const res = { statusCode: null, body: null, headers: {} };
+    res.set = (k, v) => { res.headers[k] = v; return res; };
+    res.status = (c) => { res.statusCode = c; return res; };
+    res.json = (p) => { res.body = p; return res; };
+    return res;
+  };
+
+  it("hides a device that cannot be sold as it stands", async () => {
+    // refurbState and outOfStock answer different questions. A phone with a
+    // battery below 80% works and is in the building — and must not be listed
+    // until the battery is replaced.
+    SingleVariation.find.mockReturnValue({ sort: () => ({ lean: async () => [] }) });
+
+    await product.getShopProducts({}, makeRes(), jest.fn());
+
+    const [filter] = SingleVariation.find.mock.calls[0];
+    expect(filter.refurbState).toEqual({ $nin: ["NEEDS_BATTERY", "NEEDS_REPAIR"] });
+  });
+
+  it("still shows a row written before the field existed", async () => {
+    // $nin rather than $eq: every one of the 956 was backfilled, but a new row
+    // created by a path that forgets to set it should not silently vanish from
+    // the shop.
+    const { deviceTypeFromCategory } = require("../src/constants/deviceIdentity");
+    expect(deviceTypeFromCategory("iPhone Pro")).toBe("PHONE");
+
+    SingleVariation.find.mockReturnValue({ sort: () => ({ lean: async () => [] }) });
+    await product.getShopProducts({}, makeRes(), jest.fn());
+
+    const [filter] = SingleVariation.find.mock.calls[0];
+    // undefined is not in the list, so it passes.
+    expect(filter.refurbState.$nin).not.toContain(undefined);
   });
 });

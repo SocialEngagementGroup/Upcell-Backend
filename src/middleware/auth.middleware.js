@@ -34,6 +34,21 @@ function getPrimaryEmail(user) {
   return primaryEmail?.emailAddress || user.emailAddresses?.[0]?.emailAddress || null;
 }
 
+// Whether Clerk has actually confirmed the address above.
+//
+// It matters wherever an email proves ownership of something. An unverified
+// address is a string somebody typed at sign-up: without this check, claiming
+// a legacy order would only take signing up with the right email and never
+// answering the confirmation. The fallback in getPrimaryEmail makes that worse
+// — it will hand back emailAddresses[0] even when it is not the primary one.
+function isEmailVerified(user) {
+  const address = user.emailAddresses?.find(
+    (email) => email.id === user.primaryEmailAddressId
+  ) || user.emailAddresses?.[0];
+
+  return address?.verification?.status === "verified";
+}
+
 function normalizeRole(role) {
   if (typeof role !== "string") {
     return "customer";
@@ -63,6 +78,7 @@ const verifyToken = async (req, res, next) => {
     req.user = {
       id: clerkUser.id,
       email: getPrimaryEmail(clerkUser),
+      emailVerified: isEmailVerified(clerkUser),
       role,
     };
 
@@ -106,6 +122,7 @@ const optionalAuth = async (req, res, next) => {
       req.user = {
         id: clerkUser.id,
         email: getPrimaryEmail(clerkUser),
+        emailVerified: isEmailVerified(clerkUser),
         role: normalizeRole(clerkUser.publicMetadata?.role),
       };
     }

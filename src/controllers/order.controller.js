@@ -1,6 +1,13 @@
 const mongoose = require("mongoose");
 const { Resend } = require("resend");
 const Order = require("../models/order.model");
+const { toCustomerOrder, ownsOrder } = require("../utils/orderView");
+const { reissueGuestToken } = require("../services/guestOrder");
+const { anonymiseCustomer } = require("../services/accountDeletion");
+const { clerkClient } = require("@clerk/express");
+const { salesTaxRate } = require("../services/salesTax");
+const { validateShipment } = require("../services/returnShipping");
+const { trackingUrlFor } = require("../utils/carrierTracking");
 const AuditLog = require("../models/auditLog.model");
 const { Notification } = require("../models/notification.model");
 const { makeOrderObjAndTotal } = require("./checkout.controller");
@@ -10,6 +17,8 @@ const {
   adminOrderStatusEmail,
   adminNewOrderEmail,
   refundApprovedEmail,
+  orderShippedEmail,
+  orderLinkEmail,
 } = require("../services/emailTemplates");
 const { calculateRefund } = require("../services/refund");
 const {
@@ -21,6 +30,7 @@ const {
 const resend = new Resend(process.env.RESEND_KEY);
 const orderEmailFrom = process.env.EMAIL_FROM;
 const adminNotificationEmail = process.env.ADMIN_NOTIFICATION_EMAIL;
+const SITE_URL = process.env.FRONTEND_URL || process.env.SITE_URL || "";
 
 // Mongo ObjectId as it appears in a URL. Checking the shape before querying
 // keeps a malformed id (a "/order/undefined" from a page loaded without its
@@ -28,23 +38,43 @@ const adminNotificationEmail = process.env.ADMIN_NOTIFICATION_EMAIL;
 // the global handler would turn into a 500 and page the admin over.
 const OBJECT_ID_PATTERN = /^[0-9a-fA-F]{24}$/;
 
+// The rate the shop quotes, so the cart and the checkout stop carrying their
+// own copy of it. Public and cacheable: it is the same number for everyone and
+// it is printed on every receipt anyway.
+function getTaxRate(req, res) {
+  res.set("Cache-Control", "public, max-age=300");
+  return res.status(200).json({ rate: salesTaxRate() });
+}
+
 async function getOrder(req, res, next) {
   try {
     if (!OBJECT_ID_PATTERN.test(req.params.id || "")) {
       return res.status(404).json({ error: "Order not found" });
     }
 
-    const order = await Order.findById(req.params.id);
+    // +guestAccessToken because it is select:false — without asking for it,
+    // every guest link would be refused and the reason would be invisible.
+    const order = await Order.findById(req.params.id).select("+guestAccessToken");
     if (!order) return res.status(404).json({ error: "Order not found" });
 
-    const isOwner = req.user?.role === "admin" || req.user?.email === order.email;
-    if (isOwner) {
-      return res.status(200).json(order);
+    // Anyone who is not the owner gets the same answer as a missing order.
+    //
+    // There used to be a third answer here: the document minus seven personal
+    // fields, handed to any caller who knew the id. That still carried the
+    // card brand and last four, the AVS result, the bank's transaction id, the
+    // Clerk user id, the ship-to state, every device's IMEI, and the whole
+    // refund block including which staff member keyed it in at the bank.
+    //
+    // A distinct "not yours" would also confirm that an id exists, which is
+    // exactly what somebody walking the id range is trying to learn. One
+    // answer for both.
+    // ?t= is the guest's link. A signed-in customer never needs it, and a
+    // wrong one falls through to the same 404 as no token at all.
+    if (!ownsOrder(req.user, order, req.query?.t)) {
+      return res.status(404).json({ error: "Order not found" });
     }
 
-    const { name, email, phone, city, postal, street, country, ...safeOrder } =
-      order.toObject();
-    res.status(200).json(safeOrder);
+    res.status(200).json(toCustomerOrder(order));
   } catch (error) {
     next(error);
   }
@@ -173,6 +203,335 @@ const ORDER_STATUS_VALUES = ["pending_payment", "under_review", "Processing", "S
 const UNPAID_STATUSES = ["pending_payment", "under_review", "payment failed"];
 const DELIVERED_STATUS = "Delivered";
 
+
+/**
+ * Records that an order has shipped, and tells the customer.
+ *
+ * Staff buy the label by hand in the carrier's own tool and paste the number
+ * back here — the same manual first phase the returns side runs on, and the
+ * same validator, so the two cannot drift on what a tracking number looks
+ * like.
+ *
+ * Moving to Shipped goes through the same statement that stamps shippedAt
+ * everywhere else, because the return window counts from it when no delivery
+ * is ever recorded.
+ */
+async function recordOrderShipment(req, res, next) {
+  try {
+    const { carrier, trackingNumber, labelUrl } = req.body || {};
+
+    const order = await Order.findById(req.params.id || null);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+
+    if (!order.paid) {
+      // Shipping an unpaid order is either a mistake or a decision somebody
+      // should make deliberately, on the order, not by pasting a number.
+      return res.status(400).json({ error: "This order has not been paid for yet." });
+    }
+
+    const shipment = validateShipment({ carrier, trackingNumber, labelUrl });
+    if (!shipment.ok) return res.status(400).json({ error: shipment.error });
+
+    // One parcel, one order. Two orders sharing a number means a customer
+    // tracking theirs sees somebody else's parcel, and a carrier update lands
+    // on the wrong record.
+    const clash = await Order.findOne({
+      "fulfilment.trackingNumber": shipment.trackingNumber,
+      _id: { $ne: order._id },
+    })
+      .select("_id")
+      .lean();
+
+    if (clash) {
+      return res.status(409).json({
+        error: "That tracking number is already on another order.",
+        trackingNumberInUse: String(clash._id),
+      });
+    }
+
+    const alreadyShipped = Boolean(order.fulfilment?.trackingNumber);
+
+    order.fulfilment = {
+      carrier: shipment.carrier,
+      trackingNumber: shipment.trackingNumber,
+      labelUrl: shipment.labelUrl,
+      shippedBy: req.user?.email || req.user?.id,
+    };
+
+    order.status = "Shipped";
+    order.paid = true;
+    // Stamped once, and left alone if this is a correction to the number.
+    if (!order.shippedAt) order.shippedAt = new Date();
+
+    await order.save();
+
+    AuditLog.create({
+      actorId: req.user?.id,
+      actorEmail: req.user?.email,
+      action: alreadyShipped ? "order.shipment_corrected" : "order.shipped",
+      targetType: "Order",
+      targetId: order._id,
+      metadata: {
+        carrier: shipment.carrier,
+        trackingNumber: shipment.trackingNumber,
+      },
+    }).catch((error) => {
+      console.error("[audit] order.shipped log failed:", error);
+    });
+
+    // Only on the first shipment. Correcting a typo should not send a second
+    // "your order is on its way" to somebody who has already had one.
+    if (!alreadyShipped && order.email) {
+      const { subject, html } = orderShippedEmail({
+        orderId: order._id,
+        carrier: shipment.carrier,
+        trackingNumber: shipment.trackingNumber,
+        trackingUrl: trackingUrlFor(shipment.carrier, shipment.trackingNumber),
+        itemNames: (order.items || []).map((item) => item.name).filter(Boolean),
+      });
+
+      resend.emails
+        .send({ from: orderEmailFrom, to: [order.email], subject, html })
+        .catch((error) => console.error("[email] order shipped send failed:", error));
+    }
+
+    return res.status(200).json({
+      ok: true,
+      status: order.status,
+      fulfilment: {
+        carrier: order.fulfilment.carrier,
+        trackingNumber: order.fulfilment.trackingNumber,
+        trackingUrl: trackingUrlFor(shipment.carrier, shipment.trackingNumber),
+      },
+      emailed: !alreadyShipped,
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+/**
+ * Attaches a guest's past orders to the account they have just created.
+ *
+ * Somebody who checked out as a guest and later signs up with the same address
+ * should find their orders waiting, not have to keep the email with the link
+ * in it forever.
+ *
+ * Gated on a *verified* email, and that is the whole security of it. Clerk
+ * lets anyone sign up claiming any address; verification is what makes the
+ * claim mean something. Without the check, taking over a stranger's orders
+ * would only need their email address and no access to it.
+ *
+ * The guest token is cleared on the orders it moves. They have an owner now,
+ * and a live link that still opens an order belonging to an account is a
+ * second key nobody is tracking.
+ */
+/**
+ * Emails a guest a fresh link to their own order.
+ *
+ * The recovery path for somebody who deleted the receipt. It is also what
+ * makes it safe for the receipt's link never to rotate on its own: there is a
+ * way to get a new one, so the old one does not have to keep changing.
+ *
+ * Two rules make this not a nuisance machine.
+ *
+ * The mail only ever goes to the address already on the order. The form asks
+ * for an address so the caller can prove they know it, never as a delivery
+ * address — otherwise this endpoint posts anyone's order details anywhere.
+ *
+ * And the answer is the same whether or not anything matched. A "no such
+ * order" would turn this into a way to test whether an address ever bought
+ * something, and an order id plus an email is a pair somebody might be
+ * guessing at.
+ */
+async function emailOrderLink(req, res, next) {
+  // Said once, used for every outcome.
+  const SAME_ANSWER = {
+    ok: true,
+    message: "If that matches an order, we've emailed a link to the address on it.",
+  };
+
+  try {
+    const { orderId, email } = req.body || {};
+
+    if (!OBJECT_ID_PATTERN.test(String(orderId || ""))) {
+      return res.status(200).json(SAME_ANSWER);
+    }
+
+    const order = await Order.findOne({
+      _id: orderId,
+      email: String(email || "").trim(),
+      guest: true,
+    })
+      .collation({ locale: "en", strength: 2 })
+      .select("+guestAccessToken");
+
+    // A signed-in customer's order has no guest flag and falls out here. They
+    // have an account; the link is not how they get in.
+    if (!order) return res.status(200).json(SAME_ANSWER);
+
+    const token = await reissueGuestToken(order);
+    if (!token) return res.status(200).json(SAME_ANSWER);
+
+    const orderUrl = `${SITE_URL}/order/${order._id}?t=${encodeURIComponent(token)}`;
+    const { subject, html } = orderLinkEmail({ orderId: order._id, orderUrl });
+
+    resend.emails
+      .send({ from: orderEmailFrom, to: [order.email], subject, html })
+      .catch((error) => console.error("[email] order link send failed:", error?.message || error));
+
+    AuditLog.create({
+      actorId: "guest",
+      actorEmail: order.email,
+      action: "order.link_reissued",
+      targetType: "Order",
+      targetId: order._id,
+      metadata: {},
+    }).catch(() => {});
+
+    return res.status(200).json(SAME_ANSWER);
+  } catch (error) {
+    return next(error);
+  }
+}
+
+/**
+ * Deletes the caller's account.
+ *
+ * Two things pull against each other here and both are real: a person can ask
+ * to be erased, and UpCell has to keep a record of what was sold for tax, for
+ * a chargeback months later, and for a warranty claim on a device somebody
+ * still owns. Financial records are anonymised rather than deleted — the
+ * amounts, dates and devices survive, the person does not.
+ *
+ * The Clerk user is deleted last. If anonymisation fails the account still
+ * exists and the customer can ask again; if Clerk fails after it, the data is
+ * already gone and only the login remains, which is the recoverable half.
+ */
+async function deleteOwnAccount(req, res, next) {
+  try {
+    const userId = req.user?.id;
+    const email = String(req.user?.email || "").trim();
+
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    // An unverified address must not be used to match orders: it is a string
+    // somebody typed, and matching on it would erase a stranger's history.
+    if (!req.user.emailVerified) {
+      return res.status(403).json({
+        error: "Verify your email address before deleting your account.",
+      });
+    }
+
+    const summary = await anonymiseCustomer({
+      models: {
+        Order,
+        TradeInRequest: require("../models/tradeInRequest.model").TradeInRequest,
+        RefundRequest: require("../models/refundRequest.model"),
+        ContactSubmission: require("../models/contactSubmission.model"),
+        NewsletterSubscriber: require("../models/newsletterSubscriber.model"),
+      },
+      userId,
+      email,
+    });
+
+    // Written before Clerk is touched, and with the pseudonym rather than the
+    // address — an audit row naming the person who asked to be forgotten is
+    // the one place the erasure would undo itself.
+    AuditLog.create({
+      actorId: userId,
+      actorEmail: summary.pseudonym,
+      action: "account.deleted",
+      targetType: "User",
+      targetId: new mongoose.Types.ObjectId(),
+      metadata: summary,
+    }).catch((error) => {
+      console.error("[audit] account.deleted log failed:", error?.message || error);
+    });
+
+    try {
+      await clerkClient.users.deleteUser(userId);
+    } catch (error) {
+      // The data is already anonymised, so the customer's request has been
+      // honoured. Only the login is left, and that is the half somebody can
+      // clear by hand.
+      console.error("[account] Clerk delete failed after anonymising:", error?.message || error);
+      return res.status(200).json({
+        ok: true,
+        ...summary,
+        warning: "Your data has been removed. Your sign-in is still being cleared — contact support if you can still sign in tomorrow.",
+      });
+    }
+
+    return res.status(200).json({ ok: true, ...summary });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function claimGuestOrders(req, res, next) {
+  try {
+    if (!req.user?.emailVerified) {
+      return res.status(403).json({
+        error: "Verify your email address first, then we can find your past orders.",
+      });
+    }
+
+    const email = String(req.user.email || "").trim().toLowerCase();
+    if (!email) return res.status(400).json({ error: "No email address on this account." });
+
+    // Matched case-insensitively, because somebody who typed Buyer@Example.com
+    // at checkout and signed up as buyer@example.com is one person.
+    //
+    // A collation rather than a regex. Building one from an email address
+    // means escaping user input into a pattern, and an unescaped "." matches
+    // any character — so a.b@x.com would also claim aXb@x.com. Strength 2 is
+    // case-insensitive and accent-sensitive, which is exactly the rule wanted
+    // here, and there is nothing to escape.
+    const insensitive = { locale: "en", strength: 2 };
+    const claimable = { guest: true, email, userId: { $in: [null, undefined, ""] } };
+
+    // Read the ids before the update, because afterwards nothing distinguishes
+    // the orders this call moved from ones already on the account — and the
+    // audit trail needs to name them.
+    const orders = await Order.find(claimable).collation(insensitive).select("_id").lean();
+
+    if (!orders.length) return res.status(200).json({ ok: true, claimed: 0 });
+
+    await Order.updateMany(
+      claimable,
+      {
+        $set: { userId: req.user.id, guest: false },
+        // They have an owner now. A live link that still opens an order
+        // belonging to an account is a second key nobody is tracking.
+        $unset: { guestAccessToken: "", guestTokenExpiresAt: "" },
+      },
+      { collation: insensitive }
+    );
+
+    // One row per order, not one for the batch. targetId is a required
+    // ObjectId, so a row for "several orders" cannot be written at all — it
+    // would fail validation inside the catch below and the claim would go
+    // unrecorded with nobody the wiser.
+    for (const order of orders) {
+      AuditLog.create({
+        actorId: req.user.id,
+        actorEmail: req.user.email,
+        action: "order.guest_order_claimed",
+        targetType: "Order",
+        targetId: order._id,
+        metadata: { email },
+      }).catch((error) => {
+        console.error("[audit] order.guest_order_claimed log failed:", error?.message || error);
+      });
+    }
+
+    return res.status(200).json({ ok: true, claimed: orders.length });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 async function updateOrderStatus(req, res, next) {
   const { orderId, status } = req.body;
 
@@ -197,6 +556,13 @@ async function updateOrderStatus(req, res, next) {
     // customer's own order list, which filters on paid:true in
     // getClientOrders below.
     order.paid = !UNPAID_STATUSES.includes(status);
+
+    // Stamped the first time an order ships, and left alone after — for the
+    // same reason deliveredAt is. It is the fallback the return window uses
+    // when a delivery was never recorded.
+    if (status === "Shipped" && !order.shippedAt) {
+      order.shippedAt = new Date();
+    }
 
     // Stamped the first time an order reaches Delivered, and left alone after.
     // The 30-day return window counts from this date, so a status set back to
@@ -259,7 +625,7 @@ async function updateOrderStatus(req, res, next) {
  * and why a fee was or was not waived, and telling the customer.
  */
 async function processRefund(req, res, next) {
-  const { itemIds, waiveRestockingFee, waiveReason, notes } = req.body;
+  const { itemIds, reasonCode, waiveRestockingFee, waiveReason, notes } = req.body;
 
   try {
     const order = await Order.findById(req.params.id || null);
@@ -277,6 +643,11 @@ async function processRefund(req, res, next) {
 
     const result = calculateRefund(order, {
       itemIds,
+      // Refunding an order directly, with no return request behind it, so the
+      // admin says why. Without a reason no restocking fee is charged, which is
+      // the right way round: a fee taken by accident is not recoverable once
+      // the money has gone, and a fee missed can still be applied by hand.
+      reasonCode,
       waiveRestockingFee: Boolean(waiveRestockingFee),
       waiveReason,
     });
@@ -285,7 +656,8 @@ async function processRefund(req, res, next) {
       return res.status(400).json({ error: result.error });
     }
 
-    const { refundableItems, itemsTotal, restockingFee, restockingFeeWaived, refundAmount } = result;
+    const { refundableItems, itemsTotal, restockingFee, restockingFeeWaived, taxRefunded, refundAmount } =
+      result;
     const refundedProductIds = refundableItems.map(
       (item) => item.price_data.product_data.metadata.productId
     );
@@ -295,6 +667,7 @@ async function processRefund(req, res, next) {
       restockingFee,
       restockingFeeWaived,
       waiveReason: restockingFeeWaived ? waiveReason : undefined,
+      taxRefunded,
       amount: refundAmount,
       itemIds: refundedProductIds,
       notes,
@@ -313,7 +686,14 @@ async function processRefund(req, res, next) {
       action: "order.refund_processed",
       targetType: "Order",
       targetId: order._id,
-      metadata: { itemsTotal, restockingFee, restockingFeeWaived, refundAmount, itemIds: refundedProductIds },
+      metadata: {
+        itemsTotal,
+        restockingFee,
+        restockingFeeWaived,
+        taxRefunded,
+        refundAmount,
+        itemIds: refundedProductIds,
+      },
     }).catch((error) => {
       console.error("[audit] order.refund_processed log failed:", error);
     });
@@ -346,6 +726,7 @@ async function processRefund(req, res, next) {
         itemNames,
         itemsTotal,
         restockingFee,
+        taxRefunded,
         refundAmount,
       });
       resend.emails
@@ -386,7 +767,10 @@ async function getClientOrders(req, res, next) {
     const orders = await Order.find({ $or: ownership, paid: true }).sort({
       updatedAt: -1,
     });
-    res.json(orders);
+
+    // The same view the single-order route returns, so a customer cannot read
+    // a field from the list that the detail page will not show them.
+    res.json(orders.map(toCustomerOrder));
   } catch (error) {
     next(error);
   }
@@ -402,7 +786,13 @@ async function createOrder(req, res, next) {
     // so paid stays false and status stays makeOrderObjAndTotal's
     // "pending_payment" default until that confirmation happens.
     const newOrder = await Order.create(order);
-    res.status(201).json(newOrder);
+
+    // The allowlisted view, not the document. Order.create returns everything
+    // it was given regardless of select:false, so answering with newOrder
+    // would hand back the guest hash, the gateway fields and the staff-only
+    // half of the refund block — the exact set T00-B took out of GET
+    // /order/:id, straight back out through the door beside it.
+    res.status(201).json(toCustomerOrder(newOrder));
 
     notifyOrderPlaced(newOrder).catch((error) => {
       console.error("[order] order-placed notification failed:", error);
@@ -486,6 +876,12 @@ async function markRefundEnteredAtBank(req, res, next) {
 
 module.exports = {
   getOrder,
+  deleteOwnAccount,
+  emailOrderLink,
+  claimGuestOrders,
+  recordOrderShipment,
+  trackingUrlFor,
+  getTaxRate,
   getAdminOrders,
   getAdminOrdersByDate,
   updateOrderStatus,

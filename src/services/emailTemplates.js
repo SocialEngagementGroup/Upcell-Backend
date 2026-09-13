@@ -136,7 +136,7 @@ function tradeInRequestEmail({ name, modelTitle, estimate, requestId }) {
   const rows =
     detailRow("Device", escapeHtml(modelTitle)) +
     detailRow("Request ID", `#${escapeHtml(requestId)}`) +
-    detailRow("Estimated Value", money(estimate)) +
+    detailRow(status === "Paid" || status === "Approved" ? "Amount" : "Estimated Value", money(estimate)) +
     detailRow("Status", "New", { bordered: false, valueColor: RED, valueWeight: 700 });
 
   return {
@@ -154,20 +154,64 @@ function tradeInRequestEmail({ name, modelTitle, estimate, requestId }) {
   };
 }
 
+// One sentence per state, written to be read on a phone by somebody who wants
+// to know one thing: where is my device and when do I get paid.
+//
+// Only the states worth interrupting somebody for have copy here. InTransit
+// and Delivered do not — a customer who posted a phone knows they posted it,
+// and the carrier is already emailing them about it. A silent state is a
+// decision, not a gap.
+//
+// The old six are kept because requests still sit on them until the migration
+// runs, and an email that falls through to the wrong sentence is worse than
+// one that is a little out of date.
 const TRADE_IN_STATUS_COPY = {
+  Quoted: { body: "Your trade-in quote is ready — see the amount below. Post the device to us and we'll check it over." },
+  LabelIssued: { body: "Your prepaid shipping label is ready. Print it, put the device in a box, and drop it off — we'll take it from there." },
+  DeviceReceived: { body: "Your device has arrived safely. We'll check it over and confirm your offer within two working days." },
+  ActionRequired: { body: "We can't finish checking your device yet — there's something only you can clear. We've explained what in a separate message." },
+  RevisedOffer: { body: "Your device wasn't quite as described, so we've made a revised offer. You have five days to accept or decline, and if you decline we'll send it straight back at our cost." },
+  Approved: { body: "Your offer is confirmed and payment is on its way." },
+  Paid: { body: "Payment for your trade-in has been sent. Thanks for trading in with UpCell." },
+  Rejected: { body: "We're not able to take this device. We'll post it back to you at our cost — no charge, nothing to do." },
+  ReturnShipped: { body: "Your device is on its way back to you." },
+  Expired: { body: "Your quote has run out. Prices move, so start a new one any time and we'll requote it at today's rate." },
+  Cancelled: { body: "Your trade-in has been cancelled. Nothing further will happen." },
+
+  // Pre-migration values. See scripts/migrate-trade-in-status.js.
   New: { body: "We've logged your request and will review it shortly." },
   Contacted: { body: "Our team has reviewed your trade-in request and will be in touch shortly with next steps." },
   Received: { body: "Your device has arrived and is now being inspected." },
-  Quoted: { body: "Your final trade-in offer is ready — see the amount below." },
-  Paid: { body: "Payment for your trade-in has been sent. Thanks for trading in with UpCell." },
 };
 
+// Which states are worth an email at all.
+//
+// A customer who hears from a shop at every internal step stops reading, and
+// then misses the one that needed them. RevisedOffer and ActionRequired are
+// on this list because they are the two where nothing happens until the
+// customer does something.
+const EMAILED_STATUSES = [
+  "Quoted",
+  "LabelIssued",
+  "DeviceReceived",
+  "ActionRequired",
+  "RevisedOffer",
+  "Approved",
+  "Paid",
+  "Rejected",
+];
+
+const shouldEmailStatus = (status) => EMAILED_STATUSES.includes(status);
+
 function tradeInStatusEmail({ name, modelTitle, status, estimate, requestId }) {
-  const copy = TRADE_IN_STATUS_COPY[status] || TRADE_IN_STATUS_COPY.Contacted;
+  // Falls back to Quoted rather than to Contacted: Contacted is being
+  // migrated away, and a state with no copy is far more likely to be a new
+  // one than an old one.
+  const copy = TRADE_IN_STATUS_COPY[status] || TRADE_IN_STATUS_COPY.Quoted;
   const rows =
     detailRow("Device", modelTitle ? escapeHtml(modelTitle) : "&mdash;") +
     detailRow("Request ID", `#${escapeHtml(requestId)}`) +
-    detailRow("Estimated Value", money(estimate)) +
+    detailRow(status === "Paid" || status === "Approved" ? "Amount" : "Estimated Value", money(estimate)) +
     detailRow("Status", escapeHtml(status), { bordered: false, valueColor: RED, valueWeight: 700 });
 
   return {
@@ -233,7 +277,7 @@ function orderStatusEmail({ orderId, status }) {
   };
 }
 
-function paymentReceiptEmail({ orderId, paidWith, lineItems, total }) {
+function paymentReceiptEmail({ orderId, paidWith, lineItems, total, orderUrl }) {
   const itemRows = (lineItems || [])
     .map(
       (item) =>
@@ -259,8 +303,11 @@ function paymentReceiptEmail({ orderId, paidWith, lineItems, total }) {
       headline: "Payment received &mdash; thank you!",
       subtext: `Here&rsquo;s your receipt for order #${escapeHtml(orderId)}.`,
       detailRowsHtml: rows,
-      ctaLabel: "View Order Details",
-      ctaHref: ACCOUNT_URL,
+      // A guest has no account page to send them to, so the receipt carries
+      // the only link they will ever have to this order. Signed-in customers
+      // keep going to their own order list.
+      ctaLabel: orderUrl ? "View Your Order" : "View Order Details",
+      ctaHref: orderUrl || ACCOUNT_URL,
       footerNote: "You're receiving this because you placed an order with UpCell.",
     }),
   };
@@ -269,7 +316,7 @@ function paymentReceiptEmail({ orderId, paidWith, lineItems, total }) {
 // itemNames is a plain list of what was refunded ("iPhone 17 (Sage, 256GB)"),
 // not the raw line_items — the email should read like a person wrote it, not
 // like a database dump.
-function refundApprovedEmail({ orderId, itemNames, itemsTotal, restockingFee, refundAmount }) {
+function refundApprovedEmail({ orderId, itemNames, itemsTotal, restockingFee, taxRefunded, refundAmount }) {
   const itemRows = (itemNames || [])
     .map(
       (name) =>
@@ -283,8 +330,13 @@ function refundApprovedEmail({ orderId, itemNames, itemsTotal, restockingFee, re
     itemRows +
     detailRow("Items total", money(itemsTotal)) +
     (restockingFee > 0
-      ? detailRow("Restocking fee (15%)", `&minus;${money(restockingFee)}`)
+      // Only shown if an old refund still carries one. Nothing charges it now.
+      ? detailRow("Restocking fee", `&minus;${money(restockingFee)}`)
       : "") +
+    // Shown as its own line rather than folded into the total: a customer
+    // checking the figure against their card statement is adding up the same
+    // rows UpCell did, and the tax is the row they are most likely to query.
+    (taxRefunded > 0 ? detailRow("Sales tax refunded", money(taxRefunded)) : "") +
     detailRow("Refund amount", money(refundAmount), { bordered: false, valueColor: "#FFFFFF", valueWeight: 800 });
 
   return {
@@ -350,10 +402,202 @@ function refundRequestReceivedEmail({ requestId, orderId, itemNames }) {
       headline: "Return request received",
       // Says plainly that nothing has been agreed yet. A customer who reads
       // this as approval will post a phone before being told where to send it.
+      //
+      // No fee and no postage warning: returns are free in both directions,
+      // whatever the reason. This used to promise 15% to everyone.
       subtext:
-        "Thanks — we have your request and will review it shortly. Please don't send anything back yet: we'll email you the return address and instructions once it's approved. A 15% restocking fee applies, and shipping is not refunded.",
+        "Thanks — we have your request and will review it shortly. Please don't send anything back yet: we'll email you a prepaid label and the return address once it's approved. Returns are free, and the sales tax you paid comes back with the refund.",
       detailRowsHtml: rows,
       ctaLabel: "View Order",
+      ctaHref: ACCOUNT_URL,
+      footerNote: "You're receiving this because you asked to return an item.",
+    }),
+  };
+}
+
+// Everything the customer needs to actually post the parcel: the number to
+// write on it, the label to print, the carrier, and the date the authorisation
+// runs out. Sent when staff attach the label, which is the first moment all of
+// those exist together.
+function returnLabelIssuedEmail({ rmaNumber, orderId, carrier, trackingNumber, labelUrl, expiresAt, itemNames }) {
+  const rows =
+    detailRow("Return number", escapeHtml(rmaNumber)) +
+    detailRow("Order ID", `#${escapeHtml(orderId)}`) +
+    detailRow("Carrier", escapeHtml(carrier)) +
+    detailRow("Tracking number", escapeHtml(trackingNumber)) +
+    (expiresAt ? detailRow("Post it by", escapeHtml(new Date(expiresAt).toDateString())) : "") +
+    `<tr><td colspan="2" style="padding:12px 0 4px 0;font-family:${FONT};font-size:14px;color:#9A9A9A;">Items to return</td></tr>` +
+    itemNameRows(itemNames);
+
+  return {
+    subject: `Your return label — ${rmaNumber}`,
+    html: emailShell({
+      preheader: `Print your label and post ${rmaNumber} back to us.`,
+      badgeGlyph: "&#128230;",
+      headline: "Your return label is ready",
+      // The deadline is stated in the body as well as the rows, because it is
+      // the one thing that costs the customer their return if they miss it.
+      subtext:
+        `Print the label, write ${escapeHtml(rmaNumber)} on the outside of the box, and drop it off with ${escapeHtml(carrier)}. `
+        + (expiresAt
+          ? `Please post it by ${escapeHtml(new Date(expiresAt).toDateString())} — after that the authorisation expires and you'll need to request the return again.`
+          : "Please post it as soon as you can."),
+      detailRowsHtml: rows,
+      // Straight to the label, because that is the thing they need to do next.
+      ctaLabel: labelUrl ? "Print Your Label" : "View Your Return",
+      ctaHref: labelUrl || ACCOUNT_URL,
+      footerNote: "You're receiving this because you asked to return an item.",
+    }),
+  };
+}
+
+// The one email a customer actually waits for.
+//
+// Tracking number in the rows and the carrier's own page behind the button:
+// "where is my order" is the question support answers most, and it is answered
+// here or it is answered by a person.
+function orderShippedEmail({ orderId, carrier, trackingNumber, trackingUrl, itemNames }) {
+  const rows =
+    detailRow("Order ID", `#${escapeHtml(orderId)}`) +
+    detailRow("Carrier", escapeHtml(carrier)) +
+    detailRow("Tracking number", escapeHtml(trackingNumber)) +
+    (itemNames && itemNames.length
+      ? `<tr><td colspan="2" style="padding:12px 0 4px 0;font-family:${FONT};font-size:14px;color:#9A9A9A;">On its way</td></tr>`
+        + itemNameRows(itemNames)
+      : "");
+
+  return {
+    subject: `Your UpCell order has shipped — ${trackingNumber}`,
+    html: emailShell({
+      preheader: `${carrier} has your order. Track it with ${trackingNumber}.`,
+      badgeGlyph: "&#128666;",
+      headline: "Your order is on its way",
+      subtext:
+        `${escapeHtml(carrier)} has your parcel. Tracking can take a few hours to show its first scan, `
+        + "so don't worry if it looks quiet at first.",
+      detailRowsHtml: rows,
+      ctaLabel: trackingUrl ? "Track Your Order" : "View Your Order",
+      ctaHref: trackingUrl || ACCOUNT_URL,
+      footerNote: "You're receiving this because you placed an order with UpCell.",
+    }),
+  };
+}
+
+// A fresh link to a guest's own order, because they asked for one.
+//
+// Sent only to the address already on the order. The form asks for it so the
+// customer proves they know it; it is never used as a delivery address, or
+// this endpoint would be a way to post somebody's order details anywhere.
+function orderLinkEmail({ orderId, orderUrl }) {
+  return {
+    subject: "Your UpCell order link",
+    html: emailShell({
+      preheader: "Here is the link to your order.",
+      badgeGlyph: "&#128279;",
+      headline: "Here's your order",
+      subtext:
+        "You asked for a fresh link to your order. Any link we sent you before this one "
+        + "has stopped working, so use this one from now on.",
+      detailRowsHtml: detailRow("Order ID", `#${escapeHtml(orderId)}`),
+      ctaLabel: "View Your Order",
+      ctaHref: orderUrl,
+      footerNote: "If you didn't ask for this, you can ignore it — nothing has changed.",
+    }),
+  };
+}
+
+// The offer of less than the full refund, and why.
+//
+// Every deduction is listed with the finding behind it, because a smaller
+// number with no explanation is the thing customers dispute and UpCell then
+// cannot defend. The two buttons are the whole point: someone reading this on a
+// phone should be able to answer without signing in or writing an email.
+function revisedOfferEmail({ rmaNumber, originalAmount, offeredAmount, deductions = [], findings, acceptUrl, declineUrl, expiresAt }) {
+  const deductionRows = deductions
+    .map((deduction) => detailRow(
+      escapeHtml(deduction.reason),
+      `&minus;$${Number(deduction.amount).toFixed(2)}`
+    ))
+    .join("");
+
+  const rows =
+    detailRow("Return number", escapeHtml(rmaNumber)) +
+    detailRow("Original refund", `$${Number(originalAmount).toFixed(2)}`) +
+    `<tr><td colspan="2" style="padding:12px 0 4px 0;font-family:${FONT};font-size:14px;color:#9A9A9A;">What we found, and what came off</td></tr>` +
+    deductionRows +
+    detailRow("Revised refund", `<strong>$${Number(offeredAmount).toFixed(2)}</strong>`) +
+    (expiresAt ? detailRow("Please reply by", escapeHtml(new Date(expiresAt).toDateString())) : "");
+
+  return {
+    subject: `About your return ${rmaNumber} — revised refund offer`,
+    html: emailShell({
+      preheader: `We're offering $${Number(offeredAmount).toFixed(2)} for return ${rmaNumber}.`,
+      badgeGlyph: "&#9878;",
+      headline: "A revised refund offer",
+      subtext:
+        (findings ? `${escapeHtml(findings)} ` : "")
+        + "If you accept, we'll refund the revised amount. If you decline, we'll send the device back to you at our cost — either way you won't be charged anything further."
+        + (expiresAt
+          ? ` If we don't hear from you by ${escapeHtml(new Date(expiresAt).toDateString())}, we'll send the device back.`
+          : ""),
+      detailRowsHtml: rows,
+      ctaLabel: "Accept This Offer",
+      ctaHref: acceptUrl,
+      // The decline is a plain link rather than a second button on purpose: it
+      // must be equally easy to find, and equally obviously not the default.
+      footerNote: declineUrl
+        ? `Would rather have the device back? <a href="${declineUrl}" style="color:#D90B0F;">Decline and return it to me</a>.`
+        : "You're receiving this because you asked to return an item.",
+    }),
+  };
+}
+
+// A nudge before the authorisation lapses.
+//
+// The deadline is the whole message. A customer who misses it loses the return
+// and has to ask again, which is a support email and an annoyed person over
+// something a reminder prevents.
+function returnReminderEmail({ rmaNumber, daysLeft, expiresAt, labelUrl, trackingNumber }) {
+  const rows =
+    detailRow("Return number", escapeHtml(rmaNumber)) +
+    detailRow("Post it by", escapeHtml(new Date(expiresAt).toDateString())) +
+    (trackingNumber ? detailRow("Tracking number", escapeHtml(trackingNumber)) : "");
+
+  return {
+    subject: daysLeft <= 2
+      ? `Last chance to post your return ${rmaNumber}`
+      : `A reminder about your return ${rmaNumber}`,
+    html: emailShell({
+      preheader: `${daysLeft} day${daysLeft === 1 ? "" : "s"} left to post return ${rmaNumber}.`,
+      badgeGlyph: "&#9200;",
+      headline: daysLeft <= 2 ? "Your return expires soon" : "Have you posted it yet?",
+      subtext:
+        `We haven't received your return yet. You have ${daysLeft} day${daysLeft === 1 ? "" : "s"} left to post it — after ${escapeHtml(new Date(expiresAt).toDateString())} the authorisation expires and you'd need to request the return again.`,
+      detailRowsHtml: rows,
+      ctaLabel: labelUrl ? "Print Your Label" : "View Your Return",
+      ctaHref: labelUrl || ACCOUNT_URL,
+      footerNote: "Already posted it? You can ignore this — tracking can take a day to update.",
+    }),
+  };
+}
+
+// The authorisation lapsed. Says how to start again, because the alternative is
+// a customer who assumes the door is closed and emails support to ask.
+function returnExpiredEmail({ rmaNumber, orderId }) {
+  const rows =
+    detailRow("Return number", escapeHtml(rmaNumber)) +
+    detailRow("Order ID", `#${escapeHtml(orderId)}`);
+
+  return {
+    subject: `Your return ${rmaNumber} has expired`,
+    html: emailShell({
+      preheader: `Return ${rmaNumber} expired because we didn't receive the device.`,
+      badgeGlyph: "&#9203;",
+      headline: "Your return authorisation has expired",
+      subtext:
+        "We didn't receive the device within 14 days, so this return number is no longer valid. If you still want to return it, start a new request from your order and we'll issue a fresh one — assuming the item is still inside its return window.",
+      detailRowsHtml: rows,
+      ctaLabel: "View Your Orders",
       ctaHref: ACCOUNT_URL,
       footerNote: "You're receiving this because you asked to return an item.",
     }),
@@ -627,6 +871,35 @@ function adminNewContactEmail({ name, email, subject, message, submissionId }) {
   };
 }
 
+// A week after the phone arrived, asking what they thought.
+//
+// Sent once per order and never chased. A second email asking for a review is
+// the point at which a shop stops sounding interested and starts sounding
+// like it wants something, and the first one has already asked.
+function reviewPromptEmail(order, items) {
+  const names = items.map((item) => item.name).filter(Boolean);
+  const first = names[0] || "your device";
+
+  const rows = names.slice(0, 4).map((name) => detailRow("Device", escapeHtml(name))).join("");
+
+  return {
+    subject: names.length > 1
+      ? "How are your devices getting on?"
+      : `How is your ${first} getting on?`,
+    html: emailShell({
+      preheader: `Tell other buyers what you think of ${escapeHtml(first)}.`,
+      badgeGlyph: "&#9733;",
+      headline: "How is it going?",
+      subtext:
+        "You've had it about a week, which is long enough to know. A couple of lines from you is worth more to the next buyer than anything we could write ourselves — and because you bought it here, your review carries a verified badge.",
+      detailRowsHtml: rows,
+      ctaLabel: "Write a review",
+      ctaHref: ACCOUNT_URL,
+      footerNote: "Not what you hoped for? Reply to this email instead and we'll put it right.",
+    }),
+  };
+}
+
 module.exports = {
   emailShell,
   adminNewContactEmail,
@@ -638,6 +911,15 @@ module.exports = {
   paymentReceiptEmail,
   refundApprovedEmail,
   refundRequestReceivedEmail,
+  returnLabelIssuedEmail,
+  orderShippedEmail,
+  orderLinkEmail,
+  revisedOfferEmail,
+  returnReminderEmail,
+  returnExpiredEmail,
+  reviewPromptEmail,
+  shouldEmailStatus,
+  TRADE_IN_STATUS_COPY,
   refundReturnInstructionsEmail,
   refundDeviceReceivedEmail,
   refundRejectedEmail,

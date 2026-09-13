@@ -69,3 +69,91 @@ describe("getCategoriesWithProductCounts", () => {
     expect(next).toHaveBeenCalledWith(expect.any(Error));
   });
 });
+
+// The seed check is a round trip, and on a shared Atlas tier a round trip is
+// about 300ms whatever it asks for. This endpoint returns ten rows that
+// change a few times a year and was paying that on every single request.
+describe("getShopCategories — seeding once, not per request", () => {
+  // The seed is memoised per process, so every test needs a fresh module
+  // registry. Both the controller and the mocked model are required inside
+  // that fresh registry, or the test would be holding a different mock than
+  // the one the controller calls.
+  let controller;
+  let ShopCategory;
+  let defaults;
+
+  beforeEach(() => {
+    jest.resetModules();
+    ShopCategory = require("../src/models/shopCategory.model");
+    controller = require("../src/controllers/category.controller");
+    defaults = require("../src/constants/shopCategoryDefaults").SHOP_CATEGORY_DEFAULTS;
+    ShopCategory.find.mockReset();
+    ShopCategory.insertMany.mockReset();
+    ShopCategory.insertMany.mockResolvedValue([]);
+  });
+
+  // The seed's own read is projected and lean; the listing read sorts first.
+  const answering = (docs) => {
+    ShopCategory.find.mockImplementation((filter, projection) =>
+      projection ? { lean: async () => docs } : { sort: () => ({ lean: async () => docs }) });
+  };
+
+  const allPresent = () => defaults.map((item) => ({ modelName: item.modelName }));
+
+  it("checks for missing categories only once, however many requests arrive", async () => {
+    answering(allPresent());
+
+    await controller.getShopCategories({}, makeRes(), jest.fn());
+    await controller.getShopCategories({}, makeRes(), jest.fn());
+    await controller.getShopCategories({}, makeRes(), jest.fn());
+
+    // Three listings, one seed check. Each one used to cost a round trip, and
+    // on a shared Atlas tier a round trip is about 300ms whatever it asks for.
+    const seedReads = ShopCategory.find.mock.calls.filter(([, projection]) => projection);
+    expect(seedReads).toHaveLength(1);
+    expect(ShopCategory.find).toHaveBeenCalledTimes(4);
+  });
+
+  it("still seeds a category that is missing", async () => {
+    answering([{ modelName: defaults[0].modelName }]);
+
+    await controller.getShopCategories({}, makeRes(), jest.fn());
+
+    const [inserted] = ShopCategory.insertMany.mock.calls[0];
+    expect(inserted).toHaveLength(defaults.length - 1);
+  });
+
+  it("seeds nothing when every category is already there", async () => {
+    answering(allPresent());
+
+    await controller.getShopCategories({}, makeRes(), jest.fn());
+
+    expect(ShopCategory.insertMany).not.toHaveBeenCalled();
+  });
+
+  it("tries again on the next request when the seed failed", async () => {
+    // A connection that was not ready yet must not leave the categories
+    // missing for the life of the process.
+    ShopCategory.find.mockImplementationOnce(() => ({
+      lean: async () => { throw new Error("not connected"); },
+    }));
+
+    await controller.getShopCategories({}, makeRes(), jest.fn());
+
+    answering([]);
+    await controller.getShopCategories({}, makeRes(), jest.fn());
+
+    expect(ShopCategory.insertMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a seed failure rather than answering with nothing", async () => {
+    ShopCategory.find.mockImplementationOnce(() => ({
+      lean: async () => { throw new Error("not connected"); },
+    }));
+    const next = jest.fn();
+
+    await controller.getShopCategories({}, makeRes(), next);
+
+    expect(next).toHaveBeenCalledWith(expect.any(Error));
+  });
+});
