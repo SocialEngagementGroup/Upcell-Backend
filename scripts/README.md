@@ -37,6 +37,28 @@ Safe to run any time; they change nothing.
 | `audit-iphone-catalog.js` | Does each iPhone family have the variants it should? |
 | `audit-product-categories.js` | Is every parent attached to a real shop category? |
 | `audit-variant-categories.js` | Does any variant disagree with its parent's category? |
+| `catalogue-audit.js` | What is missing from every product, and is anything priced oddly? `--csv` also writes the two spreadsheets |
+
+## Asking the client to fill in the gaps
+
+```bash
+node scripts/catalogue-audit.js --csv       # writes reports/*.csv
+python scripts/build-client-workbook.py     # writes reports/*.xlsx
+```
+
+`catalogue-audit.js` reads every product and says what it is missing. The
+interesting output is not the counts — it is the last section, which asks
+whether condition is reflected in the price at all. On the development
+catalogue, 206 model+storage groups hold both Good and Excellent units and
+price them identically, which is a decision nobody has made rather than a bug.
+
+`build-client-workbook.py` turns that into the spreadsheet UpCell sends the
+client: a "Fill in" tab with only the rows that need something and the empty
+cells highlighted, a "Pricing decision" tab for the 206 groups, and the full
+catalogue for reference. Needs `openpyxl` (`pip install openpyxl`).
+
+Both are read-only. `reports/` is gitignored — it holds real product data, and
+it is one command to regenerate.
 
 ## Applied to development, still needed for production
 

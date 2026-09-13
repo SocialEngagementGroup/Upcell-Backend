@@ -21,3 +21,6 @@ backups/
 # Data dumps written by scripts/ when they delete something. Local safety
 # copies, not source — they hold real records and must not reach GitHub.
 scripts/removed-*.json
+
+# Catalogue audit output. Holds real product data — regenerate, do not commit.
+reports/
