@@ -29,6 +29,7 @@
  * Safe to re-run: it recomputes from scratch and only writes what differs.
  */
 require("dotenv").config();
+require("./lib/announce-db");
 const mongoose = require("mongoose");
 
 const WRITE = process.argv.includes("--write");

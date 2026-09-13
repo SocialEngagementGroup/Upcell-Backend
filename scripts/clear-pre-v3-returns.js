@@ -29,6 +29,7 @@
  *     deletion is the one thing an audit trail must not do.
  */
 require("dotenv").config();
+require("./lib/announce-db");
 const mongoose = require("mongoose");
 const fs = require("fs");
 const path = require("path");

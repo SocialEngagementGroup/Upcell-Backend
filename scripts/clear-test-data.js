@@ -10,6 +10,7 @@
 // production and running this out of habit cannot wipe real orders.
 require("dotenv").config();
 
+require("./lib/announce-db");
 const fs = require("fs");
 const path = require("path");
 const mongoose = require("mongoose");

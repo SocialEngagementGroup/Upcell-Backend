@@ -21,6 +21,7 @@
  * Safe to re-run: a second run finds nothing to do.
  */
 require("dotenv").config();
+require("./lib/announce-db");
 const mongoose = require("mongoose");
 
 const WRITE = process.argv.includes("--write");

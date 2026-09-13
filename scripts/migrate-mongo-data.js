@@ -49,6 +49,19 @@ async function migrateCollection(sourceDb, targetDb, collectionName) {
 }
 
 async function main() {
+  // Named before either connection opens. This script copies one database
+  // over another, so it is the one where reading the wrong name off a
+  // terminal costs the most — and createConnection bypasses the wrapper in
+  // lib/announce-db.js, which only covers mongoose.connect.
+  const { nameFrom } = require("./lib/announce-db");
+  const line = "─".repeat(58);
+  console.log(`
+${line}`);
+  console.log(`  Copying FROM : ${nameFrom(oldUri)}`);
+  console.log(`  Copying INTO : ${nameFrom(newUri)}  <-- this one is overwritten`);
+  console.log(`${line}
+`);
+
   const source = await mongoose.createConnection(oldUri).asPromise();
   const target = await mongoose.createConnection(newUri).asPromise();
 

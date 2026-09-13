@@ -21,6 +21,7 @@
  * off and X9 in PIPELINE.md is a physical audit rather than a script.
  */
 require("dotenv").config();
+require("./lib/announce-db");
 const mongoose = require("mongoose");
 const SingleVariation = require("../src/models/singleVariation.model");
 const { deviceTypeFromCategory, hasIdentity } = require("../src/constants/deviceIdentity");

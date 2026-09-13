@@ -18,6 +18,7 @@
  * somebody has since given a real picture keeps it.
  */
 require("dotenv").config();
+require("./lib/announce-db");
 const mongoose = require("mongoose");
 const { SHOP_CATEGORY_DEFAULTS } = require("../constants/shopCategoryDefaults");
 
