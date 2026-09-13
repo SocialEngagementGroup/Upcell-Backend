@@ -38,6 +38,7 @@ Safe to run any time; they change nothing.
 | `audit-product-categories.js` | Is every parent attached to a real shop category? |
 | `audit-variant-categories.js` | Does any variant disagree with its parent's category? |
 | `catalogue-audit.js` | What is missing from every product, and is anything priced oddly? `--csv` also writes the two spreadsheets |
+| `check-deployment.js <url>` | Is a deployed backend running current code, and is its database migrated? Takes the backend URL, calls only public endpoints |
 
 ## Asking the client to fill in the gaps
 
