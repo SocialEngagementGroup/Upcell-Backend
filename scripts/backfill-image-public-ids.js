@@ -18,6 +18,7 @@ const path = require("path");
 const mongoose = require("mongoose");
 require("dotenv").config();
 
+require("./lib/announce-db");
 const MAPPING = path.join(__dirname, "cloudinary-manifest.json");
 const WRITE = process.argv.includes("--write");
 

@@ -1,7 +1,8 @@
 # scripts/
 
-Every script here connects to whatever `MONGODB_URL` points at. Check which
-database it printed before you answer a prompt — the development database is
+Every script here connects to whatever `MONGODB_URL` points at, and every one
+now prints that database name and whether it is writing before it does
+anything. Read those two lines before you answer a prompt — the development database is
 the one the live site writes to, so "development" is a misleading name.
 
 Anything that writes defaults to a dry run. `--write` (or `--apply`, or

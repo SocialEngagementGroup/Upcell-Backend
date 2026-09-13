@@ -23,6 +23,7 @@
  * Safe to re-run: a product already carrying a grade is skipped.
  */
 require("dotenv").config();
+require("./lib/announce-db");
 const mongoose = require("mongoose");
 const { GRADES } = require("../src/constants/grading");
 

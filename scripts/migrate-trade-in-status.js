@@ -27,6 +27,7 @@
  * so nothing in the log looks like a decision a person made.
  */
 require("dotenv").config();
+require("./lib/announce-db");
 const mongoose = require("mongoose");
 const { TradeInRequest } = require("../src/models/tradeInRequest.model");
 const { LEGACY_STATUS_MAP, isTradeInStatus } = require("../src/constants/tradeInStatus");

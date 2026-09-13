@@ -1,4 +1,5 @@
 require("dotenv").config();
+require("./lib/announce-db");
 const mongoose = require("mongoose");
 const { parentSlug, variantSlug, ensureUniqueSlug } = require("../src/utils/slug");
 

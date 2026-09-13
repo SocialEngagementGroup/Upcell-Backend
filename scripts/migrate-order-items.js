@@ -24,6 +24,7 @@
 //   node scripts/migrate-order-items.js            (dry run, default)
 //   node scripts/migrate-order-items.js --apply     (writes for real)
 require("dotenv").config();
+require("./lib/announce-db");
 const mongoose = require("mongoose");
 const Order = require("../src/models/order.model");
 const { convertLineItems } = require("../src/utils/orderItems");

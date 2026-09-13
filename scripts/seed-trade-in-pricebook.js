@@ -30,6 +30,7 @@
  * given, so a re-run cannot overwrite a price somebody has since edited.
  */
 require("dotenv").config();
+require("./lib/announce-db");
 const mongoose = require("mongoose");
 const TradeInPriceBook = require("../src/models/tradeInPriceBook.model");
 const TradeInQuestion = require("../src/models/tradeInQuestion.model");

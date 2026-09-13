@@ -1,4 +1,5 @@
 require("dotenv").config();
+require("./lib/announce-db");
 const mongoose = require("mongoose");
 const ParentProduct = require("../src/models/parentProduct.model");
 const SingleVariation = require("../src/models/singleVariation.model");

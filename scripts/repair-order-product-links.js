@@ -24,6 +24,7 @@
  * worse than leaving it pointing at nothing.
  */
 require("dotenv").config();
+require("./lib/announce-db");
 const mongoose = require("mongoose");
 
 const WRITE = process.argv.includes("--write");

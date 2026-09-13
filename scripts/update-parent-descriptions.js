@@ -1,4 +1,5 @@
 require("dotenv").config();
+require("./lib/announce-db");
 const fs = require("fs");
 const path = require("path");
 const mongoose = require("mongoose");
