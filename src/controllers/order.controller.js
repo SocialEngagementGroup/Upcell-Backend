@@ -548,7 +548,16 @@ async function updateOrderStatus(req, res, next) {
       return res.status(400).json({ error: "Invalid order status" });
     }
 
-    const order = await Order.findById(orderId || null);
+    // Check the shape before querying. findById on a string that is not an
+    // ObjectId throws a CastError, which the global handler turns into a 500 —
+    // so a mistyped id paged an admin about a server fault instead of saying
+    // the order was not found. Same guard getOrder and requestOrderLink
+    // already use; this was the one path that skipped it.
+    if (!OBJECT_ID_PATTERN.test(String(orderId || ""))) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    const order = await Order.findById(orderId);
     if (!order) {
       return res.status(404).json({ error: "Order not found" });
     }

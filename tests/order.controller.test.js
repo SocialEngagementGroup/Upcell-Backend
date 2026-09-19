@@ -20,6 +20,14 @@ const { Notification } = require("../src/models/notification.model");
 const { makeOrderObjAndTotal } = require("../src/controllers/checkout.controller");
 const orderController = require("../src/controllers/order.controller");
 
+// A real ObjectId shape, not "order1".
+//
+// updateOrderStatus checks the shape before querying, because findById throws
+// a CastError on anything that is not 24 hex characters and the global handler
+// turns that into a 500. These tests used a friendly placeholder, which the
+// guard correctly refuses — so the id has to look like an id.
+const ORDER_ID = "68b59c07d4a1e2b8c3f10a51";
+
 const makeReqRes = (body = {}, { params = {}, query = {}, user } = {}) => {
   const req = { body, params, query, user };
   const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json: jest.fn(), send: jest.fn() };
@@ -81,7 +89,7 @@ describe("createOrder — always unpaid until the bank gateway confirms payment"
 
 describe("updateOrderStatus — status allowlist + not-found handling", () => {
   it("rejects a status value outside the schema's enum with 400, before touching the DB", async () => {
-    const { req, res } = makeReqRes({ orderId: "order1", status: "TOTALLY_MADE_UP_STATUS" });
+    const { req, res } = makeReqRes({ orderId: ORDER_ID, status: "TOTALLY_MADE_UP_STATUS" });
     await orderController.updateOrderStatus(req, res, jest.fn());
 
     expect(res.statusCode).toBe(400);
@@ -101,7 +109,7 @@ describe("updateOrderStatus — status allowlist + not-found handling", () => {
     const mockOrder = { _id: "order1", status: "Processing", paid: true, email: "buyer@example.com", save: jest.fn().mockResolvedValue(true) };
     Order.findById.mockResolvedValue(mockOrder);
 
-    const { req, res } = makeReqRes({ orderId: "order1", status: "Shipped" });
+    const { req, res } = makeReqRes({ orderId: ORDER_ID, status: "Shipped" });
     await orderController.updateOrderStatus(req, res, jest.fn());
 
     expect(mockOrder.status).toBe("Shipped");
@@ -123,12 +131,49 @@ describe("updateOrderStatus — status allowlist + not-found handling", () => {
 // Orders had no state machine. Only the status *value* was validated, so the
 // admin dropdown accepted any status from any other one — and the status is
 // what the return window, the refund path and the customer's order list read.
+// A malformed id used to reach findById, which throws a CastError on anything
+// that is not 24 hex characters. The global handler turns that into a 500, so
+// a typo in an admin form read as a server fault.
+describe("updateOrderStatus — a malformed id", () => {
+  const send = async (orderId) => {
+    const mockOrder = { _id: "order1", status: "Processing", paid: true, email: "buyer@example.com", save: jest.fn().mockResolvedValue(true) };
+    Order.findById.mockResolvedValue(mockOrder);
+
+    const { req, res } = makeReqRes({ orderId, status: "Shipped" });
+    await orderController.updateOrderStatus(req, res, jest.fn());
+    return res;
+  };
+
+  it.each(["not-an-id", "", "1234", "zzzzzzzzzzzzzzzzzzzzzzzz"])(
+    "answers 404 rather than 500 for %p",
+    async (bad) => {
+      const res = await send(bad);
+
+      expect(res.statusCode).toBe(404);
+    }
+  );
+
+  it("never queries the database with one", async () => {
+    Order.findById.mockClear();
+
+    await send("not-an-id");
+
+    expect(Order.findById).not.toHaveBeenCalled();
+  });
+
+  it("still works with a real id", async () => {
+    const res = await send("68b59c07d4a1e2b8c3f10a51");
+
+    expect(res.statusCode).toBe(200);
+  });
+});
+
 describe("updateOrderStatus — the move, not just the value", () => {
   const move = async (from, to, { paid = true } = {}) => {
     const mockOrder = { _id: "order1", status: from, paid, email: "buyer@example.com", save: jest.fn().mockResolvedValue(true) };
     Order.findById.mockResolvedValue(mockOrder);
 
-    const { req, res } = makeReqRes({ orderId: "order1", status: to });
+    const { req, res } = makeReqRes({ orderId: ORDER_ID, status: to });
     await orderController.updateOrderStatus(req, res, jest.fn());
     return { mockOrder, res };
   };
@@ -194,7 +239,7 @@ describe("updateOrderStatus — keeps the paid flag in step with status", () => 
     const mockOrder = { _id: "order1", status: from, paid, email: "buyer@example.com", save: jest.fn().mockResolvedValue(true) };
     Order.findById.mockResolvedValue(mockOrder);
 
-    const { req, res } = makeReqRes({ orderId: "order1", status: to });
+    const { req, res } = makeReqRes({ orderId: ORDER_ID, status: to });
     await orderController.updateOrderStatus(req, res, jest.fn());
     return { mockOrder, res };
   };
@@ -265,7 +310,7 @@ describe("updateOrderStatus — keeps the paid flag in step with status", () => 
     const mockOrder = { _id: "order1", status: "pending_payment", paid: false, email: "buyer@example.com", save: jest.fn() };
     Order.findById.mockResolvedValue(mockOrder);
 
-    const { req, res } = makeReqRes({ orderId: "order1", status: "NOPE" });
+    const { req, res } = makeReqRes({ orderId: ORDER_ID, status: "NOPE" });
     await orderController.updateOrderStatus(req, res, jest.fn());
 
     expect(res.statusCode).toBe(400);
@@ -1023,7 +1068,7 @@ describe("orderShippedEmail", () => {
 
   it("puts the tracking number in the subject and the link in the button", () => {
     const { subject, html } = orderShippedEmail({
-      orderId: "order1",
+      orderId: ORDER_ID,
       carrier: "FedEx",
       trackingNumber: "794657312345",
       trackingUrl: "https://www.fedex.com/fedextrack/?trknbr=794657312345",
@@ -1038,7 +1083,7 @@ describe("orderShippedEmail", () => {
 
   it("falls back to the account page when the carrier has no tracking page", () => {
     const { html } = orderShippedEmail({
-      orderId: "order1", carrier: "Other", trackingNumber: "12345678", trackingUrl: null,
+      orderId: ORDER_ID, carrier: "Other", trackingNumber: "12345678", trackingUrl: null,
     });
 
     expect(html).toContain("View Your Order");
