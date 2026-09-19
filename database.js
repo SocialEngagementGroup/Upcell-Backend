@@ -34,6 +34,30 @@ function connectToDb() {
         heartbeatFrequencyMS: 10000,
         minPoolSize: 5,
         maxPoolSize: 10,
+        // Wire compression between this server and Atlas. The catalogue query
+        // alone pulls about 750 KB of BSON on every uncached shop page.
+        //
+        // Deliberately an environment variable rather than a constant, and
+        // deliberately unset by default, because this could not be measured
+        // honestly from a developer machine. Benchmarked 19 Sep against
+        // upcell_development: no compression 25.8s median, zlib 23.9s, and no
+        // compression again 21.9s — the same configuration varying by four
+        // seconds between runs, with zlib landing between its own control
+        // rounds. That is a laptop's internet link to Atlas, not Render's; the
+        // same endpoint answers in about half a second from Render.
+        //
+        // It also might not help. M0 and Flex are CPU-throttled, and
+        // compressing 750 KB costs CPU at both ends — on a cluster that is
+        // already burst-limited that can cost more than the bytes save.
+        //
+        // So: turn it on in Render's environment, watch the reconciliation
+        // timings, and turn it off again if nothing improves. No deploy either
+        // way. zlib needs nothing installed; zstd and snappy are optional npm
+        // modules this project does not have, and the driver quietly falls back
+        // to zlib when they are named but missing — verified, it does not throw.
+        ...(process.env.MONGO_COMPRESSORS
+          ? { compressors: process.env.MONGO_COMPRESSORS }
+          : {}),
       })
       .then(() => {
         console.log(`MongoDB connected -> [${dbName}] (${env} environment)`);

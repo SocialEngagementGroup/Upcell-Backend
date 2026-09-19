@@ -21,7 +21,22 @@ const BROWSABLE = {
   refurbState: { $nin: ["NEEDS_BATTERY", "NEEDS_REPAIR"] },
 };
 
-const productCardFields = "slug imagePublicId imageIsGeneric parentCatagory productName categoryName description storage color price image outOfStock cosmeticGrade batteryHealth carrierStatus deviceType";
+// No `description`. It was 228.8 KB of the 669 KB this endpoint returns — 34%
+// — and no card has ever drawn it. Only 83 distinct texts exist across 954
+// products, so the same paragraph was being sent about eleven times.
+//
+// It fed two things, both checked before removing it:
+//   - the shop's client-side search, which now matches on name and category.
+//     With 83 shared descriptions a search for a word in one matched hundreds
+//     of unrelated devices anyway.
+//   - inferFamily, which reads categoryName and productName first. Tested
+//     against all 954 live products: dropping description changes the inferred
+//     family for none of them.
+//
+// `image` stays, and is worth the 79 KB. It is the fallback for a product with
+// no Cloudinary id — production has none today, but development has 14, and a
+// product created without an upload would otherwise render no picture at all.
+const productCardFields = "slug imagePublicId imageIsGeneric parentCatagory productName categoryName storage color price image outOfStock cosmeticGrade batteryHealth carrierStatus deviceType";
 
 // The fields the admin product-management pages (AllProduct, AddProduct)
 // actually render or edit — confirmed by grepping SingleProductGroup.jsx and

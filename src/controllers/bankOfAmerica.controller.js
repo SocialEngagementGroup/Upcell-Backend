@@ -218,9 +218,25 @@ exports.preparePayment = async (req, res, next) => {
 
     const { forename, surname } = splitName(newOrder.name);
 
-    // authorization, not sale: devices ship after checkout, so the money is
-    // only captured at dispatch. A sale here would take payment for something
-    // still sitting on the shelf.
+    // sale: the bank authorises and captures in one step, so the money moves
+    // at checkout.
+    //
+    // This was "authorization" until 19 September 2026, on the reasoning that
+    // devices ship after checkout and the money should only be captured at
+    // dispatch. That is the better design and it was never finished — there is
+    // no capture step anywhere in this codebase. `capturedAt` sits on the order
+    // model and nothing has ever written to it.
+    //
+    // An authorisation that is never captured expires, the hold is released,
+    // and the money goes back to the customer. The device has already been
+    // posted. Every order would have shipped for nothing, quietly, with no
+    // error anywhere to show for it.
+    //
+    // Capture-at-dispatch needs Simple Order or REST credentials the bank has
+    // not issued. Until it does, taking the money at checkout is the only
+    // option that actually collects it. Revisit when those credentials arrive:
+    // the refund path already works, so a customer who cancels before dispatch
+    // is refunded rather than left holding a lapsed authorisation.
     const fields = exports.buildSignedFields({
       access_key: accessKey,
       // Identifies which Secure Acceptance profile to run this through. Without
@@ -230,7 +246,7 @@ exports.preparePayment = async (req, res, next) => {
       transaction_uuid: transactionUuid,
       signed_date_time: signedDateTime(),
       locale: "en",
-      transaction_type: "authorization",
+      transaction_type: "sale",
       reference_number: newOrder._id.toString(),
       amount: totalPrice.toFixed(2),
       currency: "usd",
@@ -523,7 +539,7 @@ exports.merchantPost = async (req, res, next) => {
               fulfilmentBlocked: true,
               fulfilmentBlockReason:
                 "Review accepted after the device had already sold to another customer. " +
-                "Contact the customer and reverse the authorisation in the Business Center.",
+                "Contact the customer and refund them in the Business Center — the money has been taken.",
             },
           }
         ).catch((error) => {
@@ -548,7 +564,7 @@ exports.merchantPost = async (req, res, next) => {
             `Order ${claimed._id} (${claimed.email})`,
             `Bank transaction ${body.transaction_id}`,
             `Devices already sold: ${gone.join(", ")}`,
-            "Contact the customer today, and reverse the authorisation in the Business Center — the code cannot.",
+            "Contact the customer today and refund them in the Business Center — the money has been taken, and the code cannot return it.",
           ],
           urgent: true,
         }).catch((error) => {

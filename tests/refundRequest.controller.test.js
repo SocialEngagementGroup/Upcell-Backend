@@ -934,6 +934,106 @@ describe("submitInspection", () => {
     return { res, request };
   };
 
+  // The device identity check. `matchesSoldDevice` existed, complete and
+  // documented, and nothing called it — while the checklist asked staff to tick
+  // "IMEI / serial matches the order" and the Return Policy page told customers
+  // that check happened.
+  describe("checking the device against what was sold", () => {
+    // A real IMEI: 15 digits that pass the Luhn check. An invented one would be
+    // rejected by the schema, not by the comparison, and would prove nothing.
+    const SOLD_IMEI = "490154203237518";
+    const OTHER_IMEI = "356938035643809";
+
+    const inspectWithOrder = async (request, order, device) => {
+      RefundRequest.findById.mockResolvedValue(request);
+      Order.findById.mockResolvedValue(order);
+
+      const { req, res, next } = makeReqRes(
+        { checklist: allPass(), photos: fivePhotos, device },
+        { params: { id: "req1" }, user: STAFF }
+      );
+      await controller.submitInspection(req, res, next);
+      return res;
+    };
+
+    const orderWith = (items) => paidOrder({ items });
+
+    it("marks the device verified when the number read matches the order", async () => {
+      const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+      const order = orderWith([{ productId: "p1", imei: SOLD_IMEI }]);
+
+      const res = await inspectWithOrder(request, order, { imei: SOLD_IMEI });
+
+      expect(res.statusCode).toBe(200);
+      expect(request.device.imeiVerified).toBe(true);
+      expect(request.device.imei).toBe(SOLD_IMEI);
+    });
+
+    it("does not verify a different device, and says so on the timeline", async () => {
+      const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+      const order = orderWith([{ productId: "p1", imei: SOLD_IMEI }]);
+
+      await inspectWithOrder(request, order, { imei: OTHER_IMEI });
+
+      expect(request.device.imeiVerified).toBe(false);
+      expect(request.timeline.some((e) => e.event === "device_identity_mismatch")).toBe(true);
+    });
+
+    it("does not reject the inspection on a mismatch — a person decides that", async () => {
+      const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+      const order = orderWith([{ productId: "p1", imei: SOLD_IMEI }]);
+
+      const res = await inspectWithOrder(request, order, { imei: OTHER_IMEI });
+
+      expect(res.statusCode).toBe(200);
+    });
+
+    it("only compares against the lines this return actually names", async () => {
+      // An order for two phones, one being returned. Sending back the OTHER
+      // phone from the same order must not verify — otherwise any device from
+      // a multi-item order passes, which is no check at all.
+      const request = requestDoc({ status: "DeviceReceived", timeline: [], itemIds: ["p1"] });
+      const order = orderWith([
+        { productId: "p1", imei: SOLD_IMEI },
+        { productId: "p2", imei: OTHER_IMEI },
+      ]);
+
+      await inspectWithOrder(request, order, { imei: OTHER_IMEI });
+
+      expect(request.device.imeiVerified).toBe(false);
+    });
+
+    it("matches on a serial number, for a device that has no IMEI", async () => {
+      const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+      const order = orderWith([{ productId: "p1", serialNumber: "C02XY1234567" }]);
+
+      await inspectWithOrder(request, order, { serial: "c02xy1234567" });
+
+      // Read back off a MacBook in whatever case the inspector typed.
+      expect(request.device.imeiVerified).toBe(true);
+    });
+
+    it("records unverified — not mismatched — when the order never captured an identifier", async () => {
+      // Every order placed today. No catalogue row carries an IMEI yet, so
+      // "we could not check" must not be stored as either answer.
+      const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+      const order = orderWith([{ productId: "p1" }]);
+
+      await inspectWithOrder(request, order, { imei: SOLD_IMEI });
+
+      expect(request.device.imeiVerified).toBe(false);
+      expect(request.timeline.some((e) => e.event === "device_identity_mismatch")).toBe(false);
+    });
+
+    it("leaves the device unverified when the inspector read nothing", async () => {
+      const request = requestDoc({ status: "DeviceReceived", timeline: [] });
+      const order = orderWith([{ productId: "p1", imei: SOLD_IMEI }]);
+
+      await inspectWithOrder(request, order, undefined);
+
+      expect(request.device.imeiVerified).toBe(false);
+    });
+  });
   it("records the inspection and who did it", async () => {
     const request = requestDoc({ status: "DeviceReceived", timeline: [] });
 

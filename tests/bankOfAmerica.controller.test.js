@@ -150,6 +150,34 @@ describe("fields sent to the gateway — reason code 102 causes", () => {
     return captured;
   };
 
+  // The transaction type decides whether UpCell is paid at all.
+  //
+  // It was "authorization" — money reserved, not taken — on the plan that a
+  // capture would run at dispatch. No capture step was ever written, and an
+  // authorisation that is never captured expires: the hold is released, the
+  // customer keeps their money, and the device has already been posted. That
+  // failure is completely silent, which is why it is pinned here.
+  it("sends sale, so the money is actually taken", async () => {
+    const fields = await prepare();
+
+    expect(fields.transaction_type).toBe("sale");
+  });
+
+  it("does not send authorization, which nothing in this codebase captures", async () => {
+    const fields = await prepare();
+
+    expect(fields.transaction_type).not.toBe("authorization");
+  });
+
+  it("signs the transaction type, so it cannot be altered in the browser", async () => {
+    // The whole field set is posted by the customer's own browser. If the type
+    // were unsigned, anyone could change sale to authorization on the way past
+    // and take a device without paying for it.
+    const fields = await prepare();
+
+    expect(fields.signed_field_names.split(",")).toContain("transaction_type");
+  });
+
   beforeEach(() => {
     const SingleVariation = require("../src/models/singleVariation.model");
     const device = {
@@ -635,7 +663,12 @@ describe("merchantPost — every decision the gateway can send", () => {
 
     const [, update] = Order.updateOne.mock.calls[0];
     expect(update.$set.fulfilmentBlocked).toBe(true);
-    expect(update.$set.fulfilmentBlockReason).toMatch(/reverse the authorisation/i);
+    // Not "reverse the authorisation" any more. With transaction_type sale
+    // the money has actually been taken, so the action is a refund — and
+    // telling staff to reverse a hold that does not exist wastes the hour
+    // that matters most.
+    expect(update.$set.fulfilmentBlockReason).toMatch(/refund/i);
+    expect(update.$set.fulfilmentBlockReason).toMatch(/money has been taken/i);
 
     expect(sendOpsAlert).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "oversell_collision", urgent: true })

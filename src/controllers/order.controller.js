@@ -1,6 +1,14 @@
 const mongoose = require("mongoose");
 const { Resend } = require("resend");
 const Order = require("../models/order.model");
+// The order state machine. Its own module, not a property of the model: several
+// suites mock the model wholesale, and a guard that disappears under jest.mock
+// is worse than no guard at all.
+const {
+  ALLOWED_ORDER_TRANSITIONS,
+  canTransitionOrder,
+  orderTransitionError,
+} = require("../constants/orderStatus");
 const { toCustomerOrder, ownsOrder } = require("../utils/orderView");
 const { reissueGuestToken } = require("../services/guestOrder");
 const { anonymiseCustomer } = require("../services/accountDeletion");
@@ -547,6 +555,21 @@ async function updateOrderStatus(req, res, next) {
 
     const previousStatus = order.status;
     const previousPaid = order.paid;
+
+    // Validating the value was never the same as validating the move. Without
+    // this, Delivered -> Processing was accepted, and so was Refunded ->
+    // Shipped: the status a refund, a return window and the customer's order
+    // list all read, set to something that cannot have happened.
+    //
+    // The refusal names what would have been legal, because the person seeing
+    // it is looking at a dropdown that offered the option.
+    if (!canTransitionOrder(previousStatus, status)) {
+      return res.status(400).json({
+        error: orderTransitionError(previousStatus, status),
+        allowed: ALLOWED_ORDER_TRANSITIONS[previousStatus] || [],
+      });
+    }
+
     order.status = status;
 
     // This is the only path that can confirm a payment now: the bank-hosted

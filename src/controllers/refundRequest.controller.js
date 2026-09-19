@@ -7,6 +7,9 @@ const { calculateRefund } = require("../services/refund");
 const { applyTransition, recordEvent } = require("../services/returnTimeline");
 const { summariseForQueue } = require("../services/returnRiskFlags");
 const { issueRmaNumber } = require("../utils/rma");
+// Answers "is the phone on the bench the phone we sold them?". Written when
+// device identity was added and, until now, never called from anywhere.
+const { matchesSoldDevice } = require("../utils/deviceIdentity");
 const {
   reasonCategory,
   faultAttributionFor,
@@ -977,7 +980,7 @@ function getInspectionChecklist(req, res) {
  */
 async function submitInspection(req, res, next) {
   try {
-    const { checklist, photos, findings, grade: gradeOverride } = req.body || {};
+    const { checklist, photos, findings, grade: gradeOverride, device } = req.body || {};
 
     const request = await RefundRequest.findById(req.params.id || null);
     if (!request) return res.status(404).json({ error: "Refund request not found" });
@@ -1019,6 +1022,57 @@ async function submitInspection(req, res, next) {
       gradeAtSale,
     });
     const grade = gradeOverride || gradeFrom(validation.checklist);
+
+    // Is the device on the bench the device the order says was sold?
+    //
+    // `matchesSoldDevice` has existed, complete and documented, since device
+    // identity was added, and nothing called it. The checklist ticks "IMEI /
+    // serial matches the order", which until now meant only that somebody
+    // looked — there was nothing to look against.
+    //
+    // Compared only against the line items this return actually names. An order
+    // for three phones being returned for one must not verify against the other
+    // two, or returning any phone from a multi-item order would pass.
+    //
+    // Three answers, and "unknown" is the common one today: no catalogue row
+    // carries an IMEI yet, so every current order returns it. Unknown is
+    // recorded as unverified and nothing else — "we could not check" must never
+    // be stored as "we checked and it was right", which is the claim a
+    // chargeback argument actually rests on.
+    let identityCheck = "unknown";
+    if (device?.imei || device?.serial) {
+      // Plain findById, like every other order read in this file. A projected
+      // .lean() would be marginally cheaper on one admin action and would make
+      // this the only call here with a different shape.
+      const order = await Order.findById(request.orderId);
+
+      const returned = (order?.items || [])
+        .filter((item) => request.itemIds.includes(String(item.productId)))
+        .map((item) => ({ imei: item.imei, serial: item.serialNumber }));
+
+      identityCheck = matchesSoldDevice(device, returned);
+    }
+
+    request.device = {
+      ...(request.device?.toObject?.() ?? request.device ?? {}),
+      ...(device?.imei ? { imei: device.imei } : {}),
+      ...(device?.serial ? { serial: device.serial } : {}),
+      imeiVerified: identityCheck === "match",
+    };
+
+    // A mismatch is not auto-rejected. It is the single most serious thing an
+    // inspection can find — a different device came back — and it is exactly
+    // the kind of call a person should make holding both records, not a rule
+    // that fires on a mistyped digit. Recorded on the timeline so it cannot be
+    // settled quietly, and returned below so the bench screen can say so.
+    if (identityCheck === "mismatch") {
+      recordEvent(request, {
+        event: "device_identity_mismatch",
+        actor: req.user?.email || req.user?.id,
+        actorType: "staff",
+        meta: { read: { imei: device?.imei, serial: device?.serial } },
+      });
+    }
 
     request.inspection = {
       inspectorId: req.user?.email || req.user?.id,

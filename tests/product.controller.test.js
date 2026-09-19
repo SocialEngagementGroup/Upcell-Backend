@@ -83,8 +83,32 @@ describe("getShopProducts — the shop page's data source", () => {
       // imagePublicId is the fallback resolveProductImage uses when the image
       // manifest has no photo for a product. Dropping it from this projection
       // broke the image on every newly added product.
-      "slug imagePublicId imageIsGeneric parentCatagory productName categoryName description storage color price image outOfStock cosmeticGrade batteryHealth carrierStatus deviceType"
+      "slug imagePublicId imageIsGeneric parentCatagory productName categoryName storage color price image outOfStock cosmeticGrade batteryHealth carrierStatus deviceType"
     );
+  });
+
+  it("does not send description — a third of the payload no card draws", async () => {
+    // 228.8 KB of 669 KB, and only 83 distinct texts across 954 products, so
+    // the same paragraph went out about eleven times. The product page still
+    // gets it; the listing does not.
+    mockFindChain(variations);
+
+    await product.getShopProducts({}, makeRes(), jest.fn());
+
+    const [, fields] = SingleVariation.find.mock.calls[0];
+    expect(fields.split(" ")).not.toContain("description");
+  });
+
+  it("still sends image, the fallback for a product with no Cloudinary id", async () => {
+    // Production has none today. Development has 14, and a product created
+    // without an upload would otherwise render no picture at all.
+    mockFindChain(variations);
+
+    await product.getShopProducts({}, makeRes(), jest.fn());
+
+    const [, fields] = SingleVariation.find.mock.calls[0];
+    expect(fields.split(" ")).toContain("image");
+    expect(fields.split(" ")).toContain("imagePublicId");
   });
 
   it("passes errors to next() instead of leaving the request hanging", async () => {

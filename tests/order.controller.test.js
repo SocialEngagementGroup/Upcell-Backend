@@ -120,6 +120,75 @@ describe("updateOrderStatus — status allowlist + not-found handling", () => {
 // If `paid` doesn't follow `status`, a confirmed order stays paid:false and
 // never appears on the customer's order list (getClientOrders filters on
 // paid:true) — the order is fulfilled but the customer can't see it.
+// Orders had no state machine. Only the status *value* was validated, so the
+// admin dropdown accepted any status from any other one — and the status is
+// what the return window, the refund path and the customer's order list read.
+describe("updateOrderStatus — the move, not just the value", () => {
+  const move = async (from, to, { paid = true } = {}) => {
+    const mockOrder = { _id: "order1", status: from, paid, email: "buyer@example.com", save: jest.fn().mockResolvedValue(true) };
+    Order.findById.mockResolvedValue(mockOrder);
+
+    const { req, res } = makeReqRes({ orderId: "order1", status: to });
+    await orderController.updateOrderStatus(req, res, jest.fn());
+    return { mockOrder, res };
+  };
+
+  it("refuses to send a delivered order back to Processing", async () => {
+    const { mockOrder, res } = await move("Delivered", "Processing");
+
+    expect(res.statusCode).toBe(400);
+    expect(mockOrder.status).toBe("Delivered");
+    expect(mockOrder.save).not.toHaveBeenCalled();
+  });
+
+  it("refuses to reopen a refunded order", async () => {
+    // Money has gone back. Anything after this is a new order, not an edit.
+    const { mockOrder, res } = await move("Refunded", "Shipped");
+
+    expect(res.statusCode).toBe(400);
+    expect(mockOrder.status).toBe("Refunded");
+  });
+
+  it("refuses to ship an order nobody has paid for", async () => {
+    const { res } = await move("pending_payment", "Shipped", { paid: false });
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("names what would have been allowed, because a dropdown offered the option", async () => {
+    const { res } = await move("Delivered", "Processing");
+
+    const [answer] = res.json.mock.calls[0];
+    expect(answer.allowed).toEqual(["Shipped", "Returned", "Refunded"]);
+    expect(answer.error).toContain("Delivered");
+    expect(answer.error).toContain("Processing");
+  });
+
+  it("allows a mistaken delivery to be walked back to Shipped", async () => {
+    // A correction, not a state violation — and deliveredAt is stamped once
+    // and left alone, so returning to Delivered cannot hand the customer a
+    // fresh 30 days.
+    const { mockOrder, res } = await move("Delivered", "Shipped");
+
+    expect(res.statusCode).toBe(200);
+    expect(mockOrder.status).toBe("Shipped");
+  });
+
+  it("treats re-sending the same status as a no-op, not an error", async () => {
+    // A double-click or a repeated submit. Answering 400 to that would be a
+    // worse experience than the missing guard was.
+    const { res } = await move("Shipped", "Shipped");
+
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("still refuses a status that is not a status at all", async () => {
+    const { res } = await move("Processing", "Teleported");
+
+    expect(res.statusCode).toBe(400);
+  });
+});
+
 describe("updateOrderStatus — keeps the paid flag in step with status", () => {
   const runStatusChange = async (from, to, { paid = false } = {}) => {
     const mockOrder = { _id: "order1", status: from, paid, email: "buyer@example.com", save: jest.fn().mockResolvedValue(true) };
@@ -130,26 +199,37 @@ describe("updateOrderStatus — keeps the paid flag in step with status", () => 
     return { mockOrder, res };
   };
 
-  it.each(["Processing", "Shipped", "Delivered", "Returned", "Refunded"])(
-    "marks the order paid when moving to '%s'",
-    async (status) => {
-      const { mockOrder } = await runStatusChange("pending_payment", status);
+  // Each case starts from a status the move is actually legal from. They all
+  // used to start at pending_payment, which was convenient and, once orders
+  // gained a state machine, wrong — pending_payment -> Shipped means posting a
+  // device for an order with no payment behind it. What is under test here is
+  // the paid flag following the status, not the route taken to get there.
+  it.each([
+    ["pending_payment", "Processing"],
+    ["Processing", "Shipped"],
+    ["Shipped", "Delivered"],
+    ["Delivered", "Returned"],
+    ["Delivered", "Refunded"],
+  ])("marks the order paid when moving %s -> %s", async (from, status) => {
+    const { mockOrder } = await runStatusChange(from, status);
 
-      expect(mockOrder.paid).toBe(true);
-      expect(mockOrder.status).toBe(status);
-      expect(mockOrder.save).toHaveBeenCalled();
-    }
-  );
+    expect(mockOrder.paid).toBe(true);
+    expect(mockOrder.status).toBe(status);
+    expect(mockOrder.save).toHaveBeenCalled();
+  });
 
-  it.each(["pending_payment", "payment failed"])(
-    "leaves the order unpaid when moving to '%s'",
-    async (status) => {
-      const { mockOrder } = await runStatusChange("Processing", status, { paid: true });
+  it.each([
+    // Nothing transitions *into* pending_payment — it is where an order starts.
+    // Re-sending the status it already holds is the honest way to check that a
+    // pending order is unpaid, and is a no-op the guard allows on purpose.
+    ["pending_payment", "pending_payment"],
+    ["pending_payment", "payment failed"],
+  ])("leaves the order unpaid at %s -> %s", async (from, status) => {
+    const { mockOrder } = await runStatusChange(from, status, { paid: true });
 
-      expect(mockOrder.paid).toBe(false);
-      expect(mockOrder.status).toBe(status);
-    }
-  );
+    expect(mockOrder.paid).toBe(false);
+    expect(mockOrder.status).toBe(status);
+  });
 
   it("confirming a pending order flips paid false -> true, making it visible to the customer", async () => {
     const { mockOrder } = await runStatusChange("pending_payment", "Processing");

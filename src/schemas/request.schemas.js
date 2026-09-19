@@ -563,6 +563,27 @@ const inspectionSubmitSchema = z.object({
     }))
     .max(30, "That is more photos than an inspection needs"),
   findings: z.string().trim().max(2000).optional(),
+  // What the inspector read off the device in their hand.
+  //
+  // This schema did not name it, and validateRequest replaces req.body
+  // wholesale — so even if the bench screen had posted an IMEI it was stripped
+  // before the controller saw it. The checklist has always asked staff to tick
+  // "IMEI / serial matches the order", and nothing compared the two. The Return
+  // Policy page tells customers that check happens.
+  //
+  // Both optional and neither required: a phone shows an IMEI, a MacBook shows
+  // a serial, and an accessory shows neither. The server decides whether it
+  // matched — `imeiVerified` on the model is never accepted from a client.
+  device: z
+    .object({
+      imei: z.string().trim().regex(/^\d{15}$/, "An IMEI is 15 digits").optional(),
+      serial: z
+        .string()
+        .trim()
+        .regex(/^[A-Za-z0-9]{6,20}$/, "That does not look like a serial number")
+        .optional(),
+    })
+    .optional(),
   // Staff may override the computed grade; the checklist still decides the
   // suggested outcome. The same scale the catalogue uses — A/B/C was the old
   // internal one and no longer exists anywhere else.
