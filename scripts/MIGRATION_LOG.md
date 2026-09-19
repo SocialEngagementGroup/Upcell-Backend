@@ -34,6 +34,8 @@ you meant to run.
 | 2026-09-19 | dev cleanup | `upcell_development` | 1 orphan order removed (exported first); `cosmeticGrade` unset on 956 |
 | 2026-09-19 | `backfill-product-photos.js --report --write` | `upcell_development` | 247 products given a colour-matched photo. 71 left alone — no photo of that colour exists |
 | 2026-09-19 | `backfill-product-photos.js --report --write` | **`upcell_production`** | 235 products given a colour-matched photo. Distinct photos 173 -> 180. Wrong-colour sharing 28 -> 2. CSV and undo file in `backups/` |
+| 2026-09-19 | `clear-wrong-colour-photos.js --write` | `upcell_development` | 51 products cleared — their photo was the wrong colour |
+| 2026-09-19 | `clear-wrong-colour-photos.js --write` | **`upcell_production`** | 51 products cleared: `hero-iphone15` across 19 (the homepage banner used as a product shot) and `ipad-air-m4` across 32. They now show the placeholder. Wrong-colour photos: 2 -> 0 |
 | 2026-09-19 | `migrate-order-items.js --apply` | **`upcell_production`** | All 10 orders moved off the legacy `line_items` shape. 10 clean, 0 flagged. Fixed a live bug: the guest order page read `order.items` with no fallback, so every guest saw "What you bought" empty and a blank total |
 
 ---
