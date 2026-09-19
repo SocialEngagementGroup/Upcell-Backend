@@ -34,6 +34,7 @@ you meant to run.
 | 2026-09-19 | dev cleanup | `upcell_development` | 1 orphan order removed (exported first); `cosmeticGrade` unset on 956 |
 | 2026-09-19 | `backfill-product-photos.js --report --write` | `upcell_development` | 247 products given a colour-matched photo. 71 left alone — no photo of that colour exists |
 | 2026-09-19 | `backfill-product-photos.js --report --write` | **`upcell_production`** | 235 products given a colour-matched photo. Distinct photos 173 -> 180. Wrong-colour sharing 28 -> 2. CSV and undo file in `backups/` |
+| 2026-09-19 | `migrate-order-items.js --apply` | **`upcell_production`** | All 10 orders moved off the legacy `line_items` shape. 10 clean, 0 flagged. Fixed a live bug: the guest order page read `order.items` with no fallback, so every guest saw "What you bought" empty and a blank total |
 
 ---
 
@@ -86,7 +87,9 @@ Nothing can fix that except a real photograph.
 | Script | Why |
 |---|---|
 | `migrate-condition-to-grade.js` | Maps the catalogue onto the returns scale so a customer can be shown one of three grades. That is the opposite of the Premium decision of 19 September 2026. `set-condition-premium.js` replaces it. The two are alternatives, not steps |
-| `update-product-images-from-manifest.js` | Stale. It writes `image`, not `imagePublicId`, and its matcher predates three fixes (generation ranges, the 16e suffix, the own-photo guard). `backfill-product-photos.js` replaces it |
+| `update-product-images-from-manifest.js` | Deleted 19 Sep. Wrote `image`, not `imagePublicId`, and its matcher predated three fixes. `backfill-product-photos.js` replaces it |
+| `rebuild-frontend-manifest.js` | Deleted 19 Sep. It rewrote `Frontend/src/data/productImageManifest.js`, which no longer exists — the manifest moved to `scripts/data/` as migration input |
+| `mark-generic-images.js` | Deleted 19 Sep. It wrote `imageIsGeneric`, which no code reads any more |
 | `backfill-product-photos.js --allow-colour-fallback` | The flag exists and should stay off. It lets the matcher assign a photo of the wrong colour when the right one does not exist — an iPhone 16e in Ultramarine was offered 16_E_Black.png. A customer seeing the wrong colour believes it is what they ordered |
 
 ---
